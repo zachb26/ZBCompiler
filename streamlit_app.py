@@ -26,7 +26,7 @@ DEFAULT_CONFIG = {
     "SMA_SHORT": 50,
     "SMA_LONG": 200,
     "PE_THRESHOLD_LOW": 15, 
-    "ROE_MIN": 0.15,
+    "ROE_MIN": 0.15, #gorp
     "VOLUME_THRESHOLD": 500000,
     "ATR_MULTIPLIER": 2.5,
     "REFRESH_HOURS": 24,
