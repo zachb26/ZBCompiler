@@ -1,0 +1,9 @@
+{
+    "DB_NAME": "stock_analysis.db",
+    "EXCEL_FILENAME": "Conservative_Stock_Analysis.xlsx",
+    "PE_THRESHOLD_LOW": 15.0,     // Only allow low P/E stocks
+    "ROE_MIN": 0.15,              // Require high 15%+ ROE
+    "VAR_THRESHOLD_HIGH": 0.25,   // Low risk tolerance (25% VaR)
+    "RSI_OVERBOUGHT": 70,         // Standard technical indicator
+    "RSI_OVERSOLD": 30
+}

@@ -1,0 +1,24 @@
+{
+    "RSI_OVERSOLD": 30,
+    "RSI_OVERBOUGHT": 70,
+    "SMA_SHORT": 50,
+    "SMA_LONG": 200,
+    "PE_THRESHOLD_LOW": 15,
+    "ROE_MIN": 0.15,
+    "VOLUME_THRESHOLD": 500000,
+    "ATR_MULTIPLIER": 2.5,
+    "REFRESH_HOURS": 24,
+    "VAR_CONFIDENCE": 0.95,
+    "DB_FILENAME": "stocks_data.db",
+    "EXCEL_FILENAME": "Stock_Analysis_Report.xlsx",
+    "SUMMARY_OUTPUT_COLS": [
+        "Ticker",
+        "Price",
+        "Verdict",
+        "Fund_Score",
+        "Risk_Level",
+        "Sector",
+        "VaR_95",
+        "Rel_Strength_SP500"
+    ]
+}

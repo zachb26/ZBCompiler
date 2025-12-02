@@ -1,0 +1,9 @@
+{
+    "DB_NAME": "stock_analysis.db",
+    "EXCEL_FILENAME": "Aggressive_Stock_Analysis.xlsx",
+    "PE_THRESHOLD_LOW": 25.0,     // Allow higher P/E stocks (growth)
+    "ROE_MIN": 0.08,              // Accept lower 8%+ ROE
+    "VAR_THRESHOLD_HIGH": 0.45,   // High risk tolerance (45% VaR)
+    "RSI_OVERBOUGHT": 75,         // Look for more extreme overbought/oversold
+    "RSI_OVERSOLD": 25
+}
