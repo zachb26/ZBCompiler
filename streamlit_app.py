@@ -307,7 +307,6 @@ class Backtester:
         total_trades = len([t for t in trades if t['Type'].startswith('Sell')])
         wins = len([t for t in trades if t['Type'].startswith('Sell') and t['Return'] > 0])
         win_rate = wins / total_trades if total_trades > 0 else 0
-        
         trade_df = pd.DataFrame(trades)
         
         return {

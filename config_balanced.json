@@ -1,5 +1,5 @@
 {
-    "RSI_OVERSOLD": 30,
+    "RSI_OVERSOLD": 45,
     "RSI_OVERBOUGHT": 70,
     "SMA_SHORT": 50,
     "SMA_LONG": 200,
