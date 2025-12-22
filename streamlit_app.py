@@ -221,7 +221,7 @@ class Backtester:
         if df is None or len(df) < 250:
             return None
 
-        # [Indicator calculations remain the same...]
+        # --- Indicator Calculations ---
         df['SMA_50'] = df['Close'].rolling(window=self.cfg['SMA_SHORT']).mean()
         df['SMA_200'] = df['Close'].rolling(window=self.cfg['SMA_LONG']).mean()
         
@@ -231,6 +231,7 @@ class Backtester:
         rs = gain / loss
         df['RSI'] = 100 - (100 / (1 + rs))
 
+        # Calculate ATR
         high_low = df['High'] - df['Low']
         high_close = np.abs(df['High'] - df['Close'].shift())
         low_close = np.abs(df['Low'] - df['Close'].shift())
@@ -238,40 +239,60 @@ class Backtester:
         true_range = np.max(ranges, axis=1)
         df['ATR'] = true_range.rolling(window=14).mean()
 
-        # Simulation Variables
+        # --- Simulation Variables ---
         in_position = False
         entry_price = 0
+        stop_loss = 0
         balance = 10000 
         shares = 0
         trades = []
 
-        # Iterate (Start after 200 days for SMA)
+        # Start loop after enough data for SMA200
         for i in range(200, len(df)):
             row = df.iloc[i]
+            prev_row = df.iloc[i-1] # Access previous day for "Hook" logic
             date = df.index[i]
             
-            buy_signal = (row['SMA_50'] > row['SMA_200']) and (row['RSI'] < 45) 
-            sell_signal = (row['RSI'] > 75) or (row['SMA_50'] < row['SMA_200'])
+            # --- STRATEGY LOGIC ---
+            
+            # 1. Trend Filter: Long-term trend must be UP
+            uptrend = row['SMA_50'] > row['SMA_200']
+            
+            # 2. Entry Signal: "Pullback with Hook"
+            # RSI is in 'dip' territory (e.g., < 50) BUT has ticked up since yesterday
+            rsi_dip = row['RSI'] < 55 # Slightly higher threshold to catch mild pullbacks
+            rsi_hook = row['RSI'] > prev_row['RSI'] # Momentum turning up
+            buy_signal = uptrend and rsi_dip and rsi_hook
+
+            # 3. Exit Signal: Trend Reversal only (Let winners run)
+            # We removed 'row['RSI'] > 75' to avoid selling early in strong trends
+            sell_signal = row['SMA_50'] < row['SMA_200']
 
             if not in_position and buy_signal:
                 in_position = True
                 entry_price = row['Close']
                 shares = balance / entry_price
                 balance = 0
+                # Set initial Trailing Stop
                 stop_loss = entry_price - (row['ATR'] * self.cfg['ATR_MULTIPLIER'])
                 trades.append({'Type': 'Buy', 'Date': date, 'Price': entry_price, 'Action': 'Entry'})
 
             elif in_position:
+                # Update Trailing Stop (Only move UP)
                 new_stop = row['Close'] - (row['ATR'] * self.cfg['ATR_MULTIPLIER'])
                 if new_stop > stop_loss:
                     stop_loss = new_stop
 
+                # CHECK EXITS
+                # Priority 1: Stop Loss Hit
                 if row['Low'] < stop_loss: 
                     final_price = stop_loss
                     balance = shares * final_price
                     in_position = False
                     ret = (final_price - entry_price)/entry_price
                     trades.append({'Type': 'Sell (Stop)', 'Date': date, 'Price': final_price, 'Return': ret, 'Action': 'Exit'})
+                
+                # Priority 2: Technical Exit Signal
                 elif sell_signal:
                     final_price = row['Close']
                     balance = shares * final_price
@@ -279,7 +300,7 @@ class Backtester:
                     ret = (final_price - entry_price)/entry_price
                     trades.append({'Type': 'Sell (Signal)', 'Date': date, 'Price': final_price, 'Return': ret, 'Action': 'Exit'})
         
-        # Compile results
+        # --- Compilation (Same as before) ---
         final_val = balance if not in_position else shares * df.iloc[-1]['Close']
         years = (df.index[-1] - df.index[200]).days / 365.25
         cagr = ((final_val / 10000) ** (1/years)) - 1 if years > 0 else 0
@@ -287,7 +308,6 @@ class Backtester:
         wins = len([t for t in trades if t['Type'].startswith('Sell') and t['Return'] > 0])
         win_rate = wins / total_trades if total_trades > 0 else 0
         
-        # Include price history and trade log for visualization
         trade_df = pd.DataFrame(trades)
         
         return {

@@ -1,0 +1,12 @@
+{
+    "RSI_OVERSOLD": 30,
+    "RSI_OVERBOUGHT": 70,
+    "SMA_SHORT": 50,
+    "SMA_LONG": 200,
+    "PE_THRESHOLD_LOW": 15,
+    "PE_THRESHOLD_HIGH": 50,
+    "PROFIT_MARGIN_MIN": 0.1,
+    "ROE_MIN": 0.15,
+    "DB_FILENAME": "stocks_data.db",
+    "EXCEL_FILENAME": "Stock_Analysis_Report.xlsx"
+}
