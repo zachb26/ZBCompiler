@@ -1,5 +1,7 @@
 yfinance
 pandas
 numpy
-scipy
 streamlit
+scipy
+plotly
+xlsxwriter
