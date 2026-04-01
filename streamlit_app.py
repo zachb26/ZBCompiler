@@ -1,6 +1,10 @@
 # -*- coding: utf-8 -*-
 import datetime
+import os
 import sqlite3
+import threading
+from contextlib import contextmanager
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -8,6 +12,9 @@ import streamlit as st
 import yfinance as yf
 
 DB_FILENAME = "stocks_data.db"
+APP_DIR = Path(__file__).resolve().parent
+CONFIGURED_DB_PATH = Path(os.environ.get("STOCKS_DB_PATH", DB_FILENAME)).expanduser()
+DB_PATH = CONFIGURED_DB_PATH if CONFIGURED_DB_PATH.is_absolute() else (APP_DIR / CONFIGURED_DB_PATH).resolve()
 TRADING_DAYS = 252
 DEFAULT_BENCHMARK_TICKER = "SPY"
 DEFAULT_PORTFOLIO_TICKERS = "AAPL, MSFT, NVDA, JNJ, XOM"
@@ -180,43 +187,75 @@ def score_to_sentiment(score):
 
 class DatabaseManager:
     def __init__(self, db_name):
-        self.conn = sqlite3.connect(db_name, check_same_thread=False)
-        self.cursor = self.conn.cursor()
+        self.db_path = Path(db_name)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._write_lock = threading.RLock()
         self.create_tables()
 
+    def _connect(self):
+        # Open a fresh connection per operation so each session sees other users' commits.
+        conn = sqlite3.connect(self.db_path, timeout=30, check_same_thread=False)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout = 30000")
+        conn.execute("PRAGMA synchronous = NORMAL")
+        return conn
+
+    @contextmanager
+    def _connection(self):
+        conn = self._connect()
+        try:
+            yield conn
+            conn.commit()
+        finally:
+            conn.close()
+
     def create_tables(self):
-        column_sql = ",\n                ".join(
-            f"{name} {definition}" for name, definition in ANALYSIS_COLUMNS.items()
-        )
-        self.conn.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS analysis (
-                {column_sql}
-            )
-            """
-        )
-        existing_columns = {
-            row[1] for row in self.conn.execute("PRAGMA table_info(analysis)").fetchall()
-        }
-        for name, definition in ANALYSIS_COLUMNS.items():
-            if name not in existing_columns:
-                self.conn.execute(f"ALTER TABLE analysis ADD COLUMN {name} {definition}")
-        self.conn.commit()
+        with self._write_lock:
+            with self._connection() as conn:
+                column_sql = ",\n                ".join(
+                    f"{name} {definition}" for name, definition in ANALYSIS_COLUMNS.items()
+                )
+                conn.execute(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS analysis (
+                        {column_sql}
+                    )
+                    """
+                )
+                existing_columns = {
+                    row[1] for row in conn.execute("PRAGMA table_info(analysis)").fetchall()
+                }
+                for name, definition in ANALYSIS_COLUMNS.items():
+                    if name not in existing_columns:
+                        conn.execute(f"ALTER TABLE analysis ADD COLUMN {name} {definition}")
 
     def save_analysis(self, data):
         keys = list(data.keys())
         placeholders = ", ".join(["?"] * len(keys))
         columns = ", ".join(keys)
-        sql = f"INSERT OR REPLACE INTO analysis ({columns}) VALUES ({placeholders})"
-        self.conn.execute(sql, list(data.values()))
-        self.conn.commit()
+        update_clause = ", ".join(
+            f"{key}=excluded.{key}" for key in keys if key != "Ticker"
+        )
+        sql = (
+            f"INSERT INTO analysis ({columns}) VALUES ({placeholders}) "
+            f"ON CONFLICT(Ticker) DO UPDATE SET {update_clause}"
+        )
+        with self._write_lock:
+            with self._connection() as conn:
+                conn.execute(sql, list(data.values()))
 
     def get_analysis(self, ticker):
-        return pd.read_sql_query(
-            "SELECT * FROM analysis WHERE Ticker=?",
-            self.conn,
-            params=(ticker,),
-        )
+        with self._connection() as conn:
+            return pd.read_sql_query(
+                "SELECT * FROM analysis WHERE Ticker=?",
+                conn,
+                params=(ticker,),
+            )
+
+
+@st.cache_resource
+def get_database_manager():
+    return DatabaseManager(DB_PATH)
 
 
 class StockAnalyst:
@@ -761,20 +800,9 @@ def render_frontier_chart(portfolio_cloud, frontier, cal, tangent, minimum_volat
 
 st.set_page_config(page_title="Stock Engine Pro", layout="wide", page_icon="SE")
 
-if "db" not in st.session_state:
-    st.session_state.db = DatabaseManager(DB_FILENAME)
-    st.session_state.analyst = StockAnalyst(st.session_state.db)
-    st.session_state.portfolio_analyst = PortfolioAnalyst(st.session_state.db)
-
-if "analyst" not in st.session_state:
-    st.session_state.analyst = StockAnalyst(st.session_state.db)
-
-if "portfolio_analyst" not in st.session_state:
-    st.session_state.portfolio_analyst = PortfolioAnalyst(st.session_state.db)
-
-db  = st.session_state.db
-bot = st.session_state.analyst
-portfolio_bot = st.session_state.portfolio_analyst
+db = get_database_manager()
+bot = StockAnalyst(db)
+portfolio_bot = PortfolioAnalyst(db)
 
 st.title("Stock Engine Pro")
 st.markdown("### Single-Stock Analysis and Portfolio Construction")
