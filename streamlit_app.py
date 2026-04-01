@@ -15,6 +15,7 @@ DB_FILENAME = "stocks_data.db"
 APP_DIR = Path(__file__).resolve().parent
 CONFIGURED_DB_PATH = Path(os.environ.get("STOCKS_DB_PATH", DB_FILENAME)).expanduser()
 DB_PATH = CONFIGURED_DB_PATH if CONFIGURED_DB_PATH.is_absolute() else (APP_DIR / CONFIGURED_DB_PATH).resolve()
+BUILD_LABEL = datetime.datetime.fromtimestamp(Path(__file__).stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
 TRADING_DAYS = 252
 DEFAULT_BENCHMARK_TICKER = "SPY"
 DEFAULT_PORTFOLIO_TICKERS = "AAPL, MSFT, NVDA, JNJ, XOM"
@@ -806,6 +807,7 @@ portfolio_bot = PortfolioAnalyst(db)
 
 st.title("Stock Engine Pro")
 st.markdown("### Single-Stock Analysis and Portfolio Construction")
+st.caption(f"Build: {BUILD_LABEL} | Source: {Path(__file__).name}")
 
 stock_tab, portfolio_tab = st.tabs(["Stock Analysis", "Portfolio"])
 
