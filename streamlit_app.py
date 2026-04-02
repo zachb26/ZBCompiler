@@ -8,6 +8,7 @@ import sqlite3
 import threading
 import time
 import copy
+import tempfile
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -33,6 +34,20 @@ FETCH_CACHE = {
     "batch_history": {},
 }
 FETCH_CACHE_LOCK = threading.RLock()
+AUTO_REFRESH_STATUS_UPDATE_INTERVAL = 25
+STARTUP_REFRESH_LOCK = threading.RLock()
+STARTUP_REFRESH_STATE = {
+    "started": False,
+    "running": False,
+    "complete": False,
+    "total": 0,
+    "processed": 0,
+    "updated": 0,
+    "failed": 0,
+    "error": None,
+    "started_at": None,
+    "finished_at": None,
+}
 
 SECTOR_BENCHMARKS = {
     "Technology":             {"PE": 30, "PS": 6.0, "PB": 8.0, "EV_EBITDA": 20},
@@ -220,6 +235,18 @@ PRESET_DESCRIPTIONS = {
 CHANGELOG_ENTRIES = [
     {
         "Date": "2026-04-02",
+        "Area": "Library",
+        "Update": "Added database and CSV download actions so the shared research library can be exported, reviewed, versioned, and seeded into the repo.",
+        "Impact": "You can now snapshot the research store and publish a populated seed library more easily.",
+    },
+    {
+        "Date": "2026-04-02",
+        "Area": "Startup Refresh",
+        "Update": "The app now refreshes every saved ticker automatically on launch and shows a bottom-right compiling badge while the refresh runs.",
+        "Impact": "Shared research opens with a live refresh pass instead of relying only on stale cached rows.",
+    },
+    {
+        "Date": "2026-04-02",
         "Area": "Options UX",
         "Update": "Added a dedicated Changelog tab, expanded Methodology explanations, and attached ? help text to every model control.",
         "Impact": "The assumption set is easier to understand before changing live research behavior.",
@@ -370,6 +397,202 @@ def format_age(value):
 
     total_days = total_hours // 24
     return f"{total_days}d ago"
+
+
+def build_library_csv_bytes(df):
+    export_df = df.copy()
+    export_df = export_df.drop(columns=["Last_Updated_Parsed"], errors="ignore")
+    return export_df.to_csv(index=False).encode("utf-8")
+
+
+def build_database_download_bytes(db_path):
+    source_path = Path(db_path)
+    if not source_path.exists():
+        return b""
+
+    source_conn = sqlite3.connect(source_path, timeout=30, check_same_thread=False)
+    temp_path = None
+    try:
+        fd, temp_name = tempfile.mkstemp(suffix=".db")
+        os.close(fd)
+        temp_path = Path(temp_name)
+        backup_conn = sqlite3.connect(temp_path, timeout=30, check_same_thread=False)
+        try:
+            source_conn.backup(backup_conn)
+        finally:
+            backup_conn.close()
+        return temp_path.read_bytes()
+    finally:
+        source_conn.close()
+        if temp_path is not None and temp_path.exists():
+            temp_path.unlink()
+
+
+def get_startup_refresh_snapshot():
+    with STARTUP_REFRESH_LOCK:
+        return STARTUP_REFRESH_STATE.copy()
+
+
+def render_compiling_badge(placeholder, message):
+    if placeholder is None:
+        return
+    safe_message = (
+        str(message)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace("\n", "<br>")
+    )
+    placeholder.markdown(
+        f"""
+        <style>
+            .compile-badge {{
+                position: fixed;
+                right: 1rem;
+                bottom: 1rem;
+                z-index: 99999;
+                padding: 0.8rem 1rem;
+                border-radius: 14px;
+                background: rgba(15, 23, 42, 0.94);
+                color: #f8fafc;
+                border: 1px solid rgba(148, 163, 184, 0.35);
+                box-shadow: 0 16px 36px rgba(15, 23, 42, 0.24);
+                font-size: 0.92rem;
+                line-height: 1.35;
+                max-width: 320px;
+            }}
+        </style>
+        <div class="compile-badge">{safe_message}</div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def format_startup_refresh_message(state):
+    message = "Compiling... (May take a while.)"
+    if state.get("running"):
+        total = int(state.get("total", 0))
+        processed = int(state.get("processed", 0))
+        if total > 0:
+            message += f"\nRefreshing saved analyses {processed}/{total}"
+        else:
+            message += "\nRefreshing saved analyses"
+    return message
+
+
+def refresh_saved_analyses_on_launch(db, settings, badge_placeholder=None):
+    while True:
+        with STARTUP_REFRESH_LOCK:
+            if STARTUP_REFRESH_STATE["complete"]:
+                return STARTUP_REFRESH_STATE.copy()
+            if not STARTUP_REFRESH_STATE["started"]:
+                STARTUP_REFRESH_STATE.update(
+                    {
+                        "started": True,
+                        "running": True,
+                        "complete": False,
+                        "total": 0,
+                        "processed": 0,
+                        "updated": 0,
+                        "failed": 0,
+                        "error": None,
+                        "started_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "finished_at": None,
+                    }
+                )
+                is_leader = True
+            else:
+                is_leader = False
+
+        if is_leader:
+            try:
+                saved_rows = db.get_all_analyses()
+                if saved_rows.empty or "Ticker" not in saved_rows.columns:
+                    with STARTUP_REFRESH_LOCK:
+                        STARTUP_REFRESH_STATE.update(
+                            {
+                                "running": False,
+                                "complete": True,
+                                "total": 0,
+                                "processed": 0,
+                                "updated": 0,
+                                "failed": 0,
+                                "finished_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            }
+                        )
+                    return get_startup_refresh_snapshot()
+
+                tickers = (
+                    saved_rows["Ticker"]
+                    .dropna()
+                    .astype(str)
+                    .str.strip()
+                    .str.upper()
+                    .drop_duplicates()
+                    .tolist()
+                )
+                analyst = StockAnalyst(db)
+                total = len(tickers)
+
+                with STARTUP_REFRESH_LOCK:
+                    STARTUP_REFRESH_STATE["total"] = total
+
+                render_compiling_badge(badge_placeholder, format_startup_refresh_message(get_startup_refresh_snapshot()))
+
+                updated_count = 0
+                failed_count = 0
+                for idx, ticker in enumerate(tickers, start=1):
+                    try:
+                        record = analyst.analyze(ticker, settings=settings, persist=True)
+                    except Exception as exc:
+                        record = None
+                        analyst.last_error = summarize_fetch_error(exc)
+
+                    if record is None:
+                        failed_count += 1
+                    else:
+                        updated_count += 1
+
+                    if idx == 1 or idx % AUTO_REFRESH_STATUS_UPDATE_INTERVAL == 0 or idx == total:
+                        with STARTUP_REFRESH_LOCK:
+                            STARTUP_REFRESH_STATE["processed"] = idx
+                            STARTUP_REFRESH_STATE["updated"] = updated_count
+                            STARTUP_REFRESH_STATE["failed"] = failed_count
+                        render_compiling_badge(
+                            badge_placeholder,
+                            format_startup_refresh_message(get_startup_refresh_snapshot()),
+                        )
+
+                with STARTUP_REFRESH_LOCK:
+                    STARTUP_REFRESH_STATE.update(
+                        {
+                            "running": False,
+                            "complete": True,
+                            "processed": total,
+                            "updated": updated_count,
+                            "failed": failed_count,
+                            "finished_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        }
+                    )
+                return get_startup_refresh_snapshot()
+            except Exception as exc:
+                with STARTUP_REFRESH_LOCK:
+                    STARTUP_REFRESH_STATE.update(
+                        {
+                            "running": False,
+                            "complete": True,
+                            "error": summarize_fetch_error(exc),
+                            "finished_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        }
+                    )
+                return get_startup_refresh_snapshot()
+
+        snapshot = get_startup_refresh_snapshot()
+        if snapshot["running"]:
+            render_compiling_badge(badge_placeholder, format_startup_refresh_message(snapshot))
+            time.sleep(0.25)
+            continue
+        return snapshot
 
 
 def summarize_fetch_error(exc):
@@ -2480,6 +2703,10 @@ st.title("Stock Engine Pro")
 st.markdown("### Single-Stock Analysis and Portfolio Construction")
 st.caption(f"Build: {BUILD_LABEL} | Source: {Path(__file__).name}")
 
+startup_badge = st.empty()
+startup_refresh_summary = refresh_saved_analyses_on_launch(db, model_settings, badge_placeholder=startup_badge)
+startup_badge.empty()
+
 sensitivity_default_ticker = st.session_state.get("sensitivity_last_ticker") or st.session_state.get("single_ticker", "")
 backtest_default_ticker = st.session_state.get("backtest_last_ticker") or st.session_state.get("single_ticker", "")
 
@@ -3076,9 +3303,41 @@ with backtest_tab:
 with library_tab:
     st.subheader("Research Library")
     st.caption("Browse everything saved in the shared database so the research process stays visible across users and sessions.")
+    if startup_refresh_summary.get("error"):
+        st.warning(f"Launch refresh hit an issue: {startup_refresh_summary['error']}")
+    elif startup_refresh_summary.get("total", 0) > 0:
+        st.caption(
+            f"Launch refresh updated {startup_refresh_summary.get('updated', 0)} of "
+            f"{startup_refresh_summary.get('total', 0)} saved analyses"
+            + (
+                f" and skipped {startup_refresh_summary.get('failed', 0)} tickers."
+                if startup_refresh_summary.get("failed", 0)
+                else "."
+            )
+        )
 
     library_df = prepare_analysis_dataframe(db.get_all_analyses())
     if library_df.empty:
+        database_bytes = build_database_download_bytes(DB_PATH)
+        export_col_1, export_col_2 = st.columns(2)
+        with export_col_1:
+            st.download_button(
+                "Download Database",
+                data=database_bytes,
+                file_name=DB_PATH.name,
+                mime="application/x-sqlite3",
+                disabled=not bool(database_bytes),
+                use_container_width=True,
+            )
+        with export_col_2:
+            st.download_button(
+                "Download Library CSV",
+                data=b"",
+                file_name="stock_engine_library.csv",
+                mime="text/csv",
+                disabled=True,
+                use_container_width=True,
+            )
         st.info("The library is empty right now. Run stock analyses or a comparison to populate the shared database.")
     else:
         sector_options = sorted(sector for sector in library_df["Sector"].dropna().unique())
@@ -3106,6 +3365,29 @@ with library_tab:
                 filtered_library["Last_Updated_Parsed"].notna()
                 & (filtered_library["Last_Updated_Parsed"] >= fresh_cutoff)
             ]
+
+        export_frame = filtered_library if not filtered_library.empty else library_df
+        database_bytes = build_database_download_bytes(DB_PATH)
+        library_csv_bytes = build_library_csv_bytes(export_frame)
+        export_col_1, export_col_2 = st.columns(2)
+        with export_col_1:
+            st.download_button(
+                "Download Database",
+                data=database_bytes,
+                file_name=DB_PATH.name,
+                mime="application/x-sqlite3",
+                disabled=not bool(database_bytes),
+                use_container_width=True,
+            )
+        with export_col_2:
+            st.download_button(
+                "Download Library CSV",
+                data=library_csv_bytes,
+                file_name="stock_engine_library.csv",
+                mime="text/csv",
+                disabled=export_frame.empty,
+                use_container_width=True,
+            )
 
         if filtered_library.empty:
             st.warning("No records match the current library filters.")
