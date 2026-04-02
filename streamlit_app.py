@@ -36,6 +36,9 @@ FETCH_CACHE = {
 }
 FETCH_CACHE_LOCK = threading.RLock()
 AUTO_REFRESH_STATUS_UPDATE_INTERVAL = 25
+AUTO_REFRESH_STALE_AFTER_HOURS = 12
+AUTO_REFRESH_FAILURE_STREAK_LIMIT = 6
+AUTO_REFRESH_REQUEST_DELAY_SECONDS = 0.2
 STARTUP_REFRESH_LOCK = threading.RLock()
 STARTUP_REFRESH_STATE = {
     "started": False,
@@ -475,9 +478,9 @@ def format_startup_refresh_message(state):
         total = int(state.get("total", 0))
         processed = int(state.get("processed", 0))
         if total > 0:
-            message += f"\nRefreshing saved analyses {processed}/{total}"
+            message += f"\nRefreshing stale analyses {processed}/{total}"
         else:
-            message += "\nRefreshing saved analyses"
+            message += "\nRefreshing stale analyses"
     return message
 
 
@@ -523,8 +526,18 @@ def refresh_saved_analyses_on_launch(db, settings, badge_placeholder=None):
                         )
                     return get_startup_refresh_snapshot()
 
+                refresh_candidates = saved_rows.copy()
+                if "Last_Updated" in refresh_candidates.columns:
+                    refresh_candidates["Last_Updated_Parsed"] = refresh_candidates["Last_Updated"].map(parse_last_updated)
+                    stale_cutoff = datetime.datetime.now() - datetime.timedelta(hours=AUTO_REFRESH_STALE_AFTER_HOURS)
+                    refresh_candidates = refresh_candidates[
+                        refresh_candidates["Last_Updated_Parsed"].isna()
+                        | (refresh_candidates["Last_Updated_Parsed"] < stale_cutoff)
+                    ]
+                    refresh_candidates = refresh_candidates.sort_values("Last_Updated_Parsed", ascending=True, na_position="first")
+
                 tickers = (
-                    saved_rows["Ticker"]
+                    refresh_candidates["Ticker"]
                     .dropna()
                     .astype(str)
                     .str.strip()
@@ -542,6 +555,7 @@ def refresh_saved_analyses_on_launch(db, settings, badge_placeholder=None):
 
                 updated_count = 0
                 failed_count = 0
+                failure_streak = 0
                 for idx, ticker in enumerate(tickers, start=1):
                     try:
                         record = analyst.analyze(ticker, settings=settings, persist=True)
@@ -551,8 +565,10 @@ def refresh_saved_analyses_on_launch(db, settings, badge_placeholder=None):
 
                     if record is None:
                         failed_count += 1
+                        failure_streak += 1
                     else:
                         updated_count += 1
+                        failure_streak = 0
 
                     if idx == 1 or idx % AUTO_REFRESH_STATUS_UPDATE_INTERVAL == 0 or idx == total:
                         with STARTUP_REFRESH_LOCK:
@@ -563,6 +579,17 @@ def refresh_saved_analyses_on_launch(db, settings, badge_placeholder=None):
                             badge_placeholder,
                             format_startup_refresh_message(get_startup_refresh_snapshot()),
                         )
+                    if failure_streak >= AUTO_REFRESH_FAILURE_STREAK_LIMIT:
+                        with STARTUP_REFRESH_LOCK:
+                            STARTUP_REFRESH_STATE["error"] = (
+                                "Launch refresh paused after repeated upstream fetch failures. "
+                                "Manual analysis still works and saved rows remain available."
+                            )
+                            STARTUP_REFRESH_STATE["processed"] = idx
+                            STARTUP_REFRESH_STATE["updated"] = updated_count
+                            STARTUP_REFRESH_STATE["failed"] = failed_count
+                        break
+                    time.sleep(AUTO_REFRESH_REQUEST_DELAY_SECONDS)
 
                 with STARTUP_REFRESH_LOCK:
                     STARTUP_REFRESH_STATE.update(
@@ -691,6 +718,59 @@ def normalize_news_payload(news):
     return normalized
 
 
+def build_info_fallback_from_saved_analysis(saved_row):
+    if saved_row is None or isinstance(saved_row, pd.DataFrame) and saved_row.empty:
+        return {}
+
+    row = saved_row.iloc[0] if isinstance(saved_row, pd.DataFrame) else saved_row
+
+    fallback_map = {
+        "sector": row.get("Sector"),
+        "trailingPE": row.get("PE_Ratio"),
+        "forwardPE": row.get("Forward_PE"),
+        "pegRatio": row.get("PEG_Ratio"),
+        "priceToSalesTrailing12Months": row.get("PS_Ratio"),
+        "priceToBook": row.get("PB_Ratio"),
+        "enterpriseToEbitda": row.get("EV_EBITDA"),
+        "returnOnEquity": row.get("ROE"),
+        "profitMargins": row.get("Profit_Margins"),
+        "debtToEquity": row.get("Debt_to_Equity"),
+        "revenueGrowth": row.get("Revenue_Growth"),
+        "currentRatio": row.get("Current_Ratio"),
+        "targetMeanPrice": row.get("Target_Mean_Price"),
+        "recommendationKey": row.get("Recommendation_Key"),
+        "numberOfAnalystOpinions": row.get("Analyst_Opinions"),
+    }
+    cleaned = {}
+    for key, value in fallback_map.items():
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        cleaned[key] = value
+    return cleaned
+
+
+def fetch_batch_history_via_individual_tickers(tickers, period):
+    close_frames = []
+    failure_messages = []
+
+    for ticker in tickers:
+        hist, error = fetch_ticker_history_with_retry(ticker, period, attempts=2)
+        if hist is None or hist.empty or "Close" not in hist.columns:
+            if error:
+                failure_messages.append(f"{ticker}: {error}")
+            continue
+        close_frames.append(hist["Close"].rename(ticker))
+        time.sleep(AUTO_REFRESH_REQUEST_DELAY_SECONDS)
+
+    if not close_frames:
+        return pd.DataFrame(), " | ".join(failure_messages[:4]) if failure_messages else None
+
+    combined = pd.concat(close_frames, axis=1, join="outer").sort_index()
+    return combined, None
+
+
 def fetch_ticker_history_with_retry(ticker, period, attempts=3):
     cache_key = (ticker.upper(), period)
     cached_history = get_cached_fetch_payload("ticker_history", cache_key)
@@ -701,6 +781,17 @@ def fetch_ticker_history_with_retry(ticker, period, attempts=3):
     for attempt in range(attempts):
         try:
             hist = normalize_history_frame(yf.Ticker(ticker).history(period=period, auto_adjust=True))
+            if not hist.empty:
+                set_cached_fetch_payload("ticker_history", cache_key, hist)
+                return hist, None
+            download_fallback = yf.download(
+                ticker.upper(),
+                period=period,
+                auto_adjust=True,
+                progress=False,
+                threads=False,
+            )
+            hist = normalize_history_frame(download_fallback)
             if not hist.empty:
                 set_cached_fetch_payload("ticker_history", cache_key, hist)
                 return hist, None
@@ -746,6 +837,13 @@ def fetch_batch_history_with_retry(tickers, period, attempts=3):
         if attempt < attempts - 1:
             time.sleep(0.5 * (attempt + 1))
 
+    individual_history, fallback_error = fetch_batch_history_via_individual_tickers(normalized_tickers, period)
+    if individual_history is not None and not individual_history.empty:
+        set_cached_fetch_payload("batch_history", cache_key, individual_history)
+        return individual_history.copy(), None
+    if fallback_error:
+        last_error = fallback_error
+
     stale_history = get_cached_fetch_payload(
         "batch_history",
         cache_key,
@@ -763,13 +861,17 @@ def fetch_ticker_info_with_retry(ticker, attempts=3):
         return cached_info, None
 
     last_error = None
+    ticker_handle = yf.Ticker(ticker)
     for attempt in range(attempts):
         try:
-            ticker_handle = yf.Ticker(ticker)
             info = normalize_info_payload(ticker_handle.info or {})
             if info:
                 set_cached_fetch_payload("ticker_info", cache_key, info)
                 return info, None
+            alt_info = normalize_info_payload(getattr(ticker_handle, "get_info", lambda: {})() or {})
+            if alt_info:
+                set_cached_fetch_payload("ticker_info", cache_key, alt_info)
+                return alt_info, None
             last_error = f"Yahoo returned no company profile data for {ticker}."
         except Exception as exc:
             last_error = summarize_fetch_error(exc)
@@ -1944,8 +2046,23 @@ class StockAnalyst:
             self.last_error = hist_error or f"Unable to load price history for {ticker}."
             return None, {}, []
 
-        info, _ = fetch_ticker_info_with_retry(ticker)
-        news, _ = fetch_ticker_news_with_retry(ticker)
+        info, info_error = fetch_ticker_info_with_retry(ticker)
+        news, news_error = fetch_ticker_news_with_retry(ticker)
+
+        if not info:
+            saved = self.db.get_analysis(ticker)
+            if not saved.empty:
+                info = build_info_fallback_from_saved_analysis(saved.iloc[0])
+                if info:
+                    if info_error:
+                        self.last_error = f"Live profile data was unavailable for {ticker}; reused saved fundamentals."
+                elif info_error:
+                    self.last_error = info_error
+            elif info_error:
+                self.last_error = info_error
+
+        if not news and news_error and self.last_error is None:
+            self.last_error = news_error
 
         return hist, info, news
 
@@ -2357,6 +2474,13 @@ class StockAnalyst:
             self.last_error = (
                 f"Unable to build an analysis for {ticker}. Yahoo returned incomplete or unusable market data."
             )
+        if record is None and persist:
+            existing = self.db.get_analysis(ticker)
+            if not existing.empty:
+                self.last_error = (
+                    f"Live fetch failed for {ticker}; showing the most recent saved analysis instead."
+                )
+                return existing.iloc[0].to_dict()
         if record and persist:
             self.db.save_analysis(record)
         return record
@@ -2385,6 +2509,8 @@ class PortfolioAnalyst:
             elif "Close" in raw.columns:
                 close_prices = raw[["Close"]].copy()
                 close_prices.columns = [download_list[0]]
+            elif set(download_list).issubset(set(raw.columns)):
+                close_prices = raw.copy()
             else:
                 self.last_error = "Downloaded portfolio data did not include a Close column."
                 return None, None
@@ -2742,9 +2868,22 @@ st.title("Stock Engine Pro")
 st.markdown("### Single-Stock Analysis and Portfolio Construction")
 st.caption(f"Build: {BUILD_LABEL} | Source: {Path(__file__).name}")
 
-startup_badge = st.empty()
-startup_refresh_summary = refresh_saved_analyses_on_launch(db, model_settings, badge_placeholder=startup_badge)
-startup_badge.empty()
+startup_refresh_summary = {
+    "started": False,
+    "running": False,
+    "complete": False,
+    "total": 0,
+    "processed": 0,
+    "updated": 0,
+    "failed": 0,
+    "error": None,
+    "started_at": None,
+    "finished_at": None,
+}
+if os.environ.get("STOCK_ENGINE_SKIP_STARTUP_REFRESH") != "1":
+    startup_badge = st.empty()
+    startup_refresh_summary = refresh_saved_analyses_on_launch(db, model_settings, badge_placeholder=startup_badge)
+    startup_badge.empty()
 
 sensitivity_default_ticker = st.session_state.get("sensitivity_last_ticker") or st.session_state.get("single_ticker", "")
 backtest_default_ticker = st.session_state.get("backtest_last_ticker") or st.session_state.get("single_ticker", "")
@@ -3347,7 +3486,7 @@ with library_tab:
     elif startup_refresh_summary.get("total", 0) > 0:
         st.caption(
             f"Launch refresh updated {startup_refresh_summary.get('updated', 0)} of "
-            f"{startup_refresh_summary.get('total', 0)} saved analyses"
+            f"{startup_refresh_summary.get('total', 0)} stale saved analyses"
             + (
                 f" and skipped {startup_refresh_summary.get('failed', 0)} tickers."
                 if startup_refresh_summary.get("failed", 0)
