@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -266,6 +267,53 @@ def format_age(value):
 
     total_days = total_hours // 24
     return f"{total_days}d ago"
+
+
+def summarize_fetch_error(exc):
+    if exc is None:
+        return "Unknown upstream fetch error."
+    message = str(exc).strip() or exc.__class__.__name__
+    message = " ".join(message.split())
+    return message[:220]
+
+
+def fetch_ticker_history_with_retry(ticker, period, attempts=3):
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            hist = yf.Ticker(ticker).history(period=period)
+            if hist is not None and not hist.empty and "Close" in hist.columns:
+                return hist, None
+            if hist is not None and not hist.empty:
+                last_error = f"Yahoo returned history for {ticker}, but it did not include a Close column."
+            else:
+                last_error = f"Yahoo returned no {period} price history for {ticker}."
+        except Exception as exc:
+            last_error = summarize_fetch_error(exc)
+        if attempt < attempts - 1:
+            time.sleep(0.5 * (attempt + 1))
+    return pd.DataFrame(), last_error
+
+
+def fetch_batch_history_with_retry(tickers, period, attempts=3):
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            raw = yf.download(
+                tickers,
+                period=period,
+                auto_adjust=True,
+                progress=False,
+                threads=False,
+            )
+            if raw is not None and not raw.empty:
+                return raw, None
+            last_error = "Yahoo returned no portfolio price history for the selected basket."
+        except Exception as exc:
+            last_error = summarize_fetch_error(exc)
+        if attempt < attempts - 1:
+            time.sleep(0.5 * (attempt + 1))
+    return pd.DataFrame(), last_error
 
 
 def safe_divide(numerator, denominator):
@@ -614,6 +662,7 @@ def prepare_analysis_dataframe(df, settings=None):
 def collect_analysis_rows(analyst, db, tickers, refresh_live=False):
     rows = []
     failed = []
+    failure_reasons = {}
     refreshed = []
     cached = []
 
@@ -623,6 +672,7 @@ def collect_analysis_rows(analyst, db, tickers, refresh_live=False):
             record = analyst.analyze(ticker)
             if record is None:
                 failed.append(ticker)
+                failure_reasons[ticker] = analyst.last_error or "No usable market data was returned for this ticker."
                 continue
             rows.append(record)
             refreshed.append(ticker)
@@ -630,7 +680,7 @@ def collect_analysis_rows(analyst, db, tickers, refresh_live=False):
             rows.append(existing.iloc[0].to_dict())
             cached.append(ticker)
 
-    return prepare_analysis_dataframe(pd.DataFrame(rows)), failed, refreshed, cached
+    return prepare_analysis_dataframe(pd.DataFrame(rows)), failed, failure_reasons, refreshed, cached
 
 
 def build_sensitivity_scenarios(base_settings):
@@ -885,16 +935,33 @@ def get_database_manager():
 class StockAnalyst:
     def __init__(self, db: DatabaseManager):
         self.db = db
+        self.last_error = None
 
     def get_data(self, ticker):
+        self.last_error = None
+        hist, hist_error = fetch_ticker_history_with_retry(ticker, period="1y")
+        if hist is None or hist.empty:
+            self.last_error = hist_error or f"Unable to load price history for {ticker}."
+            return None, {}, []
+
+        info = {}
+        for attempt in range(2):
+            try:
+                info = yf.Ticker(ticker).info or {}
+                if info:
+                    break
+            except Exception:
+                info = {}
+            if attempt < 1:
+                time.sleep(0.35)
+
+        news = []
         try:
-            stock = yf.Ticker(ticker)
-            hist = stock.history(period="1y")
-            info = stock.info
-            news = getattr(stock, "news", []) or []
-            return hist, info, news
+            news = getattr(yf.Ticker(ticker), "news", []) or []
         except Exception:
-            return None, None, []
+            news = []
+
+        return hist, info, news
 
     def analyze_sentiment(self, info, news, price, settings=None):
         settings = get_model_settings() if settings is None else settings
@@ -942,7 +1009,9 @@ class StockAnalyst:
     def build_record_from_market_data(self, ticker, hist, info, news, settings=None):
         settings = get_model_settings() if settings is None else settings
         ticker = ticker.strip().upper()
-        if hist is None or hist.empty or not info:
+        info = info or {}
+        news = news or []
+        if hist is None or hist.empty or "Close" not in hist.columns:
             return None
 
         delta = hist["Close"].diff()
@@ -1128,6 +1197,7 @@ class StockAnalyst:
     def analyze(self, ticker, settings=None, persist=True, preloaded=None):
         active_settings = get_model_settings() if settings is None else settings
         ticker = ticker.strip().upper()
+        self.last_error = None
         if preloaded is None:
             hist, info, news = self.get_data(ticker)
         else:
@@ -1140,6 +1210,10 @@ class StockAnalyst:
             news,
             settings=active_settings,
         )
+        if record is None and self.last_error is None:
+            self.last_error = (
+                f"Unable to build an analysis for {ticker}. Yahoo returned incomplete or unusable market data."
+            )
         if record and persist:
             self.db.save_analysis(record)
         return record
@@ -1148,27 +1222,56 @@ class StockAnalyst:
 class PortfolioAnalyst:
     def __init__(self, db):
         self.db = db
+        self.last_error = None
 
     def get_price_history(self, tickers, benchmark_ticker, period):
         download_list = list(dict.fromkeys(tickers + [benchmark_ticker]))
-        raw = yf.download(download_list, period=period, auto_adjust=True, progress=False)
-        if raw.empty:
+        raw, download_error = fetch_batch_history_with_retry(download_list, period=period)
+        if raw is None or raw.empty:
+            self.last_error = download_error or "Unable to download portfolio price history."
             return None, None
 
         if isinstance(raw.columns, pd.MultiIndex):
+            if "Close" not in raw.columns.get_level_values(0):
+                self.last_error = "Downloaded portfolio data did not include close prices."
+                return None, None
             close_prices = raw["Close"].copy()
         else:
-            close_prices = raw.to_frame(name=download_list[0]) if isinstance(raw, pd.Series) else raw[["Close"]].copy()
-            if "Close" in close_prices.columns:
+            if isinstance(raw, pd.Series):
+                close_prices = raw.to_frame(name=download_list[0])
+            elif "Close" in raw.columns:
+                close_prices = raw[["Close"]].copy()
                 close_prices.columns = [download_list[0]]
+            else:
+                self.last_error = "Downloaded portfolio data did not include a Close column."
+                return None, None
 
-        available_assets = [ticker for ticker in tickers if ticker in close_prices.columns]
-        if benchmark_ticker not in close_prices.columns or len(available_assets) < 2:
+        if isinstance(close_prices, pd.Series):
+            close_prices = close_prices.to_frame(name=download_list[0])
+        close_prices = close_prices.sort_index().ffill(limit=3)
+
+        available_assets = [
+            ticker for ticker in tickers
+            if ticker in close_prices.columns and close_prices[ticker].dropna().shape[0] >= 30
+        ]
+        missing_assets = [ticker for ticker in tickers if ticker not in available_assets]
+        if benchmark_ticker not in close_prices.columns or close_prices[benchmark_ticker].dropna().shape[0] < 30:
+            self.last_error = f"The benchmark {benchmark_ticker} does not have enough usable history for {period}."
+            return None, None
+        if len(available_assets) < 2:
+            missing_text = ", ".join(missing_assets) if missing_assets else "the selected tickers"
+            self.last_error = (
+                f"Need at least two tickers with usable {period} history. Missing or too short: {missing_text}."
+            )
             return None, None
 
         combined_columns = list(dict.fromkeys(available_assets + [benchmark_ticker]))
         aligned_prices = close_prices[combined_columns].dropna()
         if aligned_prices.empty or len(aligned_prices) < 30:
+            self.last_error = (
+                "The selected names do not share enough overlapping history for this lookback window. "
+                "Try a shorter period or remove newer tickers."
+            )
             return None, None
 
         return aligned_prices[available_assets], aligned_prices[benchmark_ticker]
@@ -1339,60 +1442,72 @@ class PortfolioAnalyst:
         return notes, effective_names
 
     def analyze_portfolio(self, tickers, benchmark_ticker, period, risk_free_rate, max_weight, simulations):
+        self.last_error = None
         settings = get_model_settings()
         trading_days = settings["trading_days_per_year"]
         if len(tickers) * max_weight < 1:
+            self.last_error = "The max single-stock weight is too low for the number of requested names."
             return None
 
-        asset_prices, benchmark_prices = self.get_price_history(tickers, benchmark_ticker, period)
-        if asset_prices is None or benchmark_prices is None:
+        try:
+            asset_prices, benchmark_prices = self.get_price_history(tickers, benchmark_ticker, period)
+            if asset_prices is None or benchmark_prices is None:
+                return None
+
+            asset_returns = asset_prices.pct_change().dropna()
+            benchmark_returns = benchmark_prices.pct_change().dropna()
+            common_index = asset_returns.index.intersection(benchmark_returns.index)
+            asset_returns = asset_returns.loc[common_index]
+            benchmark_returns = benchmark_returns.loc[common_index]
+            if asset_returns.empty or len(asset_returns.columns) < 2:
+                self.last_error = (
+                    "The selected basket did not produce enough overlapping return history to build a portfolio recommendation."
+                )
+                return None
+
+            asset_metrics = self.calculate_asset_metrics(asset_returns, benchmark_returns, risk_free_rate, trading_days)
+            portfolio_df, frontier, tangent, minimum_volatility, cal = self.simulate_portfolios(
+                asset_returns,
+                benchmark_returns,
+                risk_free_rate,
+                max_weight,
+                simulations,
+                trading_days,
+            )
+            if portfolio_df is None:
+                self.last_error = (
+                    "Portfolio simulation could not find enough valid portfolios. Try fewer tickers, a shorter window, or a higher max weight."
+                )
+                return None
+
+            valid_tickers = list(asset_returns.columns)
+            metadata = self.get_asset_metadata(valid_tickers)
+            recommendations = self.build_recommendations(valid_tickers, asset_metrics, metadata, tangent)
+            sector_exposure = (
+                recommendations.groupby("Sector", dropna=False)["Recommended Weight"]
+                .sum()
+                .reset_index()
+                .sort_values("Recommended Weight", ascending=False)
+            )
+            notes, effective_names = self.build_portfolio_notes(recommendations, sector_exposure, tangent, max_weight)
+
+            return {
+                "asset_metrics": asset_metrics,
+                "portfolio_cloud": portfolio_df,
+                "frontier": frontier,
+                "tangent": tangent,
+                "minimum_volatility": minimum_volatility,
+                "cal": cal,
+                "recommendations": recommendations,
+                "sector_exposure": sector_exposure,
+                "notes": notes,
+                "effective_names": effective_names,
+                "benchmark": benchmark_ticker,
+                "period": period,
+            }
+        except Exception as exc:
+            self.last_error = f"Portfolio analysis hit an upstream or data-shape error: {summarize_fetch_error(exc)}"
             return None
-
-        asset_returns = asset_prices.pct_change().dropna()
-        benchmark_returns = benchmark_prices.pct_change().dropna()
-        common_index = asset_returns.index.intersection(benchmark_returns.index)
-        asset_returns = asset_returns.loc[common_index]
-        benchmark_returns = benchmark_returns.loc[common_index]
-        if asset_returns.empty or len(asset_returns.columns) < 2:
-            return None
-
-        asset_metrics = self.calculate_asset_metrics(asset_returns, benchmark_returns, risk_free_rate, trading_days)
-        portfolio_df, frontier, tangent, minimum_volatility, cal = self.simulate_portfolios(
-            asset_returns,
-            benchmark_returns,
-            risk_free_rate,
-            max_weight,
-            simulations,
-            trading_days,
-        )
-        if portfolio_df is None:
-            return None
-
-        valid_tickers = list(asset_returns.columns)
-        metadata = self.get_asset_metadata(valid_tickers)
-        recommendations = self.build_recommendations(valid_tickers, asset_metrics, metadata, tangent)
-        sector_exposure = (
-            recommendations.groupby("Sector", dropna=False)["Recommended Weight"]
-            .sum()
-            .reset_index()
-            .sort_values("Recommended Weight", ascending=False)
-        )
-        notes, effective_names = self.build_portfolio_notes(recommendations, sector_exposure, tangent, max_weight)
-
-        return {
-            "asset_metrics": asset_metrics,
-            "portfolio_cloud": portfolio_df,
-            "frontier": frontier,
-            "tangent": tangent,
-            "minimum_volatility": minimum_volatility,
-            "cal": cal,
-            "recommendations": recommendations,
-            "sector_exposure": sector_exposure,
-            "notes": notes,
-            "effective_names": effective_names,
-            "benchmark": benchmark_ticker,
-            "period": period,
-        }
 
 
 def render_frontier_chart(portfolio_cloud, frontier, cal, tangent, minimum_volatility):
@@ -1505,7 +1620,7 @@ with stock_tab:
                 with st.spinner(f"Running multiple engines on {txt_input}..."):
                     res = bot.analyze(txt_input)
                     if not res:
-                        st.error("Data fetch failed.")
+                        st.error(bot.last_error or "Unable to fetch enough market data for this ticker right now.")
 
     if txt_input:
         df = prepare_analysis_dataframe(db.get_analysis(txt_input.upper()))
@@ -1670,7 +1785,7 @@ with compare_tab:
             st.error("Enter at least two valid ticker symbols to compare.")
         else:
             with st.spinner("Pulling stock research and ranking the shortlist..."):
-                comparison_df, failed_tickers, refreshed_tickers, cached_tickers = collect_analysis_rows(
+                comparison_df, failed_tickers, failure_reasons, refreshed_tickers, cached_tickers = collect_analysis_rows(
                     bot,
                     db,
                     compare_tickers,
@@ -1678,11 +1793,16 @@ with compare_tab:
                 )
 
             if comparison_df.empty:
+                st.session_state.pop("compare_result", None)
+                st.session_state.pop("compare_meta", None)
                 st.error("Comparison failed. Try again with valid tickers.")
+                if failure_reasons:
+                    st.caption(" | ".join(f"{ticker}: {reason}" for ticker, reason in failure_reasons.items()))
             else:
                 st.session_state.compare_result = comparison_df
                 st.session_state.compare_meta = {
                     "failed": failed_tickers,
+                    "failure_reasons": failure_reasons,
                     "refreshed": refreshed_tickers,
                     "cached": cached_tickers,
                 }
@@ -1713,6 +1833,12 @@ with compare_tab:
             st.caption(" | ".join(status_notes))
         if meta.get("failed"):
             st.warning(f"Could not analyze: {', '.join(meta['failed'])}")
+            reason_lines = [
+                f"{ticker}: {reason}"
+                for ticker, reason in meta.get("failure_reasons", {}).items()
+            ]
+            if reason_lines:
+                st.caption(" | ".join(reason_lines))
         if meta.get("cached") and calculate_assumption_drift(model_settings) > 0:
             st.caption("Cached rows keep their previous assumption set until you refresh them with live data.")
         if comparison_df["Assumption_Fingerprint"].nunique() > 1:
@@ -1799,7 +1925,12 @@ with portfolio_tab:
                 )
 
             if not portfolio_result:
-                st.error("Portfolio analysis failed. Try different tickers or a longer lookback period.")
+                st.session_state.pop("portfolio_result", None)
+                st.session_state.pop("portfolio_config", None)
+                st.error(
+                    portfolio_bot.last_error
+                    or "Portfolio analysis failed. Try different tickers or a longer lookback period."
+                )
             else:
                 st.session_state.portfolio_result = portfolio_result
                 st.session_state.portfolio_config = {
@@ -1901,7 +2032,9 @@ with sensitivity_tab:
                 sensitivity_df, sensitivity_summary = run_sensitivity_analysis(bot, cleaned_ticker, model_settings)
 
             if sensitivity_df is None or sensitivity_summary is None:
-                st.error("Sensitivity analysis failed. Try a different ticker.")
+                st.session_state.pop("sensitivity_result", None)
+                st.session_state.pop("sensitivity_summary", None)
+                st.error(bot.last_error or "Sensitivity analysis failed. Try a different ticker.")
             else:
                 st.session_state.sensitivity_result = sensitivity_df
                 st.session_state.sensitivity_summary = sensitivity_summary
@@ -1968,11 +2101,20 @@ with backtest_tab:
             st.error("Enter a ticker to run a backtest.")
         else:
             with st.spinner(f"Replaying technical signals on {cleaned_ticker}..."):
-                hist = yf.Ticker(cleaned_ticker).history(period=backtest_period)
+                hist, backtest_error = fetch_ticker_history_with_retry(cleaned_ticker, backtest_period)
                 backtest_result = compute_technical_backtest(hist, model_settings)
 
-            if backtest_result is None:
-                st.error("Backtest failed. Try a ticker with a longer history window.")
+            if hist is None or hist.empty:
+                st.session_state.pop("backtest_result", None)
+                st.session_state.pop("backtest_config", None)
+                st.error(backtest_error or "Unable to load enough price history for this backtest.")
+            elif backtest_result is None:
+                st.session_state.pop("backtest_result", None)
+                st.session_state.pop("backtest_config", None)
+                st.error(
+                    "Backtest needs roughly 250 trading days of usable price history. "
+                    "Try a longer window or a ticker with more history."
+                )
             else:
                 st.session_state.backtest_result = backtest_result
                 st.session_state.backtest_config = {
