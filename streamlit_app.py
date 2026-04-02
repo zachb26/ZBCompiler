@@ -7,6 +7,7 @@ import re
 import sqlite3
 import threading
 import time
+import copy
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -23,6 +24,15 @@ BUILD_LABEL = datetime.datetime.fromtimestamp(Path(__file__).stat().st_mtime).st
 TRADING_DAYS = 252
 DEFAULT_BENCHMARK_TICKER = "SPY"
 DEFAULT_PORTFOLIO_TICKERS = "AAPL, MSFT, NVDA, JNJ, XOM"
+FETCH_CACHE_TTL_SECONDS = 300
+FETCH_STALE_FALLBACK_TTL_SECONDS = 1800
+FETCH_CACHE = {
+    "ticker_history": {},
+    "ticker_info": {},
+    "ticker_news": {},
+    "batch_history": {},
+}
+FETCH_CACHE_LOCK = threading.RLock()
 
 SECTOR_BENCHMARKS = {
     "Technology":             {"PE": 30, "PS": 6.0, "PB": 8.0, "EV_EBITDA": 20},
@@ -46,6 +56,9 @@ ANALYSIS_COLUMNS = {
     "Verdict_Fundamental": "TEXT",
     "Verdict_Valuation": "TEXT",
     "Verdict_Sentiment": "TEXT",
+    "Market_Regime": "TEXT",
+    "Decision_Confidence": "REAL",
+    "Decision_Notes": "TEXT",
     "Score_Tech": "INTEGER",
     "Score_Fund": "INTEGER",
     "Score_Val": "INTEGER",
@@ -96,6 +109,8 @@ DEFAULT_MODEL_SETTINGS = {
     "tech_rsi_oversold": 30.0,
     "tech_rsi_overbought": 70.0,
     "tech_momentum_threshold": 0.05,
+    "tech_trend_tolerance": 0.02,
+    "tech_extension_limit": 0.08,
     "fund_roe_threshold": 0.15,
     "fund_profit_margin_threshold": 0.20,
     "fund_debt_good_threshold": 100.0,
@@ -117,72 +132,159 @@ DEFAULT_MODEL_SETTINGS = {
     "overall_strong_buy_threshold": 8.0,
     "overall_sell_threshold": -3.0,
     "overall_strong_sell_threshold": -8.0,
+    "decision_hold_buffer": 1.0,
+    "decision_min_confidence": 55.0,
+    "backtest_cooldown_days": 8.0,
     "trading_days_per_year": 252.0,
 }
 MODEL_PRESETS = {
     "Balanced": DEFAULT_MODEL_SETTINGS.copy(),
     "Conservative": {
         **DEFAULT_MODEL_SETTINGS,
-        "weight_technical": 0.8,
-        "weight_fundamental": 1.2,
-        "weight_valuation": 1.2,
-        "weight_sentiment": 0.8,
-        "tech_rsi_oversold": 28.0,
-        "tech_rsi_overbought": 72.0,
-        "tech_momentum_threshold": 0.06,
-        "fund_roe_threshold": 0.18,
-        "fund_profit_margin_threshold": 0.22,
-        "fund_debt_good_threshold": 85.0,
-        "fund_debt_bad_threshold": 180.0,
-        "fund_revenue_growth_threshold": 0.12,
-        "fund_current_ratio_good": 1.4,
+        "weight_technical": 0.7,
+        "weight_fundamental": 1.3,
+        "weight_valuation": 1.4,
+        "weight_sentiment": 0.6,
+        "tech_rsi_oversold": 27.0,
+        "tech_rsi_overbought": 74.0,
+        "tech_momentum_threshold": 0.07,
+        "tech_trend_tolerance": 0.03,
+        "tech_extension_limit": 0.05,
+        "fund_roe_threshold": 0.20,
+        "fund_profit_margin_threshold": 0.24,
+        "fund_debt_good_threshold": 75.0,
+        "fund_debt_bad_threshold": 160.0,
+        "fund_revenue_growth_threshold": 0.13,
+        "fund_current_ratio_good": 1.6,
         "fund_current_ratio_bad": 0.9,
-        "valuation_benchmark_scale": 0.95,
-        "valuation_peg_threshold": 1.3,
-        "valuation_graham_overpriced_multiple": 1.4,
+        "valuation_benchmark_scale": 0.90,
+        "valuation_peg_threshold": 1.2,
+        "valuation_graham_overpriced_multiple": 1.35,
         "valuation_under_score_threshold": 6.0,
         "valuation_fair_score_threshold": 3.0,
-        "sentiment_analyst_boost": 1.5,
-        "sentiment_upside_high": 0.18,
-        "sentiment_upside_mid": 0.08,
-        "sentiment_downside_high": 0.12,
-        "sentiment_downside_mid": 0.06,
+        "sentiment_analyst_boost": 1.0,
+        "sentiment_upside_high": 0.20,
+        "sentiment_upside_mid": 0.10,
+        "sentiment_downside_high": 0.10,
+        "sentiment_downside_mid": 0.05,
         "overall_buy_threshold": 4.0,
-        "overall_strong_buy_threshold": 9.0,
+        "overall_strong_buy_threshold": 10.0,
         "overall_sell_threshold": -4.0,
-        "overall_strong_sell_threshold": -9.0,
+        "overall_strong_sell_threshold": -10.0,
+        "decision_hold_buffer": 2.0,
+        "decision_min_confidence": 65.0,
+        "backtest_cooldown_days": 12.0,
     },
     "Aggressive": {
         **DEFAULT_MODEL_SETTINGS,
-        "weight_technical": 1.2,
-        "weight_fundamental": 0.9,
-        "weight_valuation": 1.0,
-        "weight_sentiment": 1.1,
-        "tech_rsi_oversold": 32.0,
-        "tech_rsi_overbought": 68.0,
-        "tech_momentum_threshold": 0.04,
-        "fund_roe_threshold": 0.12,
-        "fund_profit_margin_threshold": 0.18,
-        "fund_debt_good_threshold": 120.0,
-        "fund_debt_bad_threshold": 240.0,
-        "fund_revenue_growth_threshold": 0.08,
-        "fund_current_ratio_good": 1.1,
-        "fund_current_ratio_bad": 0.9,
-        "valuation_benchmark_scale": 1.05,
-        "valuation_peg_threshold": 1.7,
-        "valuation_graham_overpriced_multiple": 1.6,
+        "weight_technical": 1.4,
+        "weight_fundamental": 0.8,
+        "weight_valuation": 0.9,
+        "weight_sentiment": 1.3,
+        "tech_rsi_oversold": 34.0,
+        "tech_rsi_overbought": 66.0,
+        "tech_momentum_threshold": 0.03,
+        "tech_trend_tolerance": 0.01,
+        "tech_extension_limit": 0.12,
+        "fund_roe_threshold": 0.10,
+        "fund_profit_margin_threshold": 0.15,
+        "fund_debt_good_threshold": 130.0,
+        "fund_debt_bad_threshold": 260.0,
+        "fund_revenue_growth_threshold": 0.06,
+        "fund_current_ratio_good": 1.0,
+        "fund_current_ratio_bad": 0.8,
+        "valuation_benchmark_scale": 1.10,
+        "valuation_peg_threshold": 1.9,
+        "valuation_graham_overpriced_multiple": 1.7,
         "valuation_under_score_threshold": 4.0,
-        "valuation_fair_score_threshold": 2.0,
-        "sentiment_analyst_boost": 2.5,
-        "sentiment_upside_high": 0.12,
-        "sentiment_upside_mid": 0.04,
-        "sentiment_downside_high": 0.18,
-        "sentiment_downside_mid": 0.06,
+        "valuation_fair_score_threshold": 1.0,
+        "sentiment_analyst_boost": 3.0,
+        "sentiment_upside_high": 0.10,
+        "sentiment_upside_mid": 0.03,
+        "sentiment_downside_high": 0.20,
+        "sentiment_downside_mid": 0.07,
         "overall_buy_threshold": 2.0,
-        "overall_strong_buy_threshold": 6.0,
+        "overall_strong_buy_threshold": 5.0,
         "overall_sell_threshold": -2.0,
-        "overall_strong_sell_threshold": -6.0,
+        "overall_strong_sell_threshold": -5.0,
+        "decision_hold_buffer": 0.0,
+        "decision_min_confidence": 45.0,
+        "backtest_cooldown_days": 3.0,
     },
+}
+PRESET_DESCRIPTIONS = {
+    "Balanced": "Balanced keeps the four engines close to equal and is the best general starting point.",
+    "Conservative": "Conservative leans on fundamentals and valuation, demands stronger confirmation, and slows trading re-entry.",
+    "Aggressive": "Aggressive leans on technicals and sentiment, accepts looser valuation, and reacts faster to price action.",
+}
+CHANGELOG_ENTRIES = [
+    {
+        "Date": "2026-04-02",
+        "Area": "Options UX",
+        "Update": "Added a dedicated Changelog tab, expanded Methodology explanations, and attached ? help text to every model control.",
+        "Impact": "The assumption set is easier to understand before changing live research behavior.",
+    },
+    {
+        "Date": "2026-04-02",
+        "Area": "Presets",
+        "Update": "Rebalanced Balanced, Conservative, and Aggressive presets so each one changes weights, thresholds, confidence rules, and backtest pacing more noticeably.",
+        "Impact": "Loading a preset now creates a clearer shift in model personality instead of a barely visible tweak.",
+    },
+    {
+        "Date": "2026-04-02",
+        "Area": "Decision Engine",
+        "Update": "Added market regime classification, cross-engine agreement checks, confidence scoring, and decision notes before final verdict guardrails are applied.",
+        "Impact": "Mixed evidence and weak data are pushed toward hold more consistently.",
+    },
+    {
+        "Date": "2026-04-02",
+        "Area": "Backtest",
+        "Update": "Changed the technical replay to allow partial positions, slower re-entries, and trade log actions such as Add and Reduce.",
+        "Impact": "Backtests now behave more like staged decision-making instead of instant all-in or all-out flips.",
+    },
+    {
+        "Date": "2026-04-02",
+        "Area": "Transparency",
+        "Update": "Surfaced regime, confidence, data quality, fingerprint, and assumption drift across research, sensitivity, and library views.",
+        "Impact": "It is easier to see why a verdict was produced and whether saved rows are directly comparable.",
+    },
+]
+OPTIONS_HELP_TEXT = {
+    "load_preset": "Load a bundled assumption profile. Balanced is neutral, Conservative is stricter, and Aggressive is faster and more risk-tolerant.",
+    "weight_technical": "Higher values make price trend, RSI, MACD, and momentum matter more in the final score.",
+    "weight_fundamental": "Higher values make profitability, growth, leverage, and liquidity matter more in the final score.",
+    "weight_valuation": "Higher values make cheap-versus-expensive signals matter more in the final score.",
+    "weight_sentiment": "Higher values make headlines, analyst views, and target prices matter more in the final score.",
+    "tech_rsi_oversold": "Lower values wait for deeper weakness before treating RSI as oversold.",
+    "tech_rsi_overbought": "Lower values start treating strong rallies as overbought sooner.",
+    "tech_momentum_threshold": "Higher values require a bigger recent move before momentum adds or subtracts technical points.",
+    "fund_roe_threshold": "Higher values make the model demand stronger return on equity before awarding a quality point.",
+    "fund_profit_margin_threshold": "Higher values make the model stricter about operating profitability.",
+    "fund_debt_good_threshold": "Lower values make the model treat leverage as risky sooner.",
+    "fund_debt_bad_threshold": "Lower values make the model penalize debt more aggressively.",
+    "fund_revenue_growth_threshold": "Higher values make the model demand faster top-line growth before rewarding it.",
+    "fund_current_ratio_good": "Higher values make the model ask for more liquidity before awarding a balance-sheet point.",
+    "fund_current_ratio_bad": "Higher values make the model flag weak liquidity sooner.",
+    "tech_trend_tolerance": "Higher values create a wider neutral zone around moving averages so small wiggles do not flip the trend score.",
+    "tech_extension_limit": "Lower values make the model call a move stretched sooner when price runs away from the 50-day average.",
+    "decision_hold_buffer": "Higher values make mixed or transitional setups need more evidence before becoming Buy or Sell.",
+    "decision_min_confidence": "Higher values make the final verdict stay on Hold unless engine agreement and data quality are stronger.",
+    "valuation_benchmark_scale": "Lower values make sector valuation benchmarks stricter; higher values make them more forgiving.",
+    "valuation_peg_threshold": "Lower values make the model harsher on expensive PEG ratios.",
+    "valuation_graham_overpriced_multiple": "Lower values make the model call a stock overpriced sooner versus Graham value.",
+    "trading_days_per_year": "Adjusts annualized portfolio and backtest metrics such as return, volatility, and Sharpe.",
+    "valuation_fair_score_threshold": "Higher values require more valuation evidence before a name earns Fair Value instead of Overvalued.",
+    "valuation_under_score_threshold": "Higher values require more valuation evidence before a name earns Undervalued.",
+    "sentiment_analyst_boost": "Higher values make analyst recommendations contribute more to sentiment.",
+    "sentiment_upside_mid": "Lower values let smaller analyst target upside count as a positive sentiment signal.",
+    "sentiment_upside_high": "Lower values let strong upside bonuses trigger more easily.",
+    "overall_buy_threshold": "Higher values require a larger combined score before the model upgrades from Hold to Buy.",
+    "overall_strong_buy_threshold": "Higher values make Strong Buy rarer.",
+    "overall_sell_threshold": "Higher values make the model wait for weaker negative evidence before switching from Hold to Sell.",
+    "overall_strong_sell_threshold": "Higher values make Strong Sell rarer.",
+    "sentiment_downside_mid": "Lower values let smaller analyst target downside count as a negative sentiment signal.",
+    "sentiment_downside_high": "Lower values trigger a strong downside penalty sooner.",
+    "backtest_cooldown_days": "Higher values force the replay to wait longer before re-entering after a position change.",
 }
 POSITIVE_SENTIMENT_TERMS = {
     "beat", "beats", "growth", "surge", "surges", "strong", "bullish", "buy",
@@ -278,43 +380,215 @@ def summarize_fetch_error(exc):
     return message[:220]
 
 
+def clone_cached_payload(payload):
+    if isinstance(payload, pd.DataFrame):
+        return payload.copy(deep=True)
+    if isinstance(payload, pd.Series):
+        return payload.copy(deep=True)
+    return copy.deepcopy(payload)
+
+
+def get_cached_fetch_payload(bucket, key, max_age_seconds=FETCH_CACHE_TTL_SECONDS):
+    with FETCH_CACHE_LOCK:
+        cache_entry = FETCH_CACHE[bucket].get(key)
+    if not cache_entry:
+        return None
+    age_seconds = time.time() - cache_entry["timestamp"]
+    if age_seconds > max_age_seconds:
+        return None
+    return clone_cached_payload(cache_entry["payload"])
+
+
+def set_cached_fetch_payload(bucket, key, payload):
+    with FETCH_CACHE_LOCK:
+        FETCH_CACHE[bucket][key] = {
+            "timestamp": time.time(),
+            "payload": clone_cached_payload(payload),
+        }
+
+
+def normalize_history_frame(raw_history):
+    if raw_history is None:
+        return pd.DataFrame()
+
+    hist = raw_history.copy()
+    if isinstance(hist, pd.Series):
+        hist = hist.to_frame(name="Close")
+
+    if isinstance(hist.columns, pd.MultiIndex):
+        if "Close" in hist.columns.get_level_values(0):
+            hist = hist["Close"].copy()
+            if isinstance(hist, pd.Series):
+                hist = hist.to_frame(name="Close")
+        else:
+            hist.columns = [
+                " ".join(str(part) for part in col if str(part) != "").strip()
+                for col in hist.columns.to_flat_index()
+            ]
+
+    renamed_columns = {column: str(column).strip().title() for column in hist.columns}
+    hist = hist.rename(columns=renamed_columns)
+
+    if "Close" not in hist.columns and "Adj Close" in hist.columns:
+        hist["Close"] = hist["Adj Close"]
+
+    if "Close" not in hist.columns:
+        return pd.DataFrame()
+
+    hist = hist.sort_index()
+    hist = hist[~hist.index.duplicated(keep="last")]
+    if getattr(hist.index, "tz", None) is not None:
+        hist.index = hist.index.tz_localize(None)
+    hist["Close"] = pd.to_numeric(hist["Close"], errors="coerce")
+    hist = hist.dropna(subset=["Close"])
+    return hist
+
+
+def normalize_info_payload(info):
+    if not isinstance(info, dict):
+        return {}
+    cleaned = {}
+    for key, value in info.items():
+        if value is None:
+            continue
+        if isinstance(value, float) and pd.isna(value):
+            continue
+        cleaned[key] = value
+    return cleaned
+
+
+def normalize_news_payload(news):
+    if not isinstance(news, list):
+        return []
+    normalized = []
+    for item in news:
+        if isinstance(item, dict):
+            normalized.append(item)
+    return normalized
+
+
 def fetch_ticker_history_with_retry(ticker, period, attempts=3):
+    cache_key = (ticker.upper(), period)
+    cached_history = get_cached_fetch_payload("ticker_history", cache_key)
+    if cached_history is not None and not cached_history.empty:
+        return cached_history, None
+
     last_error = None
     for attempt in range(attempts):
         try:
-            hist = yf.Ticker(ticker).history(period=period)
-            if hist is not None and not hist.empty and "Close" in hist.columns:
+            hist = normalize_history_frame(yf.Ticker(ticker).history(period=period, auto_adjust=True))
+            if not hist.empty:
+                set_cached_fetch_payload("ticker_history", cache_key, hist)
                 return hist, None
-            if hist is not None and not hist.empty:
-                last_error = f"Yahoo returned history for {ticker}, but it did not include a Close column."
-            else:
-                last_error = f"Yahoo returned no {period} price history for {ticker}."
+            last_error = f"Yahoo returned no usable {period} price history for {ticker}."
         except Exception as exc:
             last_error = summarize_fetch_error(exc)
         if attempt < attempts - 1:
             time.sleep(0.5 * (attempt + 1))
+
+    stale_history = get_cached_fetch_payload(
+        "ticker_history",
+        cache_key,
+        max_age_seconds=FETCH_STALE_FALLBACK_TTL_SECONDS,
+    )
+    if stale_history is not None and not stale_history.empty:
+        return stale_history, None
     return pd.DataFrame(), last_error
 
 
 def fetch_batch_history_with_retry(tickers, period, attempts=3):
+    normalized_tickers = tuple(dict.fromkeys(ticker.upper() for ticker in tickers))
+    cache_key = (normalized_tickers, period)
+    cached_history = get_cached_fetch_payload("batch_history", cache_key)
+    if cached_history is not None and not cached_history.empty:
+        return cached_history, None
+
     last_error = None
     for attempt in range(attempts):
         try:
             raw = yf.download(
-                tickers,
+                list(normalized_tickers),
                 period=period,
                 auto_adjust=True,
                 progress=False,
                 threads=False,
             )
             if raw is not None and not raw.empty:
-                return raw, None
+                set_cached_fetch_payload("batch_history", cache_key, raw)
+                return raw.copy(), None
             last_error = "Yahoo returned no portfolio price history for the selected basket."
         except Exception as exc:
             last_error = summarize_fetch_error(exc)
         if attempt < attempts - 1:
             time.sleep(0.5 * (attempt + 1))
+
+    stale_history = get_cached_fetch_payload(
+        "batch_history",
+        cache_key,
+        max_age_seconds=FETCH_STALE_FALLBACK_TTL_SECONDS,
+    )
+    if stale_history is not None and not stale_history.empty:
+        return stale_history, None
     return pd.DataFrame(), last_error
+
+
+def fetch_ticker_info_with_retry(ticker, attempts=3):
+    cache_key = ticker.upper()
+    cached_info = get_cached_fetch_payload("ticker_info", cache_key)
+    if cached_info:
+        return cached_info, None
+
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            ticker_handle = yf.Ticker(ticker)
+            info = normalize_info_payload(ticker_handle.info or {})
+            if info:
+                set_cached_fetch_payload("ticker_info", cache_key, info)
+                return info, None
+            last_error = f"Yahoo returned no company profile data for {ticker}."
+        except Exception as exc:
+            last_error = summarize_fetch_error(exc)
+        if attempt < attempts - 1:
+            time.sleep(0.35 * (attempt + 1))
+
+    stale_info = get_cached_fetch_payload(
+        "ticker_info",
+        cache_key,
+        max_age_seconds=FETCH_STALE_FALLBACK_TTL_SECONDS,
+    )
+    if stale_info:
+        return stale_info, None
+    return {}, last_error
+
+
+def fetch_ticker_news_with_retry(ticker, attempts=2):
+    cache_key = ticker.upper()
+    cached_news = get_cached_fetch_payload("ticker_news", cache_key)
+    if cached_news:
+        return cached_news, None
+
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            news = normalize_news_payload(getattr(yf.Ticker(ticker), "news", []) or [])
+            if news:
+                set_cached_fetch_payload("ticker_news", cache_key, news)
+                return news, None
+            last_error = f"Yahoo returned no recent news items for {ticker}."
+        except Exception as exc:
+            last_error = summarize_fetch_error(exc)
+        if attempt < attempts - 1:
+            time.sleep(0.25 * (attempt + 1))
+
+    stale_news = get_cached_fetch_payload(
+        "ticker_news",
+        cache_key,
+        max_age_seconds=FETCH_STALE_FALLBACK_TTL_SECONDS,
+    )
+    if stale_news:
+        return stale_news, None
+    return [], last_error
 
 
 def has_numeric_value(value):
@@ -413,6 +687,347 @@ def score_to_sentiment(score):
     return "MIXED"
 
 
+def score_trend_distance(value, baseline, tolerance=0.02):
+    if not has_numeric_value(value) or not has_numeric_value(baseline) or baseline <= 0:
+        return 0
+    if value >= baseline * (1 + tolerance):
+        return 1
+    if value <= baseline * (1 - tolerance):
+        return -1
+    return 0
+
+
+def step_signal_toward_neutral(signal):
+    transitions = {
+        "STRONG BUY": "BUY",
+        "BUY": "HOLD",
+        "HOLD": "HOLD",
+        "SELL": "HOLD",
+        "STRONG SELL": "SELL",
+    }
+    return transitions.get(signal, "HOLD")
+
+
+def has_bullish_trend(price, sma50, sma200, momentum_1y=None):
+    if not has_numeric_value(price) or not has_numeric_value(sma200):
+        return False
+    long_term_ok = (
+        has_numeric_value(sma50) and sma50 >= sma200
+    ) or (
+        has_numeric_value(momentum_1y) and momentum_1y >= 0
+    )
+    return price >= sma200 and long_term_ok
+
+
+def has_bearish_trend(price, sma50, sma200, momentum_1y=None):
+    if not has_numeric_value(price) or not has_numeric_value(sma200):
+        return False
+    long_term_weak = (
+        has_numeric_value(sma50) and sma50 <= sma200
+    ) or (
+        has_numeric_value(momentum_1y) and momentum_1y <= 0
+    )
+    return price <= sma200 and long_term_weak
+
+
+def classify_market_regime(price, sma50, sma200, momentum_1y=None, tolerance=0.02):
+    if not has_numeric_value(price) or not has_numeric_value(sma200):
+        return "Unclear"
+    if has_bullish_trend(price, sma50, sma200, momentum_1y) and price >= sma200 * (1 + tolerance):
+        return "Bullish Trend"
+    if has_bearish_trend(price, sma50, sma200, momentum_1y) and price <= sma200 * (1 - tolerance):
+        return "Bearish Trend"
+    if abs((price - sma200) / sma200) <= tolerance and (momentum_1y is None or abs(momentum_1y) <= 0.10):
+        return "Range-bound"
+    return "Transition"
+
+
+def summarize_engine_biases(tech_score, f_score, v_score, sentiment_score, v_val, bullish_trend, bearish_trend):
+    tech_bullish = tech_score >= 3 or (tech_score >= 2 and bullish_trend)
+    tech_bearish = tech_score <= -4 or (tech_score <= -3 and bearish_trend)
+    fund_bullish = f_score >= 2
+    fund_bearish = f_score <= -2
+    valuation_bullish = v_val == "UNDERVALUED"
+    valuation_bearish = v_val == "OVERVALUED" and v_score <= -2
+    sentiment_bullish = sentiment_score >= 2
+    sentiment_bearish = sentiment_score <= -2
+    bullish_count = sum([tech_bullish, fund_bullish, valuation_bullish, sentiment_bullish])
+    bearish_count = sum([tech_bearish, fund_bearish, valuation_bearish, sentiment_bearish])
+    return {
+        "tech_bullish": tech_bullish,
+        "tech_bearish": tech_bearish,
+        "fund_bullish": fund_bullish,
+        "fund_bearish": fund_bearish,
+        "valuation_bullish": valuation_bullish,
+        "valuation_bearish": valuation_bearish,
+        "sentiment_bullish": sentiment_bullish,
+        "sentiment_bearish": sentiment_bearish,
+        "bullish_count": bullish_count,
+        "bearish_count": bearish_count,
+        "mixed": bullish_count >= 2 and bearish_count >= 2,
+    }
+
+
+def compute_decision_confidence(overall_score, bias_summary, regime, completeness):
+    dominant_count = max(bias_summary["bullish_count"], bias_summary["bearish_count"])
+    opposing_count = min(bias_summary["bullish_count"], bias_summary["bearish_count"])
+    confidence = 28 + dominant_count * 14 - opposing_count * 10 + min(abs(overall_score) * 2.0, 18)
+
+    if regime in {"Bullish Trend", "Bearish Trend"}:
+        confidence += 8
+    elif regime == "Transition":
+        confidence -= 6
+    elif regime == "Range-bound":
+        confidence -= 10
+
+    if completeness is not None:
+        confidence += (float(completeness) - 0.5) * 35
+
+    return float(np.clip(round(confidence, 1), 5.0, 95.0))
+
+
+def apply_confidence_guard(verdict, confidence, data_quality, settings):
+    guarded = verdict
+    strong_floor = settings["decision_min_confidence"] + 10
+    base_floor = settings["decision_min_confidence"]
+
+    if guarded in {"STRONG BUY", "STRONG SELL"} and confidence < strong_floor:
+        guarded = step_signal_toward_neutral(guarded)
+    if guarded in {"BUY", "SELL"} and confidence < base_floor:
+        guarded = "HOLD"
+    if data_quality == "Low" and guarded in {"BUY", "SELL", "STRONG BUY", "STRONG SELL"}:
+        guarded = "HOLD"
+    return guarded
+
+
+def build_decision_notes(
+    verdict,
+    regime,
+    bias_summary,
+    confidence,
+    data_quality,
+    current_rsi,
+    v_val,
+    v_fund,
+    bullish_trend,
+    bearish_trend,
+    overextended,
+    pullback_recovery,
+):
+    notes = [f"Regime: {regime}"]
+    if bias_summary["mixed"] and verdict == "HOLD":
+        notes.append("Conflicting engine signals pushed the model toward hold")
+    elif verdict in {"BUY", "STRONG BUY"} and bullish_trend:
+        notes.append("Trend and engine alignment lean constructive")
+    elif verdict in {"SELL", "STRONG SELL"} and bearish_trend:
+        notes.append("Trend and engine alignment lean defensive")
+
+    if overextended and verdict in {"BUY", "HOLD"}:
+        notes.append("Price looks stretched above the short-term trend")
+    if pullback_recovery:
+        notes.append("RSI has recovered from oversold conditions")
+    if v_val == "UNDERVALUED":
+        notes.append("Valuation provides some downside support")
+    elif v_val == "OVERVALUED":
+        notes.append("Valuation still looks stretched")
+
+    if v_fund == "STRONG":
+        notes.append("Fundamentals remain supportive")
+    elif v_fund == "WEAK":
+        notes.append("Fundamentals are a headwind")
+
+    if has_numeric_value(current_rsi) and current_rsi >= 70 and verdict in {"BUY", "STRONG BUY", "HOLD"}:
+        notes.append("Momentum is hot enough to warrant patience on entries")
+    if data_quality == "Low":
+        notes.append("Low data completeness reduced conviction")
+    elif confidence < 60:
+        notes.append("Confidence is moderate, so the model stayed cautious")
+
+    deduped = []
+    for note in notes:
+        if note not in deduped:
+            deduped.append(note)
+    return " | ".join(deduped[:4])
+
+
+def resolve_overall_verdict(
+    overall_score,
+    tech_score,
+    f_score,
+    v_score,
+    sentiment_score,
+    v_fund,
+    v_val,
+    regime,
+    bullish_trend,
+    bearish_trend,
+    settings,
+):
+    bias_summary = summarize_engine_biases(
+        tech_score,
+        f_score,
+        v_score,
+        sentiment_score,
+        v_val,
+        bullish_trend,
+        bearish_trend,
+    )
+    buy_threshold = settings["overall_buy_threshold"]
+    strong_buy_threshold = settings["overall_strong_buy_threshold"]
+    sell_threshold = settings["overall_sell_threshold"]
+    strong_sell_threshold = settings["overall_strong_sell_threshold"]
+    if bias_summary["mixed"] or regime in {"Range-bound", "Transition"}:
+        hold_buffer = settings["decision_hold_buffer"]
+        buy_threshold += hold_buffer
+        strong_buy_threshold += hold_buffer
+        sell_threshold -= hold_buffer
+        strong_sell_threshold -= hold_buffer
+
+    if v_val == "UNDERVALUED" and v_fund == "STRONG" and sentiment_score >= 2:
+        verdict = "STRONG BUY" if tech_score >= 2 and not bearish_trend else "BUY"
+    elif v_val == "OVERVALUED" and sentiment_score <= -2 and bearish_trend and f_score <= 0:
+        verdict = "STRONG SELL" if tech_score <= -3 else "SELL"
+    else:
+        verdict = score_to_signal(
+            overall_score,
+            strong_buy=strong_buy_threshold,
+            buy=buy_threshold,
+            sell=sell_threshold,
+            strong_sell=strong_sell_threshold,
+        )
+
+    if bias_summary["mixed"]:
+        return "HOLD"
+
+    if verdict in {"BUY", "STRONG BUY"}:
+        if bias_summary["bearish_count"] >= 2:
+            verdict = "HOLD"
+        elif bearish_trend and f_score <= 0 and sentiment_score <= 0:
+            verdict = "HOLD"
+        elif v_val == "OVERVALUED" and f_score < 2:
+            verdict = step_signal_toward_neutral(verdict)
+
+    if verdict in {"SELL", "STRONG SELL"}:
+        if bias_summary["bullish_count"] >= 2:
+            verdict = "HOLD"
+        elif bullish_trend and f_score >= 1:
+            verdict = "HOLD"
+        elif v_val == "UNDERVALUED" and f_score >= 0 and sentiment_score > -3:
+            verdict = step_signal_toward_neutral(verdict)
+
+    if verdict == "STRONG BUY" and (bias_summary["bearish_count"] > 0 or bearish_trend):
+        verdict = "BUY"
+    if verdict == "STRONG SELL" and (bias_summary["bullish_count"] > 0 or bullish_trend):
+        verdict = "SELL"
+
+    if verdict == "HOLD":
+        if (
+            bias_summary["bullish_count"] >= 3
+            and bias_summary["bearish_count"] == 0
+            and regime == "Bullish Trend"
+            and overall_score >= buy_threshold - 1
+        ):
+            verdict = "BUY"
+        elif (
+            bias_summary["bearish_count"] >= 3
+            and bias_summary["bullish_count"] == 0
+            and regime == "Bearish Trend"
+            and overall_score <= sell_threshold + 1
+        ):
+            verdict = "SELL"
+
+    return verdict
+
+
+def derive_backtest_positions(analysis, settings=None):
+    active_settings = get_model_settings() if settings is None else settings
+    if analysis is None or analysis.empty:
+        return pd.Series(dtype=float)
+
+    long_term_momentum_floor = max(active_settings["tech_momentum_threshold"] * 2, 0.08)
+    trend_tolerance = active_settings["tech_trend_tolerance"]
+    cooldown_days = int(round(active_settings["backtest_cooldown_days"]))
+    bullish_regime = (
+        analysis["Close"].ge(analysis["SMA_200"] * (1 + trend_tolerance))
+        & (
+            analysis["SMA_50"].ge(analysis["SMA_200"] * (1 + trend_tolerance / 2))
+            | analysis["Momentum_1Y"].gt(0)
+        )
+    )
+    bearish_regime = (
+        analysis["Close"].le(analysis["SMA_200"] * (1 - trend_tolerance))
+        & (
+            analysis["SMA_50"].le(analysis["SMA_200"] * (1 - trend_tolerance / 2))
+            | analysis["Momentum_1Y"].lt(0)
+        )
+    )
+    not_stretched = (
+        analysis["RSI"].lt(active_settings["tech_rsi_overbought"]).fillna(True)
+        | analysis["Close"].le(analysis["SMA_50"] * 1.03).fillna(True)
+    )
+
+    entry_signal = (
+        (analysis["Tech Score"] >= 3)
+        & bullish_regime.fillna(False)
+        & not_stretched
+        & analysis["MACD"].gt(analysis["MACD_Signal_Line"]).fillna(False)
+        & analysis["Momentum_1M"].gt(-active_settings["tech_momentum_threshold"]).fillna(False)
+    )
+    recovery_entry = (
+        bullish_regime.fillna(False)
+        & analysis["RSI"].gt(active_settings["tech_rsi_oversold"]).fillna(False)
+        & analysis["RSI"].shift(1).le(active_settings["tech_rsi_oversold"]).fillna(False)
+        & analysis["MACD"].gt(analysis["MACD_Signal_Line"]).fillna(False)
+    )
+    partial_signal = (
+        bullish_regime.fillna(False)
+        & analysis["Tech Score"].ge(1)
+        & analysis["MACD"].ge(analysis["MACD_Signal_Line"]).fillna(False)
+    )
+    reduce_signal = (
+        bearish_regime.fillna(False)
+        & analysis["Tech Score"].le(-2)
+    )
+    exit_signal = (
+        ((analysis["Tech Score"] <= -4) & bearish_regime.fillna(False))
+        | (
+            bearish_regime.fillna(False)
+            & analysis["MACD"].lt(analysis["MACD_Signal_Line"]).fillna(False)
+            & analysis["Momentum_1Y"].lt(-long_term_momentum_floor).fillna(False)
+            & analysis["Momentum_1M"].lt(0).fillna(False)
+        )
+    )
+
+    positions = []
+    current_position = 0.0
+    days_since_change = cooldown_days
+    for enter_now, recover_now, partial_now, reduce_now, exit_now in zip(
+        entry_signal,
+        recovery_entry,
+        partial_signal,
+        reduce_signal,
+        exit_signal,
+    ):
+        target_position = current_position
+        if exit_now:
+            target_position = 0.0
+        elif reduce_now and current_position > 0.5:
+            target_position = 0.5
+        elif (enter_now or recover_now) and days_since_change >= cooldown_days:
+            target_position = 1.0
+        elif partial_now and current_position < 0.5 and days_since_change >= cooldown_days:
+            target_position = 0.5
+
+        if target_position != current_position:
+            current_position = target_position
+            days_since_change = 0
+        else:
+            days_since_change += 1
+        positions.append(current_position)
+
+    return pd.Series(positions, index=analysis.index, dtype=float)
+
+
 def get_default_model_settings():
     return DEFAULT_MODEL_SETTINGS.copy()
 
@@ -433,6 +1048,8 @@ def normalize_model_settings(settings):
         notes.append("The RSI overbought threshold was nudged above the oversold threshold.")
 
     normalized["tech_momentum_threshold"] = min(max(float(normalized["tech_momentum_threshold"]), 0.01), 0.12)
+    normalized["tech_trend_tolerance"] = min(max(float(normalized["tech_trend_tolerance"]), 0.0), 0.05)
+    normalized["tech_extension_limit"] = min(max(float(normalized["tech_extension_limit"]), 0.03), 0.15)
     normalized["fund_roe_threshold"] = min(max(float(normalized["fund_roe_threshold"]), 0.05), 0.35)
     normalized["fund_profit_margin_threshold"] = min(max(float(normalized["fund_profit_margin_threshold"]), 0.05), 0.35)
     normalized["fund_debt_good_threshold"] = min(max(float(normalized["fund_debt_good_threshold"]), 25.0), 200.0)
@@ -493,6 +1110,10 @@ def normalize_model_settings(settings):
     if abs(normalized["overall_strong_sell_threshold"]) <= abs(normalized["overall_sell_threshold"]):
         normalized["overall_strong_sell_threshold"] = -min(12.0, abs(normalized["overall_sell_threshold"]) + 2.0)
         notes.append("The strong-sell threshold was kept below the sell threshold.")
+
+    normalized["decision_hold_buffer"] = min(max(float(normalized["decision_hold_buffer"]), 0.0), 3.0)
+    normalized["decision_min_confidence"] = min(max(float(normalized["decision_min_confidence"]), 35.0), 80.0)
+    normalized["backtest_cooldown_days"] = float(min(max(float(normalized["backtest_cooldown_days"]), 0.0), 20.0))
 
     for key in ["weight_technical", "weight_fundamental", "weight_valuation", "weight_sentiment"]:
         normalized[key] = min(max(float(normalized[key]), 0.5), 1.5)
@@ -651,6 +1272,16 @@ def prepare_analysis_dataframe(df, settings=None):
         enriched["Assumption_Fingerprint"] = "Legacy"
     else:
         enriched["Assumption_Fingerprint"] = enriched["Assumption_Fingerprint"].fillna("Legacy")
+    if "Market_Regime" not in enriched.columns:
+        enriched["Market_Regime"] = "Unknown"
+    else:
+        enriched["Market_Regime"] = enriched["Market_Regime"].fillna("Unknown")
+    if "Decision_Notes" not in enriched.columns:
+        enriched["Decision_Notes"] = ""
+    else:
+        enriched["Decision_Notes"] = enriched["Decision_Notes"].fillna("")
+    if "Decision_Confidence" not in enriched.columns:
+        enriched["Decision_Confidence"] = np.nan
 
     if (
         "Data_Completeness" not in enriched.columns
@@ -779,6 +1410,8 @@ def run_sensitivity_analysis(analyst, ticker, settings=None):
                 "Fundamental": record["Score_Fund"],
                 "Valuation": record["Score_Val"],
                 "Sentiment": record["Score_Sentiment"],
+                "Confidence": record.get("Decision_Confidence"),
+                "Regime": record.get("Market_Regime"),
                 "Assumption Drift": calculate_assumption_drift(scenario_settings),
                 "Fingerprint": record["Assumption_Fingerprint"],
             }
@@ -830,20 +1463,34 @@ def compute_technical_backtest(hist, settings=None):
     analysis["Momentum_1M"] = close / close.shift(22) - 1
     analysis["Momentum_1Y"] = close / close.shift(252) - 1
 
+    trend_tolerance = active_settings["tech_trend_tolerance"]
+    extension_limit = active_settings["tech_extension_limit"]
     tech_score = pd.Series(0, index=analysis.index, dtype=float)
     tech_score += np.where(
         analysis["SMA_200"].notna(),
-        np.where(analysis["Close"] > analysis["SMA_200"], 1, -1),
+        np.where(
+            analysis["Close"] >= analysis["SMA_200"] * (1 + trend_tolerance),
+            1,
+            np.where(analysis["Close"] <= analysis["SMA_200"] * (1 - trend_tolerance), -1, 0),
+        ),
         0,
     )
     tech_score += np.where(
         analysis["SMA_50"].notna() & analysis["SMA_200"].notna(),
-        np.where(analysis["SMA_50"] > analysis["SMA_200"], 1, -1),
+        np.where(
+            analysis["SMA_50"] >= analysis["SMA_200"] * (1 + trend_tolerance / 2),
+            1,
+            np.where(analysis["SMA_50"] <= analysis["SMA_200"] * (1 - trend_tolerance / 2), -1, 0),
+        ),
         0,
     )
     tech_score += np.where(
         analysis["SMA_50"].notna(),
-        np.where(analysis["Close"] > analysis["SMA_50"], 1, -1),
+        np.where(
+            analysis["Close"] >= analysis["SMA_50"] * (1 + trend_tolerance / 2),
+            1,
+            np.where(analysis["Close"] <= analysis["SMA_50"] * (1 - trend_tolerance / 2), -1, 0),
+        ),
         0,
     )
     tech_score += np.where(
@@ -867,11 +1514,29 @@ def compute_technical_backtest(hist, settings=None):
     long_term_momentum_threshold = max(active_settings["tech_momentum_threshold"] * 3, 0.10)
     tech_score += np.where(analysis["Momentum_1Y"] > long_term_momentum_threshold, 1, 0)
     tech_score += np.where(analysis["Momentum_1Y"] < -long_term_momentum_threshold, -1, 0)
+    tech_score += np.where(
+        analysis["RSI"].shift(1).le(active_settings["tech_rsi_oversold"])
+        & analysis["RSI"].gt(active_settings["tech_rsi_oversold"])
+        & analysis["MACD"].ge(analysis["MACD_Signal_Line"]),
+        1,
+        0,
+    )
+    tech_score += np.where(
+        analysis["Close"].ge(analysis["SMA_50"] * (1 + extension_limit))
+        & analysis["RSI"].ge(active_settings["tech_rsi_overbought"] - 5),
+        -1,
+        0,
+    )
+    tech_score += np.where(
+        analysis["Close"].le(analysis["SMA_50"] * (1 - extension_limit))
+        & analysis["RSI"].le(active_settings["tech_rsi_oversold"] + 5),
+        1,
+        0,
+    )
 
     analysis["Tech Score"] = tech_score
     analysis["Signal"] = analysis["Tech Score"].apply(score_to_signal)
-    desired_position = np.where(analysis["Tech Score"] >= 2, 1.0, np.where(analysis["Tech Score"] <= -2, 0.0, np.nan))
-    analysis["Position"] = pd.Series(desired_position, index=analysis.index).ffill().fillna(0.0)
+    analysis["Position"] = derive_backtest_positions(analysis, active_settings)
     analysis["Benchmark Return"] = analysis["Close"].pct_change().fillna(0.0)
     analysis["Strategy Return"] = analysis["Position"].shift(1).fillna(0.0) * analysis["Benchmark Return"]
     analysis["Benchmark Equity"] = (1 + analysis["Benchmark Return"]).cumprod()
@@ -890,10 +1555,20 @@ def compute_technical_backtest(hist, settings=None):
     trade_log = pd.DataFrame(
         {
             "Date": analysis.index,
-            "Action": np.where(trade_points > 0, "Enter", np.where(trade_points < 0, "Exit", None)),
+            "Action": np.select(
+                [
+                    trade_points >= 0.75,
+                    trade_points > 0,
+                    trade_points <= -0.75,
+                    trade_points < 0,
+                ],
+                ["Enter", "Add", "Exit", "Reduce"],
+                default=None,
+            ),
             "Close": analysis["Close"],
             "Signal": analysis["Signal"],
             "Tech Score": analysis["Tech Score"],
+            "Position": analysis["Position"],
         }
     ).dropna(subset=["Action"])
 
@@ -1007,22 +1682,8 @@ class StockAnalyst:
             self.last_error = hist_error or f"Unable to load price history for {ticker}."
             return None, {}, []
 
-        info = {}
-        for attempt in range(2):
-            try:
-                info = yf.Ticker(ticker).info or {}
-                if info:
-                    break
-            except Exception:
-                info = {}
-            if attempt < 1:
-                time.sleep(0.35)
-
-        news = []
-        try:
-            news = getattr(yf.Ticker(ticker), "news", []) or []
-        except Exception:
-            news = []
+        info, _ = fetch_ticker_info_with_retry(ticker)
+        news, _ = fetch_ticker_news_with_retry(ticker)
 
         return hist, info, news
 
@@ -1122,6 +1783,7 @@ class StockAnalyst:
 
         rsi_series = calculate_rsi(close)
         current_rsi = safe_num(rsi_series.iloc[-1])
+        previous_rsi = safe_num(rsi_series.iloc[-2]) if len(rsi_series) > 1 else None
 
         ema12 = close.ewm(span=12, adjust=False).mean()
         ema26 = close.ewm(span=26, adjust=False).mean()
@@ -1134,14 +1796,16 @@ class StockAnalyst:
         sma200 = safe_num(close.rolling(200, min_periods=200).mean().iloc[-1])
         momentum_1m = (price / close.iloc[-22] - 1) if len(close) > 22 else None
         momentum_1y = (price / close.iloc[0] - 1) if len(close) > 1 else None
+        trend_tolerance = settings["tech_trend_tolerance"]
+        extension_limit = settings["tech_extension_limit"]
 
         tech_score = 0
         if has_numeric_value(sma200):
-            tech_score += 1 if price > sma200 else -1
+            tech_score += score_trend_distance(price, sma200, trend_tolerance)
         if has_numeric_value(sma50) and has_numeric_value(sma200):
-            tech_score += 1 if sma50 > sma200 else -1
+            tech_score += score_trend_distance(sma50, sma200, trend_tolerance / 2)
         if has_numeric_value(sma50):
-            tech_score += 1 if price > sma50 else -1
+            tech_score += score_trend_distance(price, sma50, trend_tolerance / 2)
         if has_numeric_value(current_rsi):
             if current_rsi < settings["tech_rsi_oversold"]:
                 if has_numeric_value(sma200) and price >= sma200 * 0.95:
@@ -1176,6 +1840,27 @@ class StockAnalyst:
                 tech_score += 1
             elif momentum_1y < -long_term_momentum_threshold:
                 tech_score -= 1
+        bullish_trend = has_bullish_trend(price, sma50, sma200, momentum_1y)
+        bearish_trend = has_bearish_trend(price, sma50, sma200, momentum_1y)
+        regime = classify_market_regime(price, sma50, sma200, momentum_1y, tolerance=trend_tolerance)
+        overextended = has_numeric_value(sma50) and price >= sma50 * (1 + extension_limit)
+        washed_out = has_numeric_value(sma50) and price <= sma50 * (1 - extension_limit)
+        pullback_recovery = (
+            bullish_trend
+            and has_numeric_value(previous_rsi)
+            and has_numeric_value(current_rsi)
+            and previous_rsi <= settings["tech_rsi_oversold"]
+            and current_rsi > settings["tech_rsi_oversold"]
+            and has_numeric_value(current_macd)
+            and has_numeric_value(current_macd_signal)
+            and current_macd >= current_macd_signal
+        )
+        if pullback_recovery:
+            tech_score += 1
+        if overextended and bullish_trend and has_numeric_value(current_rsi) and current_rsi >= settings["tech_rsi_overbought"] - 5:
+            tech_score -= 1
+        if washed_out and bearish_trend and has_numeric_value(current_rsi) and current_rsi <= settings["tech_rsi_oversold"] + 5:
+            tech_score += 1
         v_tech = score_to_signal(tech_score)
 
         f_score = 0
@@ -1286,18 +1971,19 @@ class StockAnalyst:
             + v_score * settings["weight_valuation"]
             + sentiment["score"] * settings["weight_sentiment"]
         )
-        if v_val == "UNDERVALUED" and v_fund == "STRONG" and sentiment["score"] >= 2:
-            final_verdict = "STRONG BUY" if tech_score >= 2 else "BUY"
-        elif v_val == "OVERVALUED" and sentiment["score"] <= -2:
-            final_verdict = "STRONG SELL" if tech_score <= -2 else "SELL"
-        else:
-            final_verdict = score_to_signal(
-                overall_score,
-                strong_buy=settings["overall_strong_buy_threshold"],
-                buy=settings["overall_buy_threshold"],
-                sell=settings["overall_sell_threshold"],
-                strong_sell=settings["overall_strong_sell_threshold"],
-            )
+        base_verdict = resolve_overall_verdict(
+            overall_score=overall_score,
+            tech_score=tech_score,
+            f_score=f_score,
+            v_score=v_score,
+            sentiment_score=sentiment["score"],
+            v_fund=v_fund,
+            v_val=v_val,
+            regime=regime,
+            bullish_trend=bullish_trend,
+            bearish_trend=bearish_trend,
+            settings=settings,
+        )
 
         assumption_profile = detect_matching_preset(settings)
         assumption_fingerprint = get_assumption_fingerprint(settings)
@@ -1305,11 +1991,12 @@ class StockAnalyst:
         record = {
             "Ticker": ticker,
             "Price": price,
-            "Verdict_Overall": final_verdict,
+            "Verdict_Overall": base_verdict,
             "Verdict_Technical": v_tech,
             "Verdict_Fundamental": v_fund,
             "Verdict_Valuation": v_val,
             "Verdict_Sentiment": sentiment["verdict"],
+            "Market_Regime": regime,
             "Score_Tech": tech_score,
             "Score_Fund": f_score,
             "Score_Val": v_score,
@@ -1336,7 +2023,11 @@ class StockAnalyst:
             "RSI": current_rsi,
             "MACD_Value": current_macd,
             "MACD_Signal": macd_signal,
-            "SMA_Status": "Bullish" if has_numeric_value(sma200) and price > sma200 else "Bearish",
+            "SMA_Status": (
+                "Bullish" if regime == "Bullish Trend"
+                else "Bearish" if regime == "Bearish Trend"
+                else "Neutral"
+            ),
             "Momentum_1M": momentum_1m,
             "Momentum_1Y": momentum_1y,
             "Last_Updated": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -1347,6 +2038,38 @@ class StockAnalyst:
             "Assumption_Snapshot": assumption_snapshot,
         }
         completeness, missing_count, quality_label = assess_record_quality(record)
+        bias_summary = summarize_engine_biases(
+            tech_score,
+            f_score,
+            v_score,
+            sentiment["score"],
+            v_val,
+            bullish_trend,
+            bearish_trend,
+        )
+        decision_confidence = compute_decision_confidence(
+            overall_score=overall_score,
+            bias_summary=bias_summary,
+            regime=regime,
+            completeness=completeness,
+        )
+        final_verdict = apply_confidence_guard(base_verdict, decision_confidence, quality_label, settings)
+        record["Verdict_Overall"] = final_verdict
+        record["Decision_Confidence"] = decision_confidence
+        record["Decision_Notes"] = build_decision_notes(
+            verdict=final_verdict,
+            regime=regime,
+            bias_summary=bias_summary,
+            confidence=decision_confidence,
+            data_quality=quality_label,
+            current_rsi=current_rsi,
+            v_val=v_val,
+            v_fund=v_fund,
+            bullish_trend=bullish_trend,
+            bearish_trend=bearish_trend,
+            overextended=overextended,
+            pullback_recovery=pullback_recovery,
+        )
         record["Data_Completeness"] = completeness
         record["Missing_Metric_Count"] = missing_count
         record["Data_Quality"] = quality_label
@@ -1445,12 +2168,10 @@ class PortfolioAnalyst:
                 if not pd.isna(cached_row.get("Sector")):
                     sector = cached_row.get("Sector") or sector
 
-            try:
-                info = yf.Ticker(ticker).info
+            info, _ = fetch_ticker_info_with_retry(ticker)
+            if info:
                 name = info.get("shortName") or info.get("longName") or ticker
                 sector = info.get("sector") or sector
-            except Exception:
-                pass
 
             rows.append({"Ticker": ticker, "Name": name, "Sector": sector})
 
@@ -1762,8 +2483,8 @@ st.caption(f"Build: {BUILD_LABEL} | Source: {Path(__file__).name}")
 sensitivity_default_ticker = st.session_state.get("sensitivity_last_ticker") or st.session_state.get("single_ticker", "")
 backtest_default_ticker = st.session_state.get("backtest_last_ticker") or st.session_state.get("single_ticker", "")
 
-stock_tab, compare_tab, portfolio_tab, sensitivity_tab, backtest_tab, library_tab, methodology_tab, options_tab = st.tabs(
-    ["Stock Analysis", "Compare", "Portfolio", "Sensitivity", "Backtest", "Library", "Methodology", "Options"]
+stock_tab, compare_tab, portfolio_tab, sensitivity_tab, backtest_tab, library_tab, changelog_tab, methodology_tab, options_tab = st.tabs(
+    ["Stock Analysis", "Compare", "Portfolio", "Sensitivity", "Backtest", "Library", "Changelog", "Methodology", "Options"]
 )
 
 with stock_tab:
@@ -1809,12 +2530,16 @@ with stock_tab:
             summary_cols[3].metric("Sentiment", format_int(row["Score_Sentiment"]))
             summary_cols[4].metric("Updated", str(row["Last_Updated"]))
 
-            trace_cols = st.columns(4)
+            trace_cols = st.columns(6)
             trace_cols[0].metric("Overall Score", format_value(row.get("Overall_Score"), "{:,.1f}"))
             trace_cols[1].metric("Data Quality", str(row.get("Data_Quality", "Unknown")))
             trace_cols[2].metric("Assumption Profile", str(row.get("Assumption_Profile", "Legacy")))
             trace_cols[3].metric("Missing Metrics", format_int(row.get("Missing_Metric_Count")))
+            trace_cols[4].metric("Confidence", format_value(row.get("Decision_Confidence"), "{:,.0f}", "/100"))
+            trace_cols[5].metric("Regime", str(row.get("Market_Regime", "Unknown")))
             st.caption(f"Fingerprint: {row.get('Assumption_Fingerprint', 'Legacy')}")
+            if row.get("Decision_Notes"):
+                st.caption(str(row.get("Decision_Notes")))
             if str(row.get("Assumption_Fingerprint", "Legacy")) != active_assumption_fingerprint:
                 st.warning(
                     "This saved analysis was generated under a different assumption set than the one currently active in Options."
@@ -2034,6 +2759,8 @@ with compare_tab:
                 "Sector",
                 "Verdict_Overall",
                 "Composite Score",
+                "Decision_Confidence",
+                "Market_Regime",
                 "Data_Quality",
                 "Assumption_Profile",
                 "Price",
@@ -2047,6 +2774,9 @@ with compare_tab:
             ]
         ].copy()
         comparison_display["Price"] = comparison_display["Price"].map(lambda value: f"${value:,.2f}" if pd.notna(value) else "N/A")
+        comparison_display["Decision_Confidence"] = comparison_display["Decision_Confidence"].map(
+            lambda value: format_value(value, "{:,.0f}", "/100")
+        )
         comparison_display["Target Upside"] = comparison_display["Target Upside"].map(format_percent)
         comparison_display["Graham Discount"] = comparison_display["Graham Discount"].map(format_percent)
         st.dataframe(comparison_display, use_container_width=True)
@@ -2253,6 +2983,9 @@ with sensitivity_tab:
         sensitivity_display["Overall Score"] = sensitivity_display["Overall Score"].map(
             lambda value: format_value(value, "{:,.1f}")
         )
+        sensitivity_display["Confidence"] = sensitivity_display["Confidence"].map(
+            lambda value: format_value(value, "{:,.0f}", "/100")
+        )
         sensitivity_display["Assumption Drift"] = sensitivity_display["Assumption Drift"].map(
             lambda value: format_value(value, "{:,.1f}", "%")
         )
@@ -2262,6 +2995,7 @@ with backtest_tab:
     st.subheader("Signal Backtest")
     st.caption("Replay the current technical engine on historical prices to compare its trading path against a simple buy-and-hold baseline.")
     st.caption("This is a technical-rule backtest only. It does not recreate historical fundamentals, valuation, or news sentiment.")
+    st.caption("The replay now uses slower regime-based entries and exits so one weak swing does not immediately force a full sell signal.")
 
     with st.form("backtest_form"):
         backtest_col_1, backtest_col_2, backtest_col_3 = st.columns([3, 1, 1])
@@ -2336,6 +3070,7 @@ with backtest_tab:
         else:
             trade_log_display["Date"] = pd.to_datetime(trade_log_display["Date"]).dt.strftime("%Y-%m-%d")
             trade_log_display["Close"] = trade_log_display["Close"].map(lambda value: f"${value:,.2f}")
+            trade_log_display["Position"] = trade_log_display["Position"].map(format_percent)
             st.dataframe(trade_log_display, use_container_width=True)
 
 with library_tab:
@@ -2398,6 +3133,8 @@ with library_tab:
                     "Sector",
                     "Verdict_Overall",
                     "Composite Score",
+                    "Decision_Confidence",
+                    "Market_Regime",
                     "Data_Quality",
                     "Assumption_Profile",
                     "Price",
@@ -2408,6 +3145,9 @@ with library_tab:
                 ]
             ].copy()
             library_display["Price"] = library_display["Price"].map(lambda value: f"${value:,.2f}" if pd.notna(value) else "N/A")
+            library_display["Decision_Confidence"] = library_display["Decision_Confidence"].map(
+                lambda value: format_value(value, "{:,.0f}", "/100")
+            )
             library_display["Target Upside"] = library_display["Target Upside"].map(format_percent)
             library_display["Graham Discount"] = library_display["Graham Discount"].map(format_percent)
             st.dataframe(library_display, use_container_width=True)
@@ -2439,9 +3179,37 @@ with library_tab:
                 conviction_table["Target Upside"] = conviction_table["Target Upside"].map(format_percent)
                 st.dataframe(conviction_table, use_container_width=True)
 
+with changelog_tab:
+    st.subheader("Changelog")
+    st.caption("Recent updates to the stock model, portfolio engine, and research UI live here so the app stays inspectable over time.")
+
+    changelog_metrics = st.columns(3)
+    changelog_metrics[0].metric("Latest Logged Update", CHANGELOG_ENTRIES[0]["Date"])
+    changelog_metrics[1].metric("Logged Changes", str(len(CHANGELOG_ENTRIES)))
+    changelog_metrics[2].metric("Current Build", BUILD_LABEL)
+
+    st.dataframe(pd.DataFrame(CHANGELOG_ENTRIES), use_container_width=True)
+
+    st.subheader("What Changed Most Recently")
+    st.write("- The Options tab now includes inline ? explanations for every slider and preset selector.")
+    st.write("- Conservative and Aggressive presets were widened so they meaningfully change conviction, valuation strictness, and backtest pacing.")
+    st.write("- Regime, confidence, and decision-note transparency remain visible across stock, compare, sensitivity, and library views.")
+
 with methodology_tab:
     st.subheader("Methodology and Transparency")
     st.caption("This tab shows how the app forms verdicts, why the portfolio engine chooses certain weights, and what assumptions sit underneath the UI.")
+
+    st.subheader("Model Flow")
+    methodology_flow = pd.DataFrame(
+        [
+            {"Step": 1, "What Happens": "Download one year of price history plus company profile and news from Yahoo Finance."},
+            {"Step": 2, "What Happens": "Score four engines: technical, fundamental, valuation, and sentiment."},
+            {"Step": 3, "What Happens": "Classify market regime, measure engine agreement, and estimate decision confidence."},
+            {"Step": 4, "What Happens": "Apply hold buffers and data-quality guardrails before publishing the final verdict."},
+            {"Step": 5, "What Happens": "Store the full result with timestamp, assumption fingerprint, and quality stats in the shared library."},
+        ]
+    )
+    st.dataframe(methodology_flow, use_container_width=True)
 
     methodology_col_1, methodology_col_2 = st.columns(2)
     with methodology_col_1:
@@ -2450,8 +3218,8 @@ with methodology_tab:
             [
                 {
                     "Engine": "Technical",
-                    "Uses": "RSI, MACD crossover and level, 50/200-day trend, price vs 50-day, 1M and 1Y momentum",
-                    "Strong Signals": "Healthy trend alignment, bullish MACD, supportive momentum, controlled oversold reversals",
+                    "Uses": "RSI, MACD crossover and level, 50/200-day trend, trend tolerance bands, stretch limits, 1M and 1Y momentum",
+                    "Strong Signals": "Healthy trend alignment, bullish MACD, supportive momentum, and controlled oversold reversals",
                 },
                 {
                     "Engine": "Fundamental",
@@ -2488,15 +3256,27 @@ with methodology_tab:
                 {
                     "Output": "Overall verdict",
                     "Rule": (
-                        f">= {model_settings['overall_strong_buy_threshold']:.0f} strong buy, "
-                        f">= {model_settings['overall_buy_threshold']:.0f} buy, "
-                        f"<= {model_settings['overall_sell_threshold']:.0f} sell, "
-                        f"<= {model_settings['overall_strong_sell_threshold']:.0f} strong sell"
+                        f"Base score thresholds are {model_settings['overall_strong_buy_threshold']:.0f} / "
+                        f"{model_settings['overall_buy_threshold']:.0f} / "
+                        f"{model_settings['overall_sell_threshold']:.0f} / "
+                        f"{model_settings['overall_strong_sell_threshold']:.0f}; mixed regimes, low confidence, and low-quality data are pushed toward hold"
                     ),
                 },
             ]
         )
         st.dataframe(verdict_table, use_container_width=True)
+
+    st.subheader("Decision Guardrails")
+    guardrail_df = pd.DataFrame(
+        [
+            {"Guardrail": "Trend Tolerance", "Purpose": "Avoids flipping trend signals on tiny moves around the moving averages."},
+            {"Guardrail": "Stretch Limit", "Purpose": "Penalizes overextended rallies and recognizes washed-out rebounds before chasing price."},
+            {"Guardrail": "Hold Buffer", "Purpose": "Makes mixed-engine or transition regimes require extra evidence before becoming directional."},
+            {"Guardrail": "Confidence Floor", "Purpose": "Downgrades weak-conviction Buy or Sell calls back toward Hold."},
+            {"Guardrail": "Data Quality Check", "Purpose": "Reduces conviction when too many important metrics are missing."},
+        ]
+    )
+    st.dataframe(guardrail_df, use_container_width=True)
 
     st.subheader("Portfolio Workflow")
     portfolio_workflow = pd.DataFrame(
@@ -2552,6 +3332,26 @@ with methodology_tab:
                     "Value": f"{int(model_settings['tech_rsi_oversold'])} / {int(model_settings['tech_rsi_overbought'])}",
                 },
                 {
+                    "Setting": "Trend Tolerance",
+                    "Value": f"{model_settings['tech_trend_tolerance'] * 100:.1f}%",
+                },
+                {
+                    "Setting": "Extension Limit",
+                    "Value": f"{model_settings['tech_extension_limit'] * 100:.1f}%",
+                },
+                {
+                    "Setting": "Hold Buffer",
+                    "Value": f"{model_settings['decision_hold_buffer']:.1f}",
+                },
+                {
+                    "Setting": "Confidence Floor",
+                    "Value": f"{model_settings['decision_min_confidence']:.0f}/100",
+                },
+                {
+                    "Setting": "Backtest Cooldown",
+                    "Value": f"{int(round(model_settings['backtest_cooldown_days']))} days",
+                },
+                {
                     "Setting": "Benchmark Scale",
                     "Value": f"{model_settings['valuation_benchmark_scale']:.2f}x",
                 },
@@ -2581,19 +3381,44 @@ with options_tab:
             "Load Preset",
             preset_names,
             index=preset_index,
-            help="Presets give you a stable starting point before you fine-tune individual sliders.",
+            help=OPTIONS_HELP_TEXT["load_preset"],
         )
+        st.caption(PRESET_DESCRIPTIONS.get(preset_selection, ""))
     with preset_col_2:
         st.write("")
         st.write("")
         if st.button("Apply Preset", use_container_width=True):
-            st.session_state.model_settings = preset_catalog[preset_selection]
+            st.session_state.model_settings = preset_catalog[preset_selection].copy()
             st.session_state.model_preset_name = preset_selection
             st.session_state.options_feedback = {
                 "message": f"{preset_selection} preset loaded.",
-                "notes": ["You can still fine-tune any slider below and save the result as a custom assumption set."],
+                "notes": [
+                    PRESET_DESCRIPTIONS.get(preset_selection, ""),
+                    "You can still fine-tune any slider below and save the result as a custom assumption set.",
+                ],
             }
             st.rerun()
+
+    preset_snapshot = pd.DataFrame(
+        [
+            {
+                "Preset": name,
+                "Profile": PRESET_DESCRIPTIONS.get(name, ""),
+                "Weights (T/F/V/S)": (
+                    f"{values['weight_technical']:.1f} / {values['weight_fundamental']:.1f} / "
+                    f"{values['weight_valuation']:.1f} / {values['weight_sentiment']:.1f}"
+                ),
+                "Trend Tol": f"{values['tech_trend_tolerance'] * 100:.0f}%",
+                "Stretch": f"{values['tech_extension_limit'] * 100:.0f}%",
+                "Hold Buffer": f"{values['decision_hold_buffer']:.1f}",
+                "Confidence Floor": f"{values['decision_min_confidence']:.0f}/100",
+                "Cooldown": f"{int(round(values['backtest_cooldown_days']))}d",
+            }
+            for name, values in preset_catalog.items()
+        ]
+    )
+    st.subheader("Preset Snapshot")
+    st.dataframe(preset_snapshot, use_container_width=True)
 
     feedback = st.session_state.pop("options_feedback", None)
     if feedback:
@@ -2608,11 +3433,12 @@ with options_tab:
         model_settings["weight_valuation"],
         model_settings["weight_sentiment"],
     ]
-    options_metrics = st.columns(4)
+    options_metrics = st.columns(5)
     options_metrics[0].metric("Assumption Drift", format_value(assumption_drift, "{:,.1f}", "%"))
     options_metrics[1].metric("Trading Days", str(int(model_settings["trading_days_per_year"])))
     options_metrics[2].metric("Benchmark Scale", format_value(model_settings["valuation_benchmark_scale"], "{:,.2f}", "x"))
     options_metrics[3].metric("Weight Spread", format_value(max(weight_values) - min(weight_values), "{:,.1f}"))
+    options_metrics[4].metric("Confidence Floor", format_value(model_settings["decision_min_confidence"], "{:,.0f}", "/100"))
 
     if assumption_drift > 35:
         st.warning("Your active assumptions are materially different from the default model. Expect results to diverge more from the baseline.")
@@ -2631,21 +3457,22 @@ with options_tab:
     with st.form("options_form"):
         st.subheader("Engine Weights")
         weight_col_1, weight_col_2, weight_col_3, weight_col_4 = st.columns(4)
-        weight_technical = weight_col_1.slider("Technical", 0.5, 1.5, float(model_settings["weight_technical"]), 0.1)
-        weight_fundamental = weight_col_2.slider("Fundamental", 0.5, 1.5, float(model_settings["weight_fundamental"]), 0.1)
-        weight_valuation = weight_col_3.slider("Valuation", 0.5, 1.5, float(model_settings["weight_valuation"]), 0.1)
-        weight_sentiment = weight_col_4.slider("Sentiment", 0.5, 1.5, float(model_settings["weight_sentiment"]), 0.1)
+        weight_technical = weight_col_1.slider("Technical", 0.5, 1.5, float(model_settings["weight_technical"]), 0.1, help=OPTIONS_HELP_TEXT["weight_technical"])
+        weight_fundamental = weight_col_2.slider("Fundamental", 0.5, 1.5, float(model_settings["weight_fundamental"]), 0.1, help=OPTIONS_HELP_TEXT["weight_fundamental"])
+        weight_valuation = weight_col_3.slider("Valuation", 0.5, 1.5, float(model_settings["weight_valuation"]), 0.1, help=OPTIONS_HELP_TEXT["weight_valuation"])
+        weight_sentiment = weight_col_4.slider("Sentiment", 0.5, 1.5, float(model_settings["weight_sentiment"]), 0.1, help=OPTIONS_HELP_TEXT["weight_sentiment"])
 
         st.subheader("Technical and Fundamental Thresholds")
         tf_col_1, tf_col_2, tf_col_3, tf_col_4 = st.columns(4)
-        tech_rsi_oversold = tf_col_1.slider("RSI Oversold", 20, 45, int(model_settings["tech_rsi_oversold"]), 1)
-        tech_rsi_overbought = tf_col_2.slider("RSI Overbought", 55, 85, int(model_settings["tech_rsi_overbought"]), 1)
+        tech_rsi_oversold = tf_col_1.slider("RSI Oversold", 20, 45, int(model_settings["tech_rsi_oversold"]), 1, help=OPTIONS_HELP_TEXT["tech_rsi_oversold"])
+        tech_rsi_overbought = tf_col_2.slider("RSI Overbought", 55, 85, int(model_settings["tech_rsi_overbought"]), 1, help=OPTIONS_HELP_TEXT["tech_rsi_overbought"])
         tech_momentum_percent = tf_col_3.slider(
             "Momentum Trigger (%)",
             1,
             12,
             int(round(model_settings["tech_momentum_threshold"] * 100)),
             1,
+            help=OPTIONS_HELP_TEXT["tech_momentum_threshold"],
         )
         fund_roe_percent = tf_col_4.slider(
             "ROE Threshold (%)",
@@ -2653,6 +3480,7 @@ with options_tab:
             35,
             int(round(model_settings["fund_roe_threshold"] * 100)),
             1,
+            help=OPTIONS_HELP_TEXT["fund_roe_threshold"],
         )
 
         tf_col_5, tf_col_6, tf_col_7, tf_col_8, tf_col_9 = st.columns(5)
@@ -2662,6 +3490,7 @@ with options_tab:
             35,
             int(round(model_settings["fund_profit_margin_threshold"] * 100)),
             1,
+            help=OPTIONS_HELP_TEXT["fund_profit_margin_threshold"],
         )
         fund_debt_good = tf_col_6.slider(
             "Healthy Debt/Equity",
@@ -2669,6 +3498,7 @@ with options_tab:
             200,
             int(round(model_settings["fund_debt_good_threshold"])),
             5,
+            help=OPTIONS_HELP_TEXT["fund_debt_good_threshold"],
         )
         fund_debt_bad = tf_col_7.slider(
             "High Debt/Equity",
@@ -2676,6 +3506,7 @@ with options_tab:
             400,
             int(round(model_settings["fund_debt_bad_threshold"])),
             5,
+            help=OPTIONS_HELP_TEXT["fund_debt_bad_threshold"],
         )
         fund_revenue_growth_percent = tf_col_8.slider(
             "Revenue Growth (%)",
@@ -2683,6 +3514,7 @@ with options_tab:
             30,
             int(round(model_settings["fund_revenue_growth_threshold"] * 100)),
             1,
+            help=OPTIONS_HELP_TEXT["fund_revenue_growth_threshold"],
         )
         fund_current_ratio_good = tf_col_9.slider(
             "Healthy Current Ratio",
@@ -2690,6 +3522,42 @@ with options_tab:
             3.0,
             float(model_settings["fund_current_ratio_good"]),
             0.1,
+            help=OPTIONS_HELP_TEXT["fund_current_ratio_good"],
+        )
+
+        st.subheader("Decision Stability")
+        ds_col_1, ds_col_2, ds_col_3, ds_col_4 = st.columns(4)
+        tech_trend_tolerance_percent = ds_col_1.slider(
+            "Trend Tolerance (%)",
+            0,
+            5,
+            int(round(model_settings["tech_trend_tolerance"] * 100)),
+            1,
+            help=OPTIONS_HELP_TEXT["tech_trend_tolerance"],
+        )
+        tech_extension_limit_percent = ds_col_2.slider(
+            "Stretch Limit (%)",
+            3,
+            15,
+            int(round(model_settings["tech_extension_limit"] * 100)),
+            1,
+            help=OPTIONS_HELP_TEXT["tech_extension_limit"],
+        )
+        decision_hold_buffer = ds_col_3.slider(
+            "Hold Buffer",
+            0.0,
+            3.0,
+            float(model_settings["decision_hold_buffer"]),
+            0.5,
+            help=OPTIONS_HELP_TEXT["decision_hold_buffer"],
+        )
+        decision_min_confidence = ds_col_4.slider(
+            "Confidence Floor",
+            35,
+            80,
+            int(round(model_settings["decision_min_confidence"])),
+            1,
+            help=OPTIONS_HELP_TEXT["decision_min_confidence"],
         )
 
         st.subheader("Valuation, Sentiment, and Portfolio")
@@ -2700,6 +3568,7 @@ with options_tab:
             1.2,
             float(model_settings["valuation_benchmark_scale"]),
             0.05,
+            help=OPTIONS_HELP_TEXT["valuation_benchmark_scale"],
         )
         valuation_peg_threshold = vs_col_2.slider(
             "PEG Threshold",
@@ -2707,6 +3576,7 @@ with options_tab:
             2.5,
             float(model_settings["valuation_peg_threshold"]),
             0.1,
+            help=OPTIONS_HELP_TEXT["valuation_peg_threshold"],
         )
         valuation_graham_multiple = vs_col_3.slider(
             "Graham Overpriced Multiple",
@@ -2714,6 +3584,7 @@ with options_tab:
             2.0,
             float(model_settings["valuation_graham_overpriced_multiple"]),
             0.05,
+            help=OPTIONS_HELP_TEXT["valuation_graham_overpriced_multiple"],
         )
         trading_days_per_year = vs_col_4.slider(
             "Trading Days / Year",
@@ -2721,6 +3592,7 @@ with options_tab:
             260,
             int(round(model_settings["trading_days_per_year"])),
             1,
+            help=OPTIONS_HELP_TEXT["trading_days_per_year"],
         )
 
         vs_col_5, vs_col_6, vs_col_7, vs_col_8, vs_col_9 = st.columns(5)
@@ -2730,6 +3602,7 @@ with options_tab:
             4,
             int(round(model_settings["valuation_fair_score_threshold"])),
             1,
+            help=OPTIONS_HELP_TEXT["valuation_fair_score_threshold"],
         )
         valuation_under_score = vs_col_6.slider(
             "Undervalued Score Floor",
@@ -2737,6 +3610,7 @@ with options_tab:
             8,
             int(round(model_settings["valuation_under_score_threshold"])),
             1,
+            help=OPTIONS_HELP_TEXT["valuation_under_score_threshold"],
         )
         sentiment_analyst_boost = vs_col_7.slider(
             "Analyst Sentiment Boost",
@@ -2744,6 +3618,7 @@ with options_tab:
             4.0,
             float(model_settings["sentiment_analyst_boost"]),
             0.5,
+            help=OPTIONS_HELP_TEXT["sentiment_analyst_boost"],
         )
         sentiment_upside_mid = vs_col_8.slider(
             "Moderate Upside (%)",
@@ -2751,6 +3626,7 @@ with options_tab:
             15,
             int(round(model_settings["sentiment_upside_mid"] * 100)),
             1,
+            help=OPTIONS_HELP_TEXT["sentiment_upside_mid"],
         )
         sentiment_upside_high = vs_col_9.slider(
             "Strong Upside (%)",
@@ -2758,6 +3634,7 @@ with options_tab:
             30,
             int(round(model_settings["sentiment_upside_high"] * 100)),
             1,
+            help=OPTIONS_HELP_TEXT["sentiment_upside_high"],
         )
 
         st.subheader("Overall Verdict Thresholds")
@@ -2768,6 +3645,7 @@ with options_tab:
             6,
             int(round(model_settings["overall_buy_threshold"])),
             1,
+            help=OPTIONS_HELP_TEXT["overall_buy_threshold"],
         )
         overall_strong_buy_threshold = ov_col_2.slider(
             "Strong Buy Threshold",
@@ -2775,6 +3653,7 @@ with options_tab:
             12,
             int(round(model_settings["overall_strong_buy_threshold"])),
             1,
+            help=OPTIONS_HELP_TEXT["overall_strong_buy_threshold"],
         )
         overall_sell_magnitude = ov_col_3.slider(
             "Sell Threshold",
@@ -2782,6 +3661,7 @@ with options_tab:
             6,
             int(round(abs(model_settings["overall_sell_threshold"]))),
             1,
+            help=OPTIONS_HELP_TEXT["overall_sell_threshold"],
         )
         overall_strong_sell_magnitude = ov_col_4.slider(
             "Strong Sell Threshold",
@@ -2789,6 +3669,7 @@ with options_tab:
             12,
             int(round(abs(model_settings["overall_strong_sell_threshold"]))),
             1,
+            help=OPTIONS_HELP_TEXT["overall_strong_sell_threshold"],
         )
 
         downside_col_1, downside_col_2, current_ratio_bad_col = st.columns(3)
@@ -2798,6 +3679,7 @@ with options_tab:
             15,
             int(round(model_settings["sentiment_downside_mid"] * 100)),
             1,
+            help=OPTIONS_HELP_TEXT["sentiment_downside_mid"],
         )
         sentiment_downside_high = downside_col_2.slider(
             "Deep Downside (%)",
@@ -2805,6 +3687,7 @@ with options_tab:
             30,
             int(round(model_settings["sentiment_downside_high"] * 100)),
             1,
+            help=OPTIONS_HELP_TEXT["sentiment_downside_high"],
         )
         fund_current_ratio_bad = current_ratio_bad_col.slider(
             "Weak Current Ratio",
@@ -2812,6 +3695,16 @@ with options_tab:
             1.5,
             float(model_settings["fund_current_ratio_bad"]),
             0.1,
+            help=OPTIONS_HELP_TEXT["fund_current_ratio_bad"],
+        )
+
+        backtest_cooldown_days = st.slider(
+            "Backtest Re-entry Cooldown (days)",
+            0,
+            20,
+            int(round(model_settings["backtest_cooldown_days"])),
+            1,
+            help=OPTIONS_HELP_TEXT["backtest_cooldown_days"],
         )
 
         save_options = st.form_submit_button("Save Assumptions", type="primary", use_container_width=True)
@@ -2825,6 +3718,8 @@ with options_tab:
             "tech_rsi_oversold": tech_rsi_oversold,
             "tech_rsi_overbought": tech_rsi_overbought,
             "tech_momentum_threshold": tech_momentum_percent / 100,
+            "tech_trend_tolerance": tech_trend_tolerance_percent / 100,
+            "tech_extension_limit": tech_extension_limit_percent / 100,
             "fund_roe_threshold": fund_roe_percent / 100,
             "fund_profit_margin_threshold": fund_margin_percent / 100,
             "fund_debt_good_threshold": fund_debt_good,
@@ -2846,6 +3741,9 @@ with options_tab:
             "overall_strong_buy_threshold": overall_strong_buy_threshold,
             "overall_sell_threshold": -overall_sell_magnitude,
             "overall_strong_sell_threshold": -overall_strong_sell_magnitude,
+            "decision_hold_buffer": decision_hold_buffer,
+            "decision_min_confidence": decision_min_confidence,
+            "backtest_cooldown_days": backtest_cooldown_days,
             "trading_days_per_year": trading_days_per_year,
         }
         normalized_settings, notes = normalize_model_settings(updated_settings)
