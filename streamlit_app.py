@@ -3,6 +3,7 @@ import datetime
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -314,6 +315,42 @@ def fetch_batch_history_with_retry(tickers, period, attempts=3):
         if attempt < attempts - 1:
             time.sleep(0.5 * (attempt + 1))
     return pd.DataFrame(), last_error
+
+
+def has_numeric_value(value):
+    return value is not None and not pd.isna(value)
+
+
+def calculate_rsi(close, period=14):
+    delta = close.diff()
+    gains = delta.clip(lower=0)
+    losses = -delta.clip(upper=0)
+    avg_gain = gains.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    avg_loss = losses.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    rsi = rsi.where(avg_loss != 0, 100)
+    rsi = rsi.where(avg_gain != 0, 0)
+    rsi = rsi.mask((avg_gain == 0) & (avg_loss == 0), 50)
+    return rsi
+
+
+def score_relative_multiple(value, benchmark, cheap_buffer=0.9, expensive_buffer=1.25):
+    if not has_numeric_value(value):
+        return 0
+    if value <= 0:
+        return -1
+    if not has_numeric_value(benchmark) or benchmark <= 0:
+        return 0
+    if value <= benchmark * cheap_buffer:
+        return 1
+    if value >= benchmark * expensive_buffer:
+        return -1
+    return 0
+
+
+def extract_sentiment_tokens(text):
+    return set(re.findall(r"[a-z]+", (text or "").lower()))
 
 
 def safe_divide(numerator, denominator):
@@ -718,7 +755,7 @@ def build_sensitivity_scenarios(base_settings):
 def run_sensitivity_analysis(analyst, ticker, settings=None):
     active_settings = get_model_settings() if settings is None else settings
     hist, info, news = analyst.get_data(ticker)
-    if hist is None or hist.empty or not info:
+    if hist is None or hist.empty:
         return None, None
 
     scenario_rows = []
@@ -782,11 +819,7 @@ def compute_technical_backtest(hist, settings=None):
 
     analysis = pd.DataFrame(index=close.index)
     analysis["Close"] = close
-    delta = close.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-    rs = gain / loss
-    analysis["RSI"] = 100 - (100 / (1 + rs))
+    analysis["RSI"] = calculate_rsi(close)
 
     ema12 = close.ewm(span=12, adjust=False).mean()
     ema26 = close.ewm(span=26, adjust=False).mean()
@@ -795,15 +828,45 @@ def compute_technical_backtest(hist, settings=None):
     analysis["SMA_50"] = close.rolling(50).mean()
     analysis["SMA_200"] = close.rolling(200).mean()
     analysis["Momentum_1M"] = close / close.shift(22) - 1
+    analysis["Momentum_1Y"] = close / close.shift(252) - 1
 
     tech_score = pd.Series(0, index=analysis.index, dtype=float)
-    tech_score += np.where(analysis["Close"] > analysis["SMA_200"], 1, -1)
-    tech_score += np.where(analysis["SMA_50"] > analysis["SMA_200"], 1, -1)
-    tech_score += np.where(analysis["RSI"] < active_settings["tech_rsi_oversold"], 2, 0)
-    tech_score += np.where(analysis["RSI"] > active_settings["tech_rsi_overbought"], -2, 0)
-    tech_score += np.where(analysis["MACD"] > analysis["MACD_Signal_Line"], 1, -1)
+    tech_score += np.where(
+        analysis["SMA_200"].notna(),
+        np.where(analysis["Close"] > analysis["SMA_200"], 1, -1),
+        0,
+    )
+    tech_score += np.where(
+        analysis["SMA_50"].notna() & analysis["SMA_200"].notna(),
+        np.where(analysis["SMA_50"] > analysis["SMA_200"], 1, -1),
+        0,
+    )
+    tech_score += np.where(
+        analysis["SMA_50"].notna(),
+        np.where(analysis["Close"] > analysis["SMA_50"], 1, -1),
+        0,
+    )
+    tech_score += np.where(
+        analysis["RSI"] < active_settings["tech_rsi_oversold"],
+        np.where(analysis["Close"] >= analysis["SMA_200"] * 0.95, 2, 1),
+        0,
+    )
+    tech_score += np.where(
+        analysis["RSI"] > active_settings["tech_rsi_overbought"],
+        np.where(analysis["Close"] <= analysis["SMA_50"] * 1.02, -2, -1),
+        0,
+    )
+    tech_score += np.where(
+        analysis["MACD"].notna() & analysis["MACD_Signal_Line"].notna(),
+        np.where(analysis["MACD"] > analysis["MACD_Signal_Line"], 1, -1),
+        0,
+    )
+    tech_score += np.where(analysis["MACD"] > 0, 1, np.where(analysis["MACD"] < 0, -1, 0))
     tech_score += np.where(analysis["Momentum_1M"] > active_settings["tech_momentum_threshold"], 1, 0)
     tech_score += np.where(analysis["Momentum_1M"] < -active_settings["tech_momentum_threshold"], -1, 0)
+    long_term_momentum_threshold = max(active_settings["tech_momentum_threshold"] * 3, 0.10)
+    tech_score += np.where(analysis["Momentum_1Y"] > long_term_momentum_threshold, 1, 0)
+    tech_score += np.where(analysis["Momentum_1Y"] < -long_term_momentum_threshold, -1, 0)
 
     analysis["Tech Score"] = tech_score
     analysis["Signal"] = analysis["Tech Score"].apply(score_to_signal)
@@ -965,36 +1028,74 @@ class StockAnalyst:
 
     def analyze_sentiment(self, info, news, price, settings=None):
         settings = get_model_settings() if settings is None else settings
+        info = info or {}
+        news = news or []
         score = 0
         headlines = []
-        for item in news[:8]:
+        seen_titles = set()
+        for idx, item in enumerate(news[:10]):
             title = (item.get("title") or "").strip()
-            if not title:
+            normalized_title = title.lower()
+            if not title or normalized_title in seen_titles:
                 continue
+            seen_titles.add(normalized_title)
             headlines.append(title)
-            lowered = title.lower()
-            score += sum(term in lowered for term in POSITIVE_SENTIMENT_TERMS)
-            score -= sum(term in lowered for term in NEGATIVE_SENTIMENT_TERMS)
+            tokens = extract_sentiment_tokens(title)
+            positive_hits = len(tokens & POSITIVE_SENTIMENT_TERMS)
+            negative_hits = len(tokens & NEGATIVE_SENTIMENT_TERMS)
+            headline_score = min(positive_hits, 2) - min(negative_hits, 2)
+            if headline_score != 0 and idx < 3:
+                headline_score += 1 if headline_score > 0 else -1
+            score += headline_score
+
+        score = max(min(score, 6), -6)
 
         recommendation_key = (info.get("recommendationKey") or "").lower()
         analyst_opinions = safe_num(info.get("numberOfAnalystOpinions"))
         target_mean_price = safe_num(info.get("targetMeanPrice"))
+        recommendation_mean = safe_num(info.get("recommendationMean"))
 
-        if recommendation_key in {"strong_buy", "buy"}:
-            score += settings["sentiment_analyst_boost"]
-        elif recommendation_key in {"underperform", "sell"}:
-            score -= settings["sentiment_analyst_boost"]
+        if analyst_opinions is not None and analyst_opinions >= 15:
+            analyst_scale = 1.0
+        elif analyst_opinions is not None and analyst_opinions >= 5:
+            analyst_scale = 0.75
+        elif analyst_opinions is not None and analyst_opinions >= 1:
+            analyst_scale = 0.5
+        elif recommendation_key:
+            analyst_scale = 0.5
+        else:
+            analyst_scale = 0.0
 
-        if target_mean_price and price:
+        analyst_points = 0
+        if recommendation_key == "strong_buy":
+            analyst_points = int(round((settings["sentiment_analyst_boost"] + 1) * analyst_scale))
+        elif recommendation_key in {"buy", "outperform", "overweight"}:
+            analyst_points = int(round(settings["sentiment_analyst_boost"] * analyst_scale))
+        elif recommendation_key in {"underperform", "underweight", "sell", "strong_sell"}:
+            base_penalty = settings["sentiment_analyst_boost"] + (1 if recommendation_key == "strong_sell" else 0)
+            analyst_points = -int(round(base_penalty * analyst_scale))
+        elif recommendation_mean is not None:
+            if recommendation_mean <= 1.8:
+                analyst_points = 1
+            elif recommendation_mean >= 3.2:
+                analyst_points = -1
+
+        score += analyst_points
+
+        if has_numeric_value(target_mean_price) and has_numeric_value(price) and price > 0:
             upside = (target_mean_price - price) / price
+            strong_target_points = 2 if analyst_opinions is None or analyst_opinions >= 3 else 1
+            moderate_target_points = 1 if analyst_opinions is None or analyst_opinions >= 3 else 0
             if upside > settings["sentiment_upside_high"]:
-                score += 2
+                score += strong_target_points
             elif upside > settings["sentiment_upside_mid"]:
-                score += 1
+                score += moderate_target_points
             elif upside < -settings["sentiment_downside_high"]:
-                score -= 2
+                score -= strong_target_points
             elif upside < -settings["sentiment_downside_mid"]:
-                score -= 1
+                score -= moderate_target_points
+
+        score = int(max(min(round(score), 8), -8))
 
         return {
             "score": score,
@@ -1014,42 +1115,66 @@ class StockAnalyst:
         if hist is None or hist.empty or "Close" not in hist.columns:
             return None
 
-        delta = hist["Close"].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-        rs = gain / loss
-        current_rsi = (100 - (100 / (1 + rs))).iloc[-1]
+        close = hist["Close"].dropna().astype(float)
+        if close.empty:
+            return None
+        price = float(close.iloc[-1])
 
-        ema12 = hist["Close"].ewm(span=12, adjust=False).mean()
-        ema26 = hist["Close"].ewm(span=26, adjust=False).mean()
+        rsi_series = calculate_rsi(close)
+        current_rsi = safe_num(rsi_series.iloc[-1])
+
+        ema12 = close.ewm(span=12, adjust=False).mean()
+        ema26 = close.ewm(span=26, adjust=False).mean()
         macd_line = ema12 - ema26
         macd_signal_line = macd_line.ewm(span=9, adjust=False).mean()
-        current_macd = macd_line.iloc[-1]
-        current_macd_signal = macd_signal_line.iloc[-1]
+        current_macd = safe_num(macd_line.iloc[-1])
+        current_macd_signal = safe_num(macd_signal_line.iloc[-1])
 
-        sma50 = hist["Close"].rolling(50).mean().iloc[-1]
-        sma200 = hist["Close"].rolling(200).mean().iloc[-1]
-        price = hist["Close"].iloc[-1]
-        momentum_1m = (price / hist["Close"].iloc[-22] - 1) if len(hist) > 22 else None
-        momentum_1y = (price / hist["Close"].iloc[0] - 1) if len(hist) > 1 else None
+        sma50 = safe_num(close.rolling(50, min_periods=50).mean().iloc[-1])
+        sma200 = safe_num(close.rolling(200, min_periods=200).mean().iloc[-1])
+        momentum_1m = (price / close.iloc[-22] - 1) if len(close) > 22 else None
+        momentum_1y = (price / close.iloc[0] - 1) if len(close) > 1 else None
 
         tech_score = 0
-        tech_score += 1 if price > sma200 else -1
-        tech_score += 1 if sma50 > sma200 else -1
-        if current_rsi < settings["tech_rsi_oversold"]:
-            tech_score += 2
-        elif current_rsi > settings["tech_rsi_overbought"]:
-            tech_score -= 2
-        if current_macd > current_macd_signal:
-            tech_score += 1
-            macd_signal = "Bullish Crossover"
-        else:
-            tech_score -= 1
-            macd_signal = "Bearish Crossover"
-        if momentum_1m is not None:
+        if has_numeric_value(sma200):
+            tech_score += 1 if price > sma200 else -1
+        if has_numeric_value(sma50) and has_numeric_value(sma200):
+            tech_score += 1 if sma50 > sma200 else -1
+        if has_numeric_value(sma50):
+            tech_score += 1 if price > sma50 else -1
+        if has_numeric_value(current_rsi):
+            if current_rsi < settings["tech_rsi_oversold"]:
+                if has_numeric_value(sma200) and price >= sma200 * 0.95:
+                    tech_score += 2
+                else:
+                    tech_score += 1
+            elif current_rsi > settings["tech_rsi_overbought"]:
+                if has_numeric_value(sma50) and price <= sma50 * 1.02:
+                    tech_score -= 2
+                else:
+                    tech_score -= 1
+        macd_signal = "Neutral"
+        if has_numeric_value(current_macd) and has_numeric_value(current_macd_signal):
+            if current_macd > current_macd_signal:
+                tech_score += 1
+                macd_signal = "Bullish Crossover"
+            else:
+                tech_score -= 1
+                macd_signal = "Bearish Crossover"
+            if current_macd > 0:
+                tech_score += 1
+            elif current_macd < 0:
+                tech_score -= 1
+        if has_numeric_value(momentum_1m):
             if momentum_1m > settings["tech_momentum_threshold"]:
                 tech_score += 1
             elif momentum_1m < -settings["tech_momentum_threshold"]:
+                tech_score -= 1
+        long_term_momentum_threshold = max(settings["tech_momentum_threshold"] * 3, 0.10)
+        if has_numeric_value(momentum_1y):
+            if momentum_1y > long_term_momentum_threshold:
+                tech_score += 1
+            elif momentum_1y < -long_term_momentum_threshold:
                 tech_score -= 1
         v_tech = score_to_signal(tech_score)
 
@@ -1058,24 +1183,39 @@ class StockAnalyst:
         margins = safe_num(info.get("profitMargins"))
         debt_eq = safe_num(info.get("debtToEquity"))
         revenue_growth = safe_num(info.get("revenueGrowth"))
+        earnings_growth = safe_num(info.get("earningsGrowth"))
         current_ratio = safe_num(info.get("currentRatio"))
-        if roe and roe > settings["fund_roe_threshold"]:
-            f_score += 1
-        if margins and margins > settings["fund_profit_margin_threshold"]:
-            f_score += 1
-        if debt_eq and debt_eq < settings["fund_debt_good_threshold"]:
-            f_score += 1
-        elif debt_eq and debt_eq > settings["fund_debt_bad_threshold"]:
-            f_score -= 1
-        if revenue_growth and revenue_growth > settings["fund_revenue_growth_threshold"]:
-            f_score += 1
-        elif revenue_growth and revenue_growth < 0:
-            f_score -= 1
-        if current_ratio and current_ratio > settings["fund_current_ratio_good"]:
-            f_score += 1
-        elif current_ratio and current_ratio < settings["fund_current_ratio_bad"]:
-            f_score -= 1
-        if f_score >= 3:
+        if has_numeric_value(roe):
+            if roe >= settings["fund_roe_threshold"]:
+                f_score += 1
+            elif roe < 0 or roe < settings["fund_roe_threshold"] * 0.5:
+                f_score -= 1
+        if has_numeric_value(margins):
+            if margins >= settings["fund_profit_margin_threshold"]:
+                f_score += 1
+            elif margins < 0 or margins < settings["fund_profit_margin_threshold"] * 0.5:
+                f_score -= 1
+        if has_numeric_value(debt_eq):
+            if 0 <= debt_eq < settings["fund_debt_good_threshold"]:
+                f_score += 1
+            elif debt_eq > settings["fund_debt_bad_threshold"]:
+                f_score -= 1
+        if has_numeric_value(revenue_growth):
+            if revenue_growth >= settings["fund_revenue_growth_threshold"]:
+                f_score += 1
+            elif revenue_growth < 0:
+                f_score -= 1
+        if has_numeric_value(earnings_growth):
+            if earnings_growth >= settings["fund_revenue_growth_threshold"]:
+                f_score += 1
+            elif earnings_growth < 0:
+                f_score -= 1
+        if has_numeric_value(current_ratio):
+            if current_ratio >= settings["fund_current_ratio_good"]:
+                f_score += 1
+            elif current_ratio < settings["fund_current_ratio_bad"]:
+                f_score -= 1
+        if f_score >= 4:
             v_fund = "STRONG"
         elif f_score >= 1:
             v_fund = "STABLE"
@@ -1091,30 +1231,48 @@ class StockAnalyst:
         ps_ratio = safe_num(info.get("priceToSalesTrailing12Months"))
         ev_ebitda = safe_num(info.get("enterpriseToEbitda"))
         pb = safe_num(info.get("priceToBook"))
-        if pe and pe < bench["PE"]:
-            v_score += 1
-        if forward_pe and forward_pe < bench["PE"]:
-            v_score += 1
-        if peg_ratio and peg_ratio < settings["valuation_peg_threshold"]:
-            v_score += 1
-        if ps_ratio and ps_ratio < bench["PS"]:
-            v_score += 1
-        if ev_ebitda and ev_ebitda < bench["EV_EBITDA"]:
-            v_score += 1
-        if pb and pb < bench["PB"]:
-            v_score += 1
+        valuation_signal_count = 0
+        for metric_value, benchmark_value in [
+            (pe, bench["PE"]),
+            (forward_pe, bench["PE"]),
+            (ps_ratio, bench["PS"]),
+            (pb, bench["PB"]),
+            (ev_ebitda, bench["EV_EBITDA"]),
+        ]:
+            multiple_score = score_relative_multiple(metric_value, benchmark_value)
+            v_score += multiple_score
+            if has_numeric_value(metric_value):
+                valuation_signal_count += 1
+        if has_numeric_value(peg_ratio):
+            valuation_signal_count += 1
+            if peg_ratio <= 0:
+                v_score -= 1
+            elif peg_ratio <= settings["valuation_peg_threshold"] * 0.9:
+                v_score += 1
+            elif peg_ratio >= settings["valuation_peg_threshold"] * 1.35:
+                v_score -= 1
         eps = safe_num(info.get("trailingEps"))
         bvps = safe_num(info.get("bookValue"))
         graham_num = None
         intrinsic_value = None
-        if eps and bvps and eps > 0 and bvps > 0:
+        if has_numeric_value(eps) and has_numeric_value(bvps) and eps > 0 and bvps > 0:
             graham_num = (22.5 * eps * bvps) ** 0.5
             intrinsic_value = graham_num
-            if price < graham_num:
+            valuation_signal_count += 1
+            if price < graham_num * 0.85:
                 v_score += 2
+            elif price < graham_num:
+                v_score += 1
             elif price > graham_num * settings["valuation_graham_overpriced_multiple"]:
+                v_score -= 2
+            elif price > graham_num * 1.15:
                 v_score -= 1
-        if v_score >= settings["valuation_under_score_threshold"]:
+        elif has_numeric_value(eps) and eps <= 0:
+            v_score -= 1
+
+        if valuation_signal_count < 2 and v_score < settings["valuation_fair_score_threshold"]:
+            v_val = "FAIR VALUE"
+        elif v_score >= settings["valuation_under_score_threshold"]:
             v_val = "UNDERVALUED"
         elif v_score >= settings["valuation_fair_score_threshold"]:
             v_val = "FAIR VALUE"
@@ -1178,7 +1336,7 @@ class StockAnalyst:
             "RSI": current_rsi,
             "MACD_Value": current_macd,
             "MACD_Signal": macd_signal,
-            "SMA_Status": "Bullish" if price > sma200 else "Bearish",
+            "SMA_Status": "Bullish" if has_numeric_value(sma200) and price > sma200 else "Bearish",
             "Momentum_1M": momentum_1m,
             "Momentum_1Y": momentum_1y,
             "Last_Updated": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -1693,7 +1851,7 @@ with stock_tab:
                                 "Benchmark": [
                                     format_value(sector_bench["PE"]),
                                     format_value(sector_bench["PE"]),
-                                    "1.50",
+                                    format_value(model_settings["valuation_peg_threshold"]),
                                     format_value(sector_bench["PS"]),
                                     format_value(sector_bench["EV_EBITDA"]),
                                     format_value(sector_bench["PB"]),
@@ -1710,11 +1868,32 @@ with stock_tab:
                     st.caption("Based on profitability, growth, leverage, and liquidity.")
                 with c_f2:
                     col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
-                    col_m1.metric("ROE", format_percent(row["ROE"]), "Target: >15%")
-                    col_m2.metric("Profit Margin", format_percent(row["Profit_Margins"]), "Target: >20%")
-                    col_m3.metric("Debt/Equity", format_value(row["Debt_to_Equity"], "{:,.0f}", "%"), "Target: <100%", delta_color="inverse")
-                    col_m4.metric("Revenue Growth", format_percent(row["Revenue_Growth"]), "Target: >10%")
-                    col_m5.metric("Current Ratio", format_value(row["Current_Ratio"]), "Target: >1.2")
+                    col_m1.metric(
+                        "ROE",
+                        format_percent(row["ROE"]),
+                        f"Target: >{model_settings['fund_roe_threshold'] * 100:.0f}%",
+                    )
+                    col_m2.metric(
+                        "Profit Margin",
+                        format_percent(row["Profit_Margins"]),
+                        f"Target: >{model_settings['fund_profit_margin_threshold'] * 100:.0f}%",
+                    )
+                    col_m3.metric(
+                        "Debt/Equity",
+                        format_value(row["Debt_to_Equity"], "{:,.0f}", "%"),
+                        f"Target: <{model_settings['fund_debt_good_threshold']:.0f}%",
+                        delta_color="inverse",
+                    )
+                    col_m4.metric(
+                        "Revenue Growth",
+                        format_percent(row["Revenue_Growth"]),
+                        f"Target: >{model_settings['fund_revenue_growth_threshold'] * 100:.0f}%",
+                    )
+                    col_m5.metric(
+                        "Current Ratio",
+                        format_value(row["Current_Ratio"]),
+                        f"Target: >{model_settings['fund_current_ratio_good']:.1f}",
+                    )
 
             with tab_tech:
                 c_t1, c_t2 = st.columns([1, 2])
@@ -1723,7 +1902,11 @@ with stock_tab:
                     st.caption("Based on RSI, MACD, moving averages, and momentum.")
                 with c_t2:
                     col_t1, col_t2, col_t3, col_t4 = st.columns(4)
-                    col_t1.metric("RSI (14)", format_value(row["RSI"], "{:,.1f}"), "30=Oversold, 70=Overbought")
+                    col_t1.metric(
+                        "RSI (14)",
+                        format_value(row["RSI"], "{:,.1f}"),
+                        f"{int(model_settings['tech_rsi_oversold'])}=Oversold, {int(model_settings['tech_rsi_overbought'])}=Overbought",
+                    )
                     col_t2.metric("Trend", str(row["SMA_Status"]))
                     col_t3.metric("MACD", format_value(row["MACD_Value"], "{:,.2f}"), str(row["MACD_Signal"]))
                     col_t4.metric("1M Momentum", format_percent(row["Momentum_1M"]), "Short-term move")
@@ -2267,23 +2450,23 @@ with methodology_tab:
             [
                 {
                     "Engine": "Technical",
-                    "Uses": "RSI, MACD, 50/200-day trend, 1M momentum",
-                    "Strong Signals": "Oversold RSI, bullish crossover, strong trend",
+                    "Uses": "RSI, MACD crossover and level, 50/200-day trend, price vs 50-day, 1M and 1Y momentum",
+                    "Strong Signals": "Healthy trend alignment, bullish MACD, supportive momentum, controlled oversold reversals",
                 },
                 {
                     "Engine": "Fundamental",
-                    "Uses": "ROE, profit margin, debt/equity, revenue growth, current ratio",
-                    "Strong Signals": "High profitability, good growth, manageable leverage",
+                    "Uses": "ROE, profit margin, debt/equity, revenue growth, earnings growth, current ratio",
+                    "Strong Signals": "High profitability, positive growth, sound liquidity, manageable leverage",
                 },
                 {
                     "Engine": "Valuation",
-                    "Uses": "P/E, forward P/E, PEG, P/S, EV/EBITDA, P/B, Graham value",
-                    "Strong Signals": "Cheap versus sector benchmarks and intrinsic value",
+                    "Uses": "P/E, forward P/E, PEG, P/S, EV/EBITDA, P/B, Graham value, premium/discount bands",
+                    "Strong Signals": "Positive earnings, cheaper-than-sector multiples, discount to intrinsic value",
                 },
                 {
                     "Engine": "Sentiment",
-                    "Uses": "Headline tone, analyst recommendation, target mean price",
-                    "Strong Signals": "Positive news flow and upside in analyst targets",
+                    "Uses": "Headline tone by word match, analyst recommendation, analyst depth, target mean price",
+                    "Strong Signals": "Consistently constructive headlines and analyst targets with supporting coverage",
                 },
             ]
         )
