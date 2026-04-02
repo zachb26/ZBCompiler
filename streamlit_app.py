@@ -83,6 +83,29 @@ ANALYSIS_COLUMNS = {
     "Score_Val": "INTEGER",
     "Score_Sentiment": "INTEGER",
     "Sector": "TEXT",
+    "Stock_Type": "TEXT",
+    "Cap_Bucket": "TEXT",
+    "Style_Tags": "TEXT",
+    "Type_Strategy": "TEXT",
+    "Type_Confidence": "REAL",
+    "Engine_Weight_Profile": "TEXT",
+    "Market_Cap": "REAL",
+    "Dividend_Yield": "REAL",
+    "Payout_Ratio": "REAL",
+    "Equity_Beta": "REAL",
+    "Trend_Strength": "REAL",
+    "Range_Position_52W": "REAL",
+    "Distance_52W_High": "REAL",
+    "Distance_52W_Low": "REAL",
+    "Volatility_1M": "REAL",
+    "Volatility_1Y": "REAL",
+    "Momentum_1M_Risk_Adjusted": "REAL",
+    "Quality_Score": "REAL",
+    "Dividend_Safety_Score": "REAL",
+    "Valuation_Signal_Count": "INTEGER",
+    "Valuation_Confidence": "REAL",
+    "Sentiment_Conviction": "REAL",
+    "Risk_Flags": "TEXT",
     "PE_Ratio": "REAL",
     "Forward_PE": "REAL",
     "PEG_Ratio": "REAL",
@@ -239,6 +262,24 @@ PRESET_DESCRIPTIONS = {
 CHANGELOG_ENTRIES = [
     {
         "Date": "2026-04-02",
+        "Area": "Refinement Pass",
+        "Update": "Added ten new refinements spanning trend strength, 52-week context, volatility-adjusted momentum, quality scoring, dividend safety, valuation breadth, sentiment conviction, risk flags, dynamic engine weights, and profile-aware trailing stops.",
+        "Impact": "The model now uses a richer set of diagnostics before deciding how much to trust trend, quality, value, and sentiment for each stock type.",
+    },
+    {
+        "Date": "2026-04-02",
+        "Area": "Stock Types",
+        "Update": "Added a stock-type classifier that labels names such as Growth, Value, Dividend, Cyclical, Defensive, Blue-Chip, Cap-based, or Speculative and applies style-aware decision logic.",
+        "Impact": "The model now treats different kinds of stocks less uniformly and makes its style assumptions visible in research and backtests.",
+    },
+    {
+        "Date": "2026-04-02",
+        "Area": "Backtest Strategy",
+        "Update": "Shifted the replay toward a core-plus-tactical trend approach so strong uptrends keep some exposure and only fully exit after a deeper breakdown. Added win-rate and average-trade diagnostics.",
+        "Impact": "Secular winners are less likely to be traded out too early, and the backtest now shows whether its closed trades are actually improving.",
+    },
+    {
+        "Date": "2026-04-02",
         "Area": "Library",
         "Update": "Added database and CSV download actions so the shared research library can be exported, reviewed, versioned, and seeded into the repo.",
         "Impact": "You can now snapshot the research store and publish a populated seed library more easily.",
@@ -327,6 +368,44 @@ NEGATIVE_SENTIMENT_TERMS = {
     "bearish", "sell", "downgrade", "cut", "cuts", "risk", "risks", "probe",
     "investigation", "decline", "declines", "loss", "losses", "warning",
 }
+CYCLICAL_SECTORS = {
+    "Consumer Cyclical",
+    "Industrials",
+    "Energy",
+    "Basic Materials",
+    "Financial Services",
+    "Real Estate",
+}
+DEFENSIVE_SECTORS = {
+    "Consumer Defensive",
+    "Healthcare",
+    "Utilities",
+}
+INCOME_SECTORS = {
+    "Utilities",
+    "Real Estate",
+    "Consumer Defensive",
+    "Energy",
+    "Communication Services",
+}
+QUALITY_SECTORS = {
+    "Technology",
+    "Healthcare",
+    "Consumer Defensive",
+    "Communication Services",
+}
+STOCK_TYPE_STRATEGIES = {
+    "Growth Stocks": "Favor long-term accumulation, durable earnings growth, and trend persistence rather than demanding cheap valuation at every entry.",
+    "Value Stocks": "Lean hardest on valuation and balance-sheet strength, buying discounts to intrinsic value and waiting for the market to re-rate them.",
+    "Dividend / Income Stocks": "Focus on sustainable yield, payout discipline, and steady compounding instead of chasing aggressive price appreciation.",
+    "Cyclical Stocks": "Treat timing as critical, adding more confidently only when momentum and regime support the economic upswing.",
+    "Defensive Stocks": "Use as resilient portfolio ballast, tolerating slower upside in exchange for steadier earnings during uncertainty.",
+    "Blue-Chip Stocks": "Treat as core long-term holdings where quality and durability matter more than squeezing every short-term signal.",
+    "Small-Cap Stocks": "Require tighter risk control and stronger confirmation because upside can be large but drawdowns and liquidity risk are higher.",
+    "Mid-Cap Stocks": "Blend growth and stability, rewarding names where fundamentals and trend align without demanding mega-cap defensiveness.",
+    "Large-Cap Stocks": "Use as steadier core exposure, giving more room to established market leaders and less tolerance for broken fundamentals.",
+    "Speculative / Penny Stocks": "If held at all, treat as small tactical positions that demand strong confirmation and strict downside control.",
+}
 
 
 def safe_num(value):
@@ -368,6 +447,19 @@ def format_int(value):
     if value is None or pd.isna(value):
         return "N/A"
     return str(int(value))
+
+
+def format_market_cap(value):
+    if value is None or pd.isna(value):
+        return "N/A"
+    value = float(value)
+    if abs(value) >= 1_000_000_000_000:
+        return f"${value / 1_000_000_000_000:.2f}T"
+    if abs(value) >= 1_000_000_000:
+        return f"${value / 1_000_000_000:.1f}B"
+    if abs(value) >= 1_000_000:
+        return f"${value / 1_000_000:.1f}M"
+    return f"${value:,.0f}"
 
 
 def parse_last_updated(value):
@@ -726,6 +818,10 @@ def build_info_fallback_from_saved_analysis(saved_row):
 
     fallback_map = {
         "sector": row.get("Sector"),
+        "marketCap": row.get("Market_Cap"),
+        "dividendYield": row.get("Dividend_Yield"),
+        "payoutRatio": row.get("Payout_Ratio"),
+        "beta": row.get("Equity_Beta"),
         "trailingPE": row.get("PE_Ratio"),
         "forwardPE": row.get("Forward_PE"),
         "pegRatio": row.get("PEG_Ratio"),
@@ -957,6 +1053,714 @@ def safe_divide(numerator, denominator):
     if denominator is None or pd.isna(denominator) or abs(denominator) < 1e-12:
         return None
     return numerator / denominator
+
+
+def calculate_realized_volatility(close, window):
+    if close is None or len(close) < max(window, 2):
+        return None
+    returns = close.pct_change().dropna()
+    if len(returns) < window:
+        return None
+    return float(returns.tail(window).std() * np.sqrt(252))
+
+
+def calculate_trend_strength(price, sma50, sma200, momentum_1y=None):
+    components = []
+    if has_numeric_value(price) and has_numeric_value(sma200) and sma200 > 0:
+        components.append(np.clip((price / sma200 - 1) * 100, -25, 25))
+    if has_numeric_value(sma50) and has_numeric_value(sma200) and sma200 > 0:
+        components.append(np.clip((sma50 / sma200 - 1) * 120, -25, 25))
+    if has_numeric_value(momentum_1y):
+        components.append(np.clip(momentum_1y * 80, -25, 25))
+    if not components:
+        return None
+    return float(np.clip(sum(components), -100, 100))
+
+
+def calculate_52w_context(close):
+    if close is None or close.empty:
+        return None, None, None
+    window = close.tail(min(len(close), 252))
+    rolling_high = safe_num(window.max())
+    rolling_low = safe_num(window.min())
+    price = safe_num(window.iloc[-1])
+    if not has_numeric_value(price) or not has_numeric_value(rolling_high) or not has_numeric_value(rolling_low):
+        return None, None, None
+    range_position = safe_divide(price - rolling_low, rolling_high - rolling_low)
+    distance_high = safe_divide(price - rolling_high, rolling_high)
+    distance_low = safe_divide(price - rolling_low, rolling_low)
+    return range_position, distance_high, distance_low
+
+
+def calculate_quality_score(roe, margins, debt_eq, revenue_growth, earnings_growth, current_ratio, settings):
+    score = 0.0
+    if has_numeric_value(roe):
+        score += 1.25 if roe >= settings["fund_roe_threshold"] else (-1 if roe < 0 else 0)
+    if has_numeric_value(margins):
+        score += 1.25 if margins >= settings["fund_profit_margin_threshold"] else (-1 if margins < 0 else 0)
+    if has_numeric_value(debt_eq):
+        if 0 <= debt_eq < settings["fund_debt_good_threshold"]:
+            score += 1.0
+        elif debt_eq > settings["fund_debt_bad_threshold"]:
+            score -= 1.0
+    if has_numeric_value(revenue_growth) and has_numeric_value(earnings_growth):
+        if revenue_growth > 0 and earnings_growth > 0:
+            score += 1.0
+        elif revenue_growth < 0 and earnings_growth < 0:
+            score -= 1.0
+    elif has_numeric_value(revenue_growth):
+        score += 0.5 if revenue_growth > 0 else -0.5
+    elif has_numeric_value(earnings_growth):
+        score += 0.5 if earnings_growth > 0 else -0.5
+    if has_numeric_value(current_ratio):
+        if current_ratio >= settings["fund_current_ratio_good"]:
+            score += 0.5
+        elif current_ratio < settings["fund_current_ratio_bad"]:
+            score -= 0.5
+    return float(np.clip(score, -4, 5))
+
+
+def calculate_dividend_safety_score(dividend_yield, payout_ratio, margins, current_ratio, debt_eq):
+    score = 0.0
+    if has_numeric_value(dividend_yield):
+        if dividend_yield >= 0.06:
+            score += 0.5
+        elif dividend_yield >= 0.025:
+            score += 1.0
+    if has_numeric_value(payout_ratio):
+        if 0 < payout_ratio <= 0.65:
+            score += 2.0
+        elif payout_ratio <= 0.85:
+            score += 1.0
+        elif payout_ratio > 1.0:
+            score -= 2.0
+        elif payout_ratio > 0.85:
+            score -= 1.0
+    if has_numeric_value(margins) and margins > 0:
+        score += 0.5
+    if has_numeric_value(current_ratio):
+        score += 0.5 if current_ratio >= 1.0 else -0.5
+    if has_numeric_value(debt_eq):
+        if debt_eq < 120:
+            score += 0.5
+        elif debt_eq > 220:
+            score -= 0.5
+    return float(np.clip(score, -3, 4))
+
+
+def calculate_valuation_confidence(signal_count):
+    if not has_numeric_value(signal_count):
+        return 25.0
+    signal_count = float(signal_count)
+    return float(np.clip(20 + signal_count * 12, 20, 95))
+
+
+def calculate_sentiment_conviction(sentiment_score, analyst_opinions, recommendation_key, target_mean_price, price, headline_count):
+    conviction = min(abs(float(sentiment_score)) * 10, 35)
+    if has_numeric_value(analyst_opinions):
+        conviction += min(float(analyst_opinions) * 2.5, 25)
+    if recommendation_key and recommendation_key != "N/A":
+        conviction += 10
+    if has_numeric_value(target_mean_price) and has_numeric_value(price) and price > 0:
+        conviction += min(abs((target_mean_price - price) / price) * 100, 20)
+    conviction += min((headline_count or 0) * 3, 10)
+    return float(np.clip(conviction, 10, 95))
+
+
+def get_type_adjusted_engine_weights(stock_profile, settings):
+    primary_type = stock_profile.get("primary_type", "")
+    modifiers = {
+        "technical": 1.0,
+        "fundamental": 1.0,
+        "valuation": 1.0,
+        "sentiment": 1.0,
+    }
+    if primary_type == "Growth Stocks":
+        modifiers.update({"technical": 1.2, "fundamental": 1.05, "valuation": 0.75, "sentiment": 1.15})
+    elif primary_type == "Value Stocks":
+        modifiers.update({"technical": 0.85, "fundamental": 1.2, "valuation": 1.35, "sentiment": 0.8})
+    elif primary_type == "Dividend / Income Stocks":
+        modifiers.update({"technical": 0.75, "fundamental": 1.25, "valuation": 1.1, "sentiment": 0.7})
+    elif primary_type == "Cyclical Stocks":
+        modifiers.update({"technical": 1.25, "fundamental": 0.95, "valuation": 0.9, "sentiment": 1.0})
+    elif primary_type == "Defensive Stocks":
+        modifiers.update({"technical": 0.8, "fundamental": 1.25, "valuation": 1.0, "sentiment": 0.7})
+    elif primary_type == "Blue-Chip Stocks":
+        modifiers.update({"technical": 0.9, "fundamental": 1.2, "valuation": 0.95, "sentiment": 0.8})
+    elif primary_type == "Small-Cap Stocks":
+        modifiers.update({"technical": 1.15, "fundamental": 1.0, "valuation": 0.8, "sentiment": 1.05})
+    elif primary_type == "Mid-Cap Stocks":
+        modifiers.update({"technical": 1.05, "fundamental": 1.05, "valuation": 0.95, "sentiment": 0.95})
+    elif primary_type == "Large-Cap Stocks":
+        modifiers.update({"technical": 0.95, "fundamental": 1.1, "valuation": 1.0, "sentiment": 0.85})
+    elif primary_type == "Speculative / Penny Stocks":
+        modifiers.update({"technical": 1.35, "fundamental": 0.7, "valuation": 0.55, "sentiment": 1.25})
+
+    weights = {
+        "technical": settings["weight_technical"] * modifiers["technical"],
+        "fundamental": settings["weight_fundamental"] * modifiers["fundamental"],
+        "valuation": settings["weight_valuation"] * modifiers["valuation"],
+        "sentiment": settings["weight_sentiment"] * modifiers["sentiment"],
+    }
+    weight_profile = (
+        f"T {weights['technical']:.2f} | F {weights['fundamental']:.2f} | "
+        f"V {weights['valuation']:.2f} | S {weights['sentiment']:.2f}"
+    )
+    return weights, weight_profile
+
+
+def build_risk_flags(
+    *,
+    eps,
+    debt_eq,
+    current_ratio,
+    overextended,
+    distance_52w_high,
+    range_position,
+    volatility_1y,
+    stock_profile,
+):
+    flags = []
+    if has_numeric_value(eps) and eps <= 0:
+        flags.append("Negative EPS")
+    if has_numeric_value(debt_eq) and debt_eq > 220:
+        flags.append("High Debt")
+    if has_numeric_value(current_ratio) and current_ratio < 1.0:
+        flags.append("Weak Liquidity")
+    if overextended:
+        flags.append("Overextended")
+    if has_numeric_value(distance_52w_high) and distance_52w_high <= -0.20:
+        flags.append("Far Below 52W High")
+    if has_numeric_value(range_position) and range_position <= 0.15:
+        flags.append("Near 52W Low")
+    if has_numeric_value(volatility_1y) and volatility_1y >= 0.55:
+        flags.append("High Volatility")
+    if stock_profile.get("primary_type") == "Speculative / Penny Stocks":
+        flags.append("Speculative")
+    return flags
+
+
+def classify_cap_bucket(market_cap):
+    if not has_numeric_value(market_cap) or market_cap <= 0:
+        return "Unknown"
+    if market_cap < 2_000_000_000:
+        return "Small-Cap"
+    if market_cap < 10_000_000_000:
+        return "Mid-Cap"
+    return "Large-Cap"
+
+
+def build_stock_type_strategy(primary_type):
+    return STOCK_TYPE_STRATEGIES.get(
+        primary_type,
+        "Use the stock's blend of quality, valuation, and regime signals instead of forcing it into a one-size-fits-all strategy.",
+    )
+
+
+def classify_stock_profile(
+    *,
+    sector,
+    price,
+    market_cap,
+    dividend_yield,
+    payout_ratio,
+    equity_beta,
+    analyst_opinions,
+    pe,
+    forward_pe,
+    peg_ratio,
+    ps_ratio,
+    pb,
+    bench,
+    f_score,
+    v_val,
+    revenue_growth,
+    earnings_growth,
+    margins,
+    roe,
+    current_ratio,
+    debt_eq,
+    momentum_1y,
+):
+    cap_bucket = classify_cap_bucket(market_cap)
+    scores = {
+        "Growth Stocks": 0.0,
+        "Value Stocks": 0.0,
+        "Dividend / Income Stocks": 0.0,
+        "Cyclical Stocks": 0.0,
+        "Defensive Stocks": 0.0,
+        "Blue-Chip Stocks": 0.0,
+        "Small-Cap Stocks": 0.0,
+        "Mid-Cap Stocks": 0.0,
+        "Large-Cap Stocks": 0.0,
+        "Speculative / Penny Stocks": 0.0,
+    }
+    reasons = {name: [] for name in scores}
+
+    if sector in {"Technology", "Communication Services"}:
+        scores["Growth Stocks"] += 1
+        reasons["Growth Stocks"].append("innovation-heavy sector")
+    if has_numeric_value(revenue_growth) and revenue_growth >= 0.12:
+        scores["Growth Stocks"] += 2
+        reasons["Growth Stocks"].append("double-digit revenue growth")
+    if has_numeric_value(earnings_growth) and earnings_growth >= 0.12:
+        scores["Growth Stocks"] += 2
+        reasons["Growth Stocks"].append("double-digit earnings growth")
+    if has_numeric_value(momentum_1y) and momentum_1y >= 0.20:
+        scores["Growth Stocks"] += 1
+        reasons["Growth Stocks"].append("strong long-term momentum")
+    if (
+        (has_numeric_value(pe) and has_numeric_value(bench.get("PE")) and pe >= bench["PE"] * 1.10)
+        or (has_numeric_value(ps_ratio) and has_numeric_value(bench.get("PS")) and ps_ratio >= bench["PS"] * 1.10)
+        or (has_numeric_value(peg_ratio) and peg_ratio >= 1.2)
+    ):
+        scores["Growth Stocks"] += 1
+        reasons["Growth Stocks"].append("premium valuation profile")
+    if not has_numeric_value(dividend_yield) or dividend_yield < 0.015:
+        scores["Growth Stocks"] += 1
+        reasons["Growth Stocks"].append("low payout orientation")
+
+    if v_val == "UNDERVALUED":
+        scores["Value Stocks"] += 2
+        reasons["Value Stocks"].append("undervalued by the current valuation engine")
+    if has_numeric_value(pe) and has_numeric_value(bench.get("PE")) and pe <= bench["PE"] * 0.85:
+        scores["Value Stocks"] += 1
+        reasons["Value Stocks"].append("discounted earnings multiple")
+    if has_numeric_value(pb) and has_numeric_value(bench.get("PB")) and pb <= bench["PB"] * 0.85:
+        scores["Value Stocks"] += 1
+        reasons["Value Stocks"].append("discounted price-to-book")
+    if has_numeric_value(ps_ratio) and has_numeric_value(bench.get("PS")) and ps_ratio <= bench["PS"] * 0.85:
+        scores["Value Stocks"] += 1
+        reasons["Value Stocks"].append("discounted price-to-sales")
+    if f_score >= 1:
+        scores["Value Stocks"] += 1
+        reasons["Value Stocks"].append("fundamentals are at least stable")
+
+    if has_numeric_value(dividend_yield) and dividend_yield >= 0.03:
+        scores["Dividend / Income Stocks"] += 2
+        reasons["Dividend / Income Stocks"].append("meaningful dividend yield")
+    if has_numeric_value(dividend_yield) and dividend_yield >= 0.05:
+        scores["Dividend / Income Stocks"] += 1
+        reasons["Dividend / Income Stocks"].append("high income orientation")
+    if has_numeric_value(payout_ratio) and 0 < payout_ratio <= 0.80:
+        scores["Dividend / Income Stocks"] += 1
+        reasons["Dividend / Income Stocks"].append("payout looks more sustainable")
+    if sector in INCOME_SECTORS:
+        scores["Dividend / Income Stocks"] += 1
+        reasons["Dividend / Income Stocks"].append("income-heavy sector")
+    if has_numeric_value(equity_beta) and equity_beta < 1.0:
+        scores["Dividend / Income Stocks"] += 1
+        reasons["Dividend / Income Stocks"].append("below-market beta")
+
+    if sector in CYCLICAL_SECTORS:
+        scores["Cyclical Stocks"] += 2
+        reasons["Cyclical Stocks"].append("economically sensitive sector")
+    if has_numeric_value(equity_beta) and equity_beta > 1.10:
+        scores["Cyclical Stocks"] += 1
+        reasons["Cyclical Stocks"].append("higher beta profile")
+    if has_numeric_value(momentum_1y) and abs(momentum_1y) >= 0.20:
+        scores["Cyclical Stocks"] += 1
+        reasons["Cyclical Stocks"].append("large cycle-like price swings")
+
+    if sector in DEFENSIVE_SECTORS:
+        scores["Defensive Stocks"] += 2
+        reasons["Defensive Stocks"].append("defensive sector exposure")
+    if has_numeric_value(equity_beta) and equity_beta < 1.0:
+        scores["Defensive Stocks"] += 1
+        reasons["Defensive Stocks"].append("lower beta profile")
+    if has_numeric_value(margins) and margins > 0:
+        scores["Defensive Stocks"] += 1
+        reasons["Defensive Stocks"].append("positive margins")
+    if f_score >= 1:
+        scores["Defensive Stocks"] += 1
+        reasons["Defensive Stocks"].append("stable operating fundamentals")
+
+    if cap_bucket == "Large-Cap":
+        scores["Large-Cap Stocks"] += 3
+        reasons["Large-Cap Stocks"].append("market cap above $10B")
+    elif cap_bucket == "Mid-Cap":
+        scores["Mid-Cap Stocks"] += 3
+        reasons["Mid-Cap Stocks"].append("market cap between $2B and $10B")
+    elif cap_bucket == "Small-Cap":
+        scores["Small-Cap Stocks"] += 3
+        reasons["Small-Cap Stocks"].append("market cap below $2B")
+
+    if has_numeric_value(market_cap) and market_cap >= 100_000_000_000:
+        scores["Blue-Chip Stocks"] += 2
+        reasons["Blue-Chip Stocks"].append("very large market capitalization")
+    if has_numeric_value(market_cap) and market_cap >= 300_000_000_000:
+        scores["Blue-Chip Stocks"] += 1
+        reasons["Blue-Chip Stocks"].append("mega-cap scale")
+    if sector in QUALITY_SECTORS:
+        scores["Blue-Chip Stocks"] += 1
+        reasons["Blue-Chip Stocks"].append("quality-heavy sector")
+    if f_score >= 2:
+        scores["Blue-Chip Stocks"] += 1
+        reasons["Blue-Chip Stocks"].append("solid fundamental footing")
+    if has_numeric_value(analyst_opinions) and analyst_opinions >= 10:
+        scores["Blue-Chip Stocks"] += 1
+        reasons["Blue-Chip Stocks"].append("broad analyst coverage")
+    if has_numeric_value(roe) and roe > 0 and has_numeric_value(current_ratio) and current_ratio >= 1.0:
+        scores["Blue-Chip Stocks"] += 1
+        reasons["Blue-Chip Stocks"].append("quality balance-sheet profile")
+
+    if has_numeric_value(price) and price < 5:
+        scores["Speculative / Penny Stocks"] += 2
+        reasons["Speculative / Penny Stocks"].append("low share price")
+    if has_numeric_value(market_cap) and market_cap < 500_000_000:
+        scores["Speculative / Penny Stocks"] += 2
+        reasons["Speculative / Penny Stocks"].append("micro-cap scale")
+    elif cap_bucket == "Small-Cap":
+        scores["Speculative / Penny Stocks"] += 1
+        reasons["Speculative / Penny Stocks"].append("small-cap risk profile")
+    if f_score <= 0:
+        scores["Speculative / Penny Stocks"] += 1
+        reasons["Speculative / Penny Stocks"].append("weak or unproven fundamentals")
+    if has_numeric_value(equity_beta) and equity_beta >= 1.8:
+        scores["Speculative / Penny Stocks"] += 1
+        reasons["Speculative / Penny Stocks"].append("very high beta")
+    if has_numeric_value(analyst_opinions) and analyst_opinions < 3:
+        scores["Speculative / Penny Stocks"] += 1
+        reasons["Speculative / Penny Stocks"].append("thin coverage")
+    if has_numeric_value(debt_eq) and debt_eq > 250:
+        scores["Speculative / Penny Stocks"] += 1
+        reasons["Speculative / Penny Stocks"].append("high leverage")
+
+    style_tags = []
+    for tag_name in [
+        "Growth Stocks",
+        "Value Stocks",
+        "Dividend / Income Stocks",
+        "Cyclical Stocks",
+        "Defensive Stocks",
+        "Blue-Chip Stocks",
+    ]:
+        if scores[tag_name] >= 3:
+            style_tags.append(tag_name.replace(" Stocks", ""))
+    if cap_bucket != "Unknown":
+        style_tags.append(cap_bucket)
+
+    top_scores = sorted(scores.items(), key=lambda item: item[1], reverse=True)
+    top_type, top_score = top_scores[0]
+    second_score = top_scores[1][1] if len(top_scores) > 1 else 0
+
+    if scores["Speculative / Penny Stocks"] >= 4:
+        primary_type = "Speculative / Penny Stocks"
+    elif scores["Growth Stocks"] >= 5 and scores["Growth Stocks"] >= scores["Value Stocks"] + 1:
+        primary_type = "Growth Stocks"
+    elif scores["Value Stocks"] >= 5 and scores["Value Stocks"] >= scores["Growth Stocks"]:
+        primary_type = "Value Stocks"
+    elif scores["Dividend / Income Stocks"] >= 4 and scores["Dividend / Income Stocks"] >= scores["Defensive Stocks"]:
+        primary_type = "Dividend / Income Stocks"
+    elif scores["Defensive Stocks"] >= 4 and scores["Defensive Stocks"] >= scores["Cyclical Stocks"]:
+        primary_type = "Defensive Stocks"
+    elif scores["Cyclical Stocks"] >= 4:
+        primary_type = "Cyclical Stocks"
+    elif scores["Blue-Chip Stocks"] >= 5 and cap_bucket == "Large-Cap":
+        primary_type = "Blue-Chip Stocks"
+    elif top_score >= 4:
+        primary_type = top_type
+    elif cap_bucket == "Small-Cap":
+        primary_type = "Small-Cap Stocks"
+    elif cap_bucket == "Mid-Cap":
+        primary_type = "Mid-Cap Stocks"
+    else:
+        primary_type = "Large-Cap Stocks" if cap_bucket == "Large-Cap" else "Blue-Chip Stocks"
+
+    confidence = float(np.clip(45 + top_score * 8 + (top_score - second_score) * 6, 35, 95))
+    top_reasons = reasons.get(primary_type, [])
+    summary = ", ".join(top_reasons[:3]) if top_reasons else "mixed factor profile"
+    return {
+        "primary_type": primary_type,
+        "cap_bucket": cap_bucket,
+        "style_tags": " | ".join(style_tags) if style_tags else primary_type.replace(" Stocks", ""),
+        "type_strategy": build_stock_type_strategy(primary_type),
+        "type_confidence": confidence,
+        "classification_summary": summary,
+        "market_cap": market_cap,
+        "dividend_yield": dividend_yield,
+        "payout_ratio": payout_ratio,
+        "equity_beta": equity_beta,
+    }
+
+
+def extract_stock_profile_from_saved_row(saved_row):
+    if saved_row is None:
+        return {}
+    return {
+        "primary_type": saved_row.get("Stock_Type", "Unknown"),
+        "cap_bucket": saved_row.get("Cap_Bucket", "Unknown"),
+        "style_tags": saved_row.get("Style_Tags", ""),
+        "type_strategy": saved_row.get("Type_Strategy", ""),
+        "type_confidence": safe_num(saved_row.get("Type_Confidence")),
+        "classification_summary": "",
+        "market_cap": safe_num(saved_row.get("Market_Cap")),
+        "dividend_yield": safe_num(saved_row.get("Dividend_Yield")),
+        "payout_ratio": safe_num(saved_row.get("Payout_Ratio")),
+        "equity_beta": safe_num(saved_row.get("Equity_Beta")),
+    }
+
+
+def infer_stock_profile_from_snapshot(info, hist, settings=None):
+    active_settings = get_model_settings() if settings is None else settings
+    info = info or {}
+    if hist is None or hist.empty or "Close" not in hist.columns:
+        return {}
+
+    close = hist["Close"].dropna().astype(float)
+    if close.empty:
+        return {}
+    price = float(close.iloc[-1])
+    momentum_1y = (price / close.iloc[0] - 1) if len(close) > 1 else None
+    sector = info.get("sector", "Unknown")
+    bench = get_sector_benchmarks(sector, active_settings)
+
+    roe = safe_num(info.get("returnOnEquity"))
+    margins = safe_num(info.get("profitMargins"))
+    debt_eq = safe_num(info.get("debtToEquity"))
+    revenue_growth = safe_num(info.get("revenueGrowth"))
+    earnings_growth = safe_num(info.get("earningsGrowth"))
+    current_ratio = safe_num(info.get("currentRatio"))
+
+    f_score = 0
+    if has_numeric_value(roe):
+        f_score += 1 if roe >= active_settings["fund_roe_threshold"] else (-1 if roe < 0 else 0)
+    if has_numeric_value(margins):
+        f_score += 1 if margins >= active_settings["fund_profit_margin_threshold"] else (-1 if margins < 0 else 0)
+    if has_numeric_value(debt_eq):
+        f_score += 1 if 0 <= debt_eq < active_settings["fund_debt_good_threshold"] else (-1 if debt_eq > active_settings["fund_debt_bad_threshold"] else 0)
+    if has_numeric_value(revenue_growth):
+        f_score += 1 if revenue_growth >= active_settings["fund_revenue_growth_threshold"] else (-1 if revenue_growth < 0 else 0)
+    if has_numeric_value(earnings_growth):
+        f_score += 1 if earnings_growth >= active_settings["fund_revenue_growth_threshold"] else (-1 if earnings_growth < 0 else 0)
+    if has_numeric_value(current_ratio):
+        f_score += 1 if current_ratio >= active_settings["fund_current_ratio_good"] else (-1 if current_ratio < active_settings["fund_current_ratio_bad"] else 0)
+
+    pe = safe_num(info.get("trailingPE"))
+    forward_pe = safe_num(info.get("forwardPE"))
+    peg_ratio = safe_num(info.get("pegRatio"))
+    ps_ratio = safe_num(info.get("priceToSalesTrailing12Months"))
+    pb = safe_num(info.get("priceToBook"))
+    ev_ebitda = safe_num(info.get("enterpriseToEbitda"))
+    v_score = 0
+    valuation_signal_count = 0
+    for metric_value, benchmark_value in [
+        (pe, bench["PE"]),
+        (forward_pe, bench["PE"]),
+        (ps_ratio, bench["PS"]),
+        (pb, bench["PB"]),
+        (ev_ebitda, bench["EV_EBITDA"]),
+    ]:
+        multiple_score = score_relative_multiple(metric_value, benchmark_value)
+        v_score += multiple_score
+        if has_numeric_value(metric_value):
+            valuation_signal_count += 1
+    if has_numeric_value(peg_ratio):
+        valuation_signal_count += 1
+        if peg_ratio <= active_settings["valuation_peg_threshold"] * 0.9:
+            v_score += 1
+        elif peg_ratio >= active_settings["valuation_peg_threshold"] * 1.35:
+            v_score -= 1
+
+    if valuation_signal_count < 2 and v_score < active_settings["valuation_fair_score_threshold"]:
+        v_val = "FAIR VALUE"
+    elif v_score >= active_settings["valuation_under_score_threshold"]:
+        v_val = "UNDERVALUED"
+    elif v_score >= active_settings["valuation_fair_score_threshold"]:
+        v_val = "FAIR VALUE"
+    else:
+        v_val = "OVERVALUED"
+
+    return classify_stock_profile(
+        sector=sector,
+        price=price,
+        market_cap=safe_num(info.get("marketCap")),
+        dividend_yield=safe_num(info.get("dividendYield")),
+        payout_ratio=safe_num(info.get("payoutRatio")),
+        equity_beta=safe_num(info.get("beta")),
+        analyst_opinions=safe_num(info.get("numberOfAnalystOpinions")),
+        pe=pe,
+        forward_pe=forward_pe,
+        peg_ratio=peg_ratio,
+        ps_ratio=ps_ratio,
+        pb=pb,
+        bench=bench,
+        f_score=f_score,
+        v_val=v_val,
+        revenue_growth=revenue_growth,
+        earnings_growth=earnings_growth,
+        margins=margins,
+        roe=roe,
+        current_ratio=current_ratio,
+        debt_eq=debt_eq,
+        momentum_1y=momentum_1y,
+    )
+
+
+def apply_stock_type_framework(
+    *,
+    stock_profile,
+    overall_score,
+    tech_score,
+    f_score,
+    v_score,
+    sentiment_score,
+    v_fund,
+    v_val,
+    regime,
+    bullish_trend,
+    bearish_trend,
+    data_quality,
+    momentum_1y,
+    settings,
+):
+    primary_type = stock_profile.get("primary_type", "")
+    cap_bucket = stock_profile.get("cap_bucket", "Unknown")
+    dividend_yield = stock_profile.get("dividend_yield")
+    payout_ratio = stock_profile.get("payout_ratio")
+    adjusted_score = overall_score
+    local_settings = dict(settings)
+    notes = []
+    cap_verdict_to = None
+
+    if primary_type == "Growth Stocks":
+        local_settings["decision_hold_buffer"] = max(0.0, settings["decision_hold_buffer"] - 0.5)
+        local_settings["overall_buy_threshold"] = max(1.0, settings["overall_buy_threshold"] - 1.0)
+        if bullish_trend and (f_score >= 1 or sentiment_score >= 1):
+            adjusted_score += 1.0
+            notes.append("Growth profile rewards durable trend strength")
+        if v_val == "OVERVALUED" and bullish_trend and has_numeric_value(momentum_1y) and momentum_1y > 0.25:
+            adjusted_score += 0.75
+            notes.append("Premium valuation is tolerated more for proven compounders")
+        if bearish_trend and sentiment_score <= 0:
+            adjusted_score -= 1.0
+            notes.append("Growth setups lose conviction faster in downtrends")
+
+    elif primary_type == "Value Stocks":
+        local_settings["decision_hold_buffer"] = settings["decision_hold_buffer"] + 0.5
+        if v_val == "UNDERVALUED" and f_score >= 1:
+            adjusted_score += 1.25
+            notes.append("Value profile leans harder on valuation plus stable fundamentals")
+        if bearish_trend and tech_score <= -2:
+            adjusted_score -= 0.75
+            notes.append("Deep value still waits for price damage to stabilize")
+        if sentiment_score <= -2:
+            adjusted_score -= 0.5
+
+    elif primary_type == "Dividend / Income Stocks":
+        local_settings["overall_sell_threshold"] = settings["overall_sell_threshold"] - 1.0
+        local_settings["overall_strong_sell_threshold"] = settings["overall_strong_sell_threshold"] - 1.0
+        if has_numeric_value(dividend_yield) and dividend_yield >= 0.03:
+            adjusted_score += 0.75
+            notes.append("Income profile rewards durable shareholder yield")
+        if has_numeric_value(payout_ratio) and payout_ratio > 0.95:
+            adjusted_score -= 1.0
+            notes.append("An overstretched payout ratio weakens the income case")
+        if regime == "Range-bound" and f_score >= 1 and v_val != "OVERVALUED":
+            adjusted_score += 0.5
+
+    elif primary_type == "Cyclical Stocks":
+        local_settings["decision_hold_buffer"] = settings["decision_hold_buffer"] + 1.0
+        if regime == "Bullish Trend" and tech_score >= 2 and sentiment_score >= 0:
+            adjusted_score += 1.25
+            notes.append("Cyclicals want momentum and regime confirmation")
+        if regime in {"Transition", "Range-bound"}:
+            adjusted_score -= 0.75
+            notes.append("Cycle timing risk pushes mixed setups toward hold")
+        if bearish_trend or (has_numeric_value(momentum_1y) and momentum_1y < 0):
+            adjusted_score -= 1.0
+
+    elif primary_type == "Defensive Stocks":
+        local_settings["overall_sell_threshold"] = settings["overall_sell_threshold"] - 1.0
+        local_settings["overall_strong_sell_threshold"] = settings["overall_strong_sell_threshold"] - 1.0
+        if f_score >= 1 and v_val != "OVERVALUED":
+            adjusted_score += 0.75
+            notes.append("Defensives get more credit for steady fundamentals")
+        if regime in {"Range-bound", "Transition"} and f_score >= 1:
+            adjusted_score += 0.5
+        if bearish_trend and f_score <= 0:
+            adjusted_score -= 0.5
+
+    elif primary_type == "Blue-Chip Stocks":
+        local_settings["decision_hold_buffer"] = max(0.0, settings["decision_hold_buffer"] - 0.5)
+        if f_score >= 1 and sentiment_score >= 0:
+            adjusted_score += 0.75
+            notes.append("Blue-chip profile gives more room to durable quality")
+        if v_val == "OVERVALUED" and bullish_trend and f_score >= 2:
+            adjusted_score += 0.5
+        if bearish_trend and f_score <= 0:
+            adjusted_score -= 0.75
+
+    elif primary_type == "Small-Cap Stocks":
+        local_settings["decision_hold_buffer"] = settings["decision_hold_buffer"] + 0.5
+        local_settings["overall_buy_threshold"] = settings["overall_buy_threshold"] + 1.0
+        if tech_score >= 3 and sentiment_score >= 1 and bullish_trend:
+            adjusted_score += 0.75
+            notes.append("Small caps need stronger confirmation before leaning in")
+        if data_quality == "Low" or bearish_trend:
+            adjusted_score -= 1.25
+
+    elif primary_type == "Mid-Cap Stocks":
+        if f_score >= 1 and bullish_trend:
+            adjusted_score += 0.5
+            notes.append("Mid-cap profile likes balanced trend plus fundamentals")
+        if bearish_trend and f_score <= 0:
+            adjusted_score -= 0.75
+
+    elif primary_type == "Large-Cap Stocks":
+        if f_score >= 1:
+            adjusted_score += 0.5
+            notes.append("Large caps get a modest durability benefit")
+        if bearish_trend and f_score <= 0:
+            adjusted_score -= 0.5
+
+    elif primary_type == "Speculative / Penny Stocks":
+        local_settings["decision_hold_buffer"] = settings["decision_hold_buffer"] + 1.0
+        local_settings["overall_buy_threshold"] = settings["overall_buy_threshold"] + 1.0
+        local_settings["overall_strong_buy_threshold"] = settings["overall_strong_buy_threshold"] + 2.0
+        cap_verdict_to = "BUY"
+        if tech_score >= 4 and sentiment_score >= 2 and bullish_trend:
+            adjusted_score += 0.5
+            notes.append("Speculative profile only rewards strong confirmation")
+        else:
+            adjusted_score -= 1.0
+        if data_quality == "Low" or f_score <= 0:
+            adjusted_score -= 1.0
+            notes.append("Weak data or fundamentals are penalized harder")
+
+    if cap_bucket == "Small-Cap" and primary_type != "Speculative / Penny Stocks":
+        adjusted_score -= 0.25
+    elif cap_bucket == "Large-Cap" and primary_type not in {"Blue-Chip Stocks", "Large-Cap Stocks"} and f_score >= 1:
+        adjusted_score += 0.25
+
+    verdict = resolve_overall_verdict(
+        overall_score=adjusted_score,
+        tech_score=tech_score,
+        f_score=f_score,
+        v_score=v_score,
+        sentiment_score=sentiment_score,
+        v_fund=v_fund,
+        v_val=v_val,
+        regime=regime,
+        bullish_trend=bullish_trend,
+        bearish_trend=bearish_trend,
+        settings=local_settings,
+    )
+
+    if cap_verdict_to == "BUY" and verdict == "STRONG BUY":
+        verdict = "BUY"
+
+    return adjusted_score, verdict, local_settings, notes
+
+
+def adjust_type_based_confidence(confidence, stock_profile, data_quality):
+    primary_type = stock_profile.get("primary_type", "")
+    adjusted_confidence = float(confidence)
+    if primary_type in {"Blue-Chip Stocks", "Defensive Stocks"} and data_quality != "Low":
+        adjusted_confidence += 4
+    elif primary_type in {"Small-Cap Stocks", "Speculative / Penny Stocks"}:
+        adjusted_confidence -= 6 if primary_type == "Speculative / Penny Stocks" else 3
+    return float(np.clip(round(adjusted_confidence, 1), 5.0, 95.0))
 
 
 def parse_ticker_list(raw_text):
@@ -1265,14 +2069,80 @@ def resolve_overall_verdict(
     return verdict
 
 
-def derive_backtest_positions(analysis, settings=None):
+def derive_backtest_positions(analysis, settings=None, stock_profile=None):
     active_settings = get_model_settings() if settings is None else settings
     if analysis is None or analysis.empty:
         return pd.Series(dtype=float)
 
+    primary_type = (stock_profile or {}).get("primary_type", "")
     long_term_momentum_floor = max(active_settings["tech_momentum_threshold"] * 2, 0.08)
     trend_tolerance = active_settings["tech_trend_tolerance"]
+    extension_limit = active_settings["tech_extension_limit"]
     cooldown_days = int(round(active_settings["backtest_cooldown_days"]))
+    core_reentry_cooldown = max(1, cooldown_days // 2)
+    core_target = 0.5
+    full_target = 1.0
+    entry_score_floor = 3
+    core_score_floor = 1
+    add_score_floor = 2
+    hard_exit_score_floor = -5
+    exit_break_multiplier = 1.5
+    trailing_stop_threshold = -0.16
+    allow_core_outside_bullish = False
+    trim_to_core_on_non_bullish = False
+
+    if primary_type in {"Growth Stocks", "Blue-Chip Stocks"}:
+        core_reentry_cooldown = max(1, cooldown_days // 3)
+        entry_score_floor = 2
+        add_score_floor = 1
+        hard_exit_score_floor = -6
+        exit_break_multiplier = 1.8
+        trailing_stop_threshold = -0.20
+    elif primary_type == "Value Stocks":
+        entry_score_floor = 2
+        exit_break_multiplier = 1.7
+        trailing_stop_threshold = -0.18
+    elif primary_type in {"Dividend / Income Stocks", "Defensive Stocks", "Large-Cap Stocks"}:
+        allow_core_outside_bullish = True
+        entry_score_floor = 2
+        core_score_floor = 0
+        exit_break_multiplier = 1.8
+        trailing_stop_threshold = -0.15
+    elif primary_type == "Cyclical Stocks":
+        core_target = 0.25
+        entry_score_floor = 3
+        add_score_floor = 2
+        hard_exit_score_floor = -4
+        exit_break_multiplier = 1.2
+        trailing_stop_threshold = -0.12
+        trim_to_core_on_non_bullish = True
+    elif primary_type == "Mid-Cap Stocks":
+        core_target = 0.5
+        entry_score_floor = 3
+        add_score_floor = 2
+        exit_break_multiplier = 1.4
+        trailing_stop_threshold = -0.14
+    elif primary_type == "Small-Cap Stocks":
+        core_target = 0.25
+        full_target = 0.75
+        entry_score_floor = 4
+        core_score_floor = 2
+        add_score_floor = 3
+        hard_exit_score_floor = -4
+        exit_break_multiplier = 1.2
+        trailing_stop_threshold = -0.10
+        trim_to_core_on_non_bullish = True
+    elif primary_type == "Speculative / Penny Stocks":
+        core_target = 0.0
+        full_target = 0.5
+        entry_score_floor = 4
+        core_score_floor = 3
+        add_score_floor = 4
+        hard_exit_score_floor = -4
+        exit_break_multiplier = 1.0
+        trailing_stop_threshold = -0.08
+        trim_to_core_on_non_bullish = True
+
     bullish_regime = (
         analysis["Close"].ge(analysis["SMA_200"] * (1 + trend_tolerance))
         & (
@@ -1287,62 +2157,112 @@ def derive_backtest_positions(analysis, settings=None):
             | analysis["Momentum_1Y"].lt(0)
         )
     )
-    not_stretched = (
-        analysis["RSI"].lt(active_settings["tech_rsi_overbought"]).fillna(True)
-        | analysis["Close"].le(analysis["SMA_50"] * 1.03).fillna(True)
-    )
-
+    bullish_regime = bullish_regime.fillna(False)
+    bearish_regime = bearish_regime.fillna(False)
+    macd_bullish = analysis["MACD"].ge(analysis["MACD_Signal_Line"]).fillna(False)
+    macd_bearish = analysis["MACD"].lt(analysis["MACD_Signal_Line"]).fillna(False)
+    core_regime = bullish_regime | (~bearish_regime if allow_core_outside_bullish else False)
+    trailing_stop_breach = analysis.get("Trailing_Drawdown_Quarter", pd.Series(index=analysis.index, dtype=float)).le(
+        trailing_stop_threshold
+    ).fillna(False)
     entry_signal = (
-        (analysis["Tech Score"] >= 3)
-        & bullish_regime.fillna(False)
-        & not_stretched
-        & analysis["MACD"].gt(analysis["MACD_Signal_Line"]).fillna(False)
+        bullish_regime
+        & analysis["Tech Score"].ge(entry_score_floor)
+        & macd_bullish
         & analysis["Momentum_1M"].gt(-active_settings["tech_momentum_threshold"]).fillna(False)
     )
     recovery_entry = (
-        bullish_regime.fillna(False)
+        core_regime
         & analysis["RSI"].gt(active_settings["tech_rsi_oversold"]).fillna(False)
         & analysis["RSI"].shift(1).le(active_settings["tech_rsi_oversold"]).fillna(False)
-        & analysis["MACD"].gt(analysis["MACD_Signal_Line"]).fillna(False)
+        & macd_bullish
     )
-    partial_signal = (
-        bullish_regime.fillna(False)
-        & analysis["Tech Score"].ge(1)
-        & analysis["MACD"].ge(analysis["MACD_Signal_Line"]).fillna(False)
+    core_signal = (
+        core_regime
+        & analysis["Tech Score"].ge(core_score_floor)
+        & macd_bullish
     )
-    reduce_signal = (
-        bearish_regime.fillna(False)
-        & analysis["Tech Score"].le(-2)
+    add_signal = (
+        bullish_regime
+        & analysis["Tech Score"].ge(add_score_floor)
+        & analysis["Momentum_1M"].gt(-active_settings["tech_momentum_threshold"]).fillna(False)
+    )
+    overextended = (
+        analysis["Close"].ge(analysis["SMA_50"] * (1 + extension_limit)).fillna(False)
+        & analysis["RSI"].ge(active_settings["tech_rsi_overbought"] - 3).fillna(False)
+    )
+    tactical_reduce = (
+        bullish_regime
+        & (
+            (overextended & analysis["Tech Score"].le(2))
+            | (
+                macd_bearish
+                & analysis["Momentum_1M"].lt(0).fillna(False)
+                & analysis["Tech Score"].le(0)
+            )
+        )
+    )
+    danger_reduce = (
+        (bearish_regime | trailing_stop_breach)
+        & (
+            analysis["Tech Score"].le(-2)
+            | (macd_bearish & analysis["Momentum_1M"].lt(0).fillna(False))
+        )
+    )
+    hard_exit = (
+        analysis["Tech Score"].le(hard_exit_score_floor)
+        & macd_bearish
+        & analysis["Momentum_1M"].lt(-active_settings["tech_momentum_threshold"]).fillna(False)
     )
     exit_signal = (
-        ((analysis["Tech Score"] <= -4) & bearish_regime.fillna(False))
+        hard_exit
         | (
-            bearish_regime.fillna(False)
-            & analysis["MACD"].lt(analysis["MACD_Signal_Line"]).fillna(False)
+            trailing_stop_breach
+            & macd_bearish
+            & analysis["Tech Score"].le(0)
+        )
+        | (
+            bearish_regime
+            & analysis["Close"].le(analysis["SMA_200"] * (1 - trend_tolerance * exit_break_multiplier)).fillna(False)
+            & macd_bearish
             & analysis["Momentum_1Y"].lt(-long_term_momentum_floor).fillna(False)
-            & analysis["Momentum_1M"].lt(0).fillna(False)
         )
     )
 
     positions = []
     current_position = 0.0
     days_since_change = cooldown_days
-    for enter_now, recover_now, partial_now, reduce_now, exit_now in zip(
+    for is_bullish, is_bearish, enter_now, recover_now, core_now, add_now, reduce_now, danger_now, exit_now in zip(
+        bullish_regime,
+        bearish_regime,
         entry_signal,
         recovery_entry,
-        partial_signal,
-        reduce_signal,
+        core_signal,
+        add_signal,
+        tactical_reduce,
+        danger_reduce,
         exit_signal,
     ):
         target_position = current_position
         if exit_now:
             target_position = 0.0
-        elif reduce_now and current_position > 0.5:
-            target_position = 0.5
-        elif (enter_now or recover_now) and days_since_change >= cooldown_days:
-            target_position = 1.0
-        elif partial_now and current_position < 0.5 and days_since_change >= cooldown_days:
-            target_position = 0.5
+        elif is_bullish:
+            if current_position < core_target and (core_now or enter_now or recover_now) and days_since_change >= core_reentry_cooldown:
+                target_position = core_target
+            if (enter_now or recover_now or add_now) and days_since_change >= cooldown_days:
+                target_position = full_target
+            elif reduce_now and current_position > core_target:
+                target_position = core_target
+        elif is_bearish:
+            if danger_now and current_position > core_target:
+                target_position = core_target
+        else:
+            if trim_to_core_on_non_bullish and current_position > core_target:
+                target_position = core_target
+            elif current_position < core_target and add_now and days_since_change >= core_reentry_cooldown:
+                target_position = core_target
+            elif reduce_now and current_position > core_target:
+                target_position = core_target
 
         if target_position != current_position:
             current_position = target_position
@@ -1352,6 +2272,72 @@ def derive_backtest_positions(analysis, settings=None):
         positions.append(current_position)
 
     return pd.Series(positions, index=analysis.index, dtype=float)
+
+
+def summarize_backtest_trades(analysis):
+    if analysis is None or analysis.empty or "Close" not in analysis.columns or "Position" not in analysis.columns:
+        return pd.DataFrame(), {
+            "Closed Trades": 0,
+            "Win Rate": None,
+            "Average Trade Return": None,
+        }
+
+    open_lots = []
+    closed_trades = []
+    previous_position = 0.0
+
+    for date, row in analysis.iterrows():
+        close = safe_num(row.get("Close"))
+        current_position = safe_num(row.get("Position")) or 0.0
+        if close is None:
+            previous_position = current_position
+            continue
+
+        position_change = round(current_position - previous_position, 6)
+        if position_change > 0:
+            open_lots.append(
+                {
+                    "entry_date": date,
+                    "entry_price": close,
+                    "size": position_change,
+                }
+            )
+        elif position_change < 0:
+            remaining_to_close = abs(position_change)
+            while remaining_to_close > 1e-9 and open_lots:
+                lot = open_lots[0]
+                closed_size = min(lot["size"], remaining_to_close)
+                closed_trades.append(
+                    {
+                        "Entry Date": lot["entry_date"],
+                        "Exit Date": date,
+                        "Entry Price": lot["entry_price"],
+                        "Exit Price": close,
+                        "Position Size": closed_size,
+                        "Return": safe_divide(close - lot["entry_price"], lot["entry_price"]),
+                        "Holding Days": (date - lot["entry_date"]).days if hasattr(date, "__sub__") else None,
+                    }
+                )
+                lot["size"] -= closed_size
+                remaining_to_close -= closed_size
+                if lot["size"] <= 1e-9:
+                    open_lots.pop(0)
+
+        previous_position = current_position
+
+    if not closed_trades:
+        return pd.DataFrame(), {
+            "Closed Trades": 0,
+            "Win Rate": None,
+            "Average Trade Return": None,
+        }
+
+    closed_trades_df = pd.DataFrame(closed_trades)
+    return closed_trades_df, {
+        "Closed Trades": len(closed_trades_df),
+        "Win Rate": (closed_trades_df["Return"] > 0).mean(),
+        "Average Trade Return": closed_trades_df["Return"].mean(),
+    }
 
 
 def get_default_model_settings():
@@ -1608,6 +2594,32 @@ def prepare_analysis_dataframe(df, settings=None):
         enriched["Decision_Notes"] = enriched["Decision_Notes"].fillna("")
     if "Decision_Confidence" not in enriched.columns:
         enriched["Decision_Confidence"] = np.nan
+    if "Stock_Type" not in enriched.columns:
+        enriched["Stock_Type"] = "Legacy"
+    else:
+        enriched["Stock_Type"] = enriched["Stock_Type"].fillna("Legacy")
+    if "Cap_Bucket" not in enriched.columns:
+        enriched["Cap_Bucket"] = "Unknown"
+    else:
+        enriched["Cap_Bucket"] = enriched["Cap_Bucket"].fillna("Unknown")
+    if "Style_Tags" not in enriched.columns:
+        enriched["Style_Tags"] = ""
+    else:
+        enriched["Style_Tags"] = enriched["Style_Tags"].fillna("")
+    if "Type_Strategy" not in enriched.columns:
+        enriched["Type_Strategy"] = ""
+    else:
+        enriched["Type_Strategy"] = enriched["Type_Strategy"].fillna("")
+    if "Type_Confidence" not in enriched.columns:
+        enriched["Type_Confidence"] = np.nan
+    if "Engine_Weight_Profile" not in enriched.columns:
+        enriched["Engine_Weight_Profile"] = ""
+    else:
+        enriched["Engine_Weight_Profile"] = enriched["Engine_Weight_Profile"].fillna("")
+    if "Risk_Flags" not in enriched.columns:
+        enriched["Risk_Flags"] = ""
+    else:
+        enriched["Risk_Flags"] = enriched["Risk_Flags"].fillna("")
 
     if (
         "Data_Completeness" not in enriched.columns
@@ -1767,7 +2779,7 @@ def run_sensitivity_analysis(analyst, ticker, settings=None):
     return scenarios_df, summary
 
 
-def compute_technical_backtest(hist, settings=None):
+def compute_technical_backtest(hist, settings=None, stock_profile=None):
     active_settings = get_model_settings() if settings is None else settings
     if hist is None or hist.empty or "Close" not in hist.columns:
         return None
@@ -1788,6 +2800,22 @@ def compute_technical_backtest(hist, settings=None):
     analysis["SMA_200"] = close.rolling(200).mean()
     analysis["Momentum_1M"] = close / close.shift(22) - 1
     analysis["Momentum_1Y"] = close / close.shift(252) - 1
+    analysis["Volatility_1M"] = close.pct_change().rolling(22).std() * np.sqrt(252)
+    analysis["Volatility_1Y"] = close.pct_change().rolling(252).std() * np.sqrt(252)
+    analysis["Momentum_1M_Risk_Adjusted"] = analysis["Momentum_1M"] / (analysis["Volatility_1M"] / np.sqrt(12))
+    analysis["Rolling_High_252"] = close.rolling(252, min_periods=20).max()
+    analysis["Rolling_Low_252"] = close.rolling(252, min_periods=20).min()
+    analysis["Range_Position_252"] = (close - analysis["Rolling_Low_252"]) / (
+        analysis["Rolling_High_252"] - analysis["Rolling_Low_252"]
+    )
+    analysis["Distance_52W_High"] = (close - analysis["Rolling_High_252"]) / analysis["Rolling_High_252"]
+    analysis["Trend_Strength"] = (
+        ((close / analysis["SMA_200"]) - 1).clip(-0.25, 0.25).fillna(0) * 100
+        + ((analysis["SMA_50"] / analysis["SMA_200"]) - 1).clip(-0.25, 0.25).fillna(0) * 120
+        + analysis["Momentum_1Y"].clip(-0.3125, 0.3125).fillna(0) * 80
+    )
+    analysis["Quarter_High"] = close.rolling(63, min_periods=20).max()
+    analysis["Trailing_Drawdown_Quarter"] = (close / analysis["Quarter_High"]) - 1
 
     trend_tolerance = active_settings["tech_trend_tolerance"]
     extension_limit = active_settings["tech_extension_limit"]
@@ -1837,9 +2865,23 @@ def compute_technical_backtest(hist, settings=None):
     tech_score += np.where(analysis["MACD"] > 0, 1, np.where(analysis["MACD"] < 0, -1, 0))
     tech_score += np.where(analysis["Momentum_1M"] > active_settings["tech_momentum_threshold"], 1, 0)
     tech_score += np.where(analysis["Momentum_1M"] < -active_settings["tech_momentum_threshold"], -1, 0)
+    tech_score += np.where(analysis["Momentum_1M_Risk_Adjusted"] > 0.75, 1, 0)
+    tech_score += np.where(analysis["Momentum_1M_Risk_Adjusted"] < -0.75, -1, 0)
     long_term_momentum_threshold = max(active_settings["tech_momentum_threshold"] * 3, 0.10)
     tech_score += np.where(analysis["Momentum_1Y"] > long_term_momentum_threshold, 1, 0)
     tech_score += np.where(analysis["Momentum_1Y"] < -long_term_momentum_threshold, -1, 0)
+    tech_score += np.where(analysis["Trend_Strength"] > 30, 1, 0)
+    tech_score += np.where(analysis["Trend_Strength"] < -30, -1, 0)
+    tech_score += np.where(
+        analysis["Range_Position_252"].ge(0.80) & analysis["Close"].ge(analysis["SMA_200"]),
+        1,
+        0,
+    )
+    tech_score += np.where(
+        analysis["Range_Position_252"].le(0.20) & analysis["Close"].le(analysis["SMA_200"]),
+        -1,
+        0,
+    )
     tech_score += np.where(
         analysis["RSI"].shift(1).le(active_settings["tech_rsi_oversold"])
         & analysis["RSI"].gt(active_settings["tech_rsi_oversold"])
@@ -1862,7 +2904,7 @@ def compute_technical_backtest(hist, settings=None):
 
     analysis["Tech Score"] = tech_score
     analysis["Signal"] = analysis["Tech Score"].apply(score_to_signal)
-    analysis["Position"] = derive_backtest_positions(analysis, active_settings)
+    analysis["Position"] = derive_backtest_positions(analysis, active_settings, stock_profile=stock_profile)
     analysis["Benchmark Return"] = analysis["Close"].pct_change().fillna(0.0)
     analysis["Strategy Return"] = analysis["Position"].shift(1).fillna(0.0) * analysis["Benchmark Return"]
     analysis["Benchmark Equity"] = (1 + analysis["Benchmark Return"]).cumprod()
@@ -1897,10 +2939,12 @@ def compute_technical_backtest(hist, settings=None):
             "Position": analysis["Position"],
         }
     ).dropna(subset=["Action"])
+    closed_trades_df, trade_summary = summarize_backtest_trades(analysis)
 
     metrics = {
         "Strategy Total Return": analysis["Strategy Equity"].iloc[-1] - 1,
         "Benchmark Total Return": analysis["Benchmark Equity"].iloc[-1] - 1,
+        "Relative Return": analysis["Strategy Equity"].iloc[-1] - analysis["Benchmark Equity"].iloc[-1],
         "Strategy Annual Return": strategy_ann_return,
         "Benchmark Annual Return": benchmark_ann_return,
         "Strategy Volatility": strategy_vol,
@@ -1909,13 +2953,18 @@ def compute_technical_backtest(hist, settings=None):
         "Benchmark Sharpe": safe_divide(benchmark_ann_return, benchmark_vol),
         "Strategy Max Drawdown": strategy_drawdown.min(),
         "Benchmark Max Drawdown": benchmark_drawdown.min(),
-        "Trades": len(trade_log),
+        "Position Changes": len(trade_log),
+        "Closed Trades": trade_summary["Closed Trades"],
+        "Win Rate": trade_summary["Win Rate"],
+        "Average Trade Return": trade_summary["Average Trade Return"],
     }
 
     return {
         "history": analysis.reset_index().rename(columns={"index": "Date"}),
         "trade_log": trade_log.reset_index(drop=True),
+        "closed_trades": closed_trades_df,
         "metrics": metrics,
+        "stock_profile": stock_profile or {},
     }
 
 
@@ -2175,6 +3224,11 @@ class StockAnalyst:
         sma200 = safe_num(close.rolling(200, min_periods=200).mean().iloc[-1])
         momentum_1m = (price / close.iloc[-22] - 1) if len(close) > 22 else None
         momentum_1y = (price / close.iloc[0] - 1) if len(close) > 1 else None
+        volatility_1m = calculate_realized_volatility(close, 22)
+        volatility_1y = calculate_realized_volatility(close, 252)
+        momentum_1m_risk_adjusted = safe_divide(momentum_1m, (volatility_1m / np.sqrt(12)) if has_numeric_value(volatility_1m) else None)
+        range_position_52w, distance_52w_high, distance_52w_low = calculate_52w_context(close)
+        trend_strength = calculate_trend_strength(price, sma50, sma200, momentum_1y)
         trend_tolerance = settings["tech_trend_tolerance"]
         extension_limit = settings["tech_extension_limit"]
 
@@ -2213,6 +3267,11 @@ class StockAnalyst:
                 tech_score += 1
             elif momentum_1m < -settings["tech_momentum_threshold"]:
                 tech_score -= 1
+        if has_numeric_value(momentum_1m_risk_adjusted):
+            if momentum_1m_risk_adjusted >= 0.75:
+                tech_score += 1
+            elif momentum_1m_risk_adjusted <= -0.75:
+                tech_score -= 1
         long_term_momentum_threshold = max(settings["tech_momentum_threshold"] * 3, 0.10)
         if has_numeric_value(momentum_1y):
             if momentum_1y > long_term_momentum_threshold:
@@ -2236,6 +3295,16 @@ class StockAnalyst:
         )
         if pullback_recovery:
             tech_score += 1
+        if has_numeric_value(trend_strength):
+            if trend_strength >= 30:
+                tech_score += 1
+            elif trend_strength <= -30:
+                tech_score -= 1
+        if has_numeric_value(range_position_52w):
+            if range_position_52w >= 0.80 and bullish_trend:
+                tech_score += 1
+            elif range_position_52w <= 0.20 and bearish_trend:
+                tech_score -= 1
         if overextended and bullish_trend and has_numeric_value(current_rsi) and current_rsi >= settings["tech_rsi_overbought"] - 5:
             tech_score -= 1
         if washed_out and bearish_trend and has_numeric_value(current_rsi) and current_rsi <= settings["tech_rsi_oversold"] + 5:
@@ -2249,6 +3318,10 @@ class StockAnalyst:
         revenue_growth = safe_num(info.get("revenueGrowth"))
         earnings_growth = safe_num(info.get("earningsGrowth"))
         current_ratio = safe_num(info.get("currentRatio"))
+        market_cap = safe_num(info.get("marketCap"))
+        dividend_yield = safe_num(info.get("dividendYield"))
+        payout_ratio = safe_num(info.get("payoutRatio"))
+        equity_beta = safe_num(info.get("beta"))
         if has_numeric_value(roe):
             if roe >= settings["fund_roe_threshold"]:
                 f_score += 1
@@ -2279,6 +3352,19 @@ class StockAnalyst:
                 f_score += 1
             elif current_ratio < settings["fund_current_ratio_bad"]:
                 f_score -= 1
+        quality_score = calculate_quality_score(
+            roe,
+            margins,
+            debt_eq,
+            revenue_growth,
+            earnings_growth,
+            current_ratio,
+            settings,
+        )
+        if quality_score >= 3:
+            f_score += 1
+        elif quality_score <= -1.5:
+            f_score -= 1
         if f_score >= 4:
             v_fund = "STRONG"
         elif f_score >= 1:
@@ -2342,16 +3428,82 @@ class StockAnalyst:
             v_val = "FAIR VALUE"
         else:
             v_val = "OVERVALUED"
+        valuation_confidence = calculate_valuation_confidence(valuation_signal_count)
+        effective_v_score = v_score * (0.45 + 0.55 * valuation_confidence / 100)
+
+        dividend_safety_score = calculate_dividend_safety_score(
+            dividend_yield,
+            payout_ratio,
+            margins,
+            current_ratio,
+            debt_eq,
+        )
 
         sentiment = self.analyze_sentiment(info, news, price, settings=settings)
-        overall_score = (
-            tech_score * settings["weight_technical"]
-            + f_score * settings["weight_fundamental"]
-            + v_score * settings["weight_valuation"]
-            + sentiment["score"] * settings["weight_sentiment"]
+        sentiment_conviction = calculate_sentiment_conviction(
+            sentiment["score"],
+            sentiment["analyst_opinions"],
+            sentiment["recommendation_key"],
+            sentiment["target_mean_price"],
+            price,
+            sentiment["headline_count"],
         )
-        base_verdict = resolve_overall_verdict(
-            overall_score=overall_score,
+        stock_profile = classify_stock_profile(
+            sector=sector,
+            price=price,
+            market_cap=market_cap,
+            dividend_yield=dividend_yield,
+            payout_ratio=payout_ratio,
+            equity_beta=equity_beta,
+            analyst_opinions=sentiment["analyst_opinions"],
+            pe=pe,
+            forward_pe=forward_pe,
+            peg_ratio=peg_ratio,
+            ps_ratio=ps_ratio,
+            pb=pb,
+            bench=bench,
+            f_score=f_score,
+            v_val=v_val,
+            revenue_growth=revenue_growth,
+            earnings_growth=earnings_growth,
+            margins=margins,
+            roe=roe,
+            current_ratio=current_ratio,
+            debt_eq=debt_eq,
+            momentum_1y=momentum_1y,
+        )
+        risk_flags = build_risk_flags(
+            eps=eps,
+            debt_eq=debt_eq,
+            current_ratio=current_ratio,
+            overextended=overextended,
+            distance_52w_high=distance_52w_high,
+            range_position=range_position_52w,
+            volatility_1y=volatility_1y,
+            stock_profile=stock_profile,
+        )
+        engine_weights, engine_weight_profile = get_type_adjusted_engine_weights(stock_profile, settings)
+        effective_sentiment_score = sentiment["score"] * (0.40 + 0.60 * sentiment_conviction / 100)
+        effective_tech_score = tech_score
+        if has_numeric_value(trend_strength):
+            effective_tech_score += np.clip(trend_strength / 50, -1.0, 1.0)
+        effective_f_score = f_score
+        if quality_score >= 3:
+            effective_f_score += 0.5
+        elif quality_score <= -1.5:
+            effective_f_score -= 0.5
+        if stock_profile["primary_type"] in {"Dividend / Income Stocks", "Defensive Stocks"}:
+            effective_f_score += np.clip(dividend_safety_score / 4, -0.5, 1.0)
+        base_overall_score = (
+            effective_tech_score * engine_weights["technical"]
+            + effective_f_score * engine_weights["fundamental"]
+            + effective_v_score * engine_weights["valuation"]
+            + effective_sentiment_score * engine_weights["sentiment"]
+        )
+        base_overall_score -= min(len(risk_flags), 4) * 0.35
+        overall_score, base_verdict, type_settings, type_logic_notes = apply_stock_type_framework(
+            stock_profile=stock_profile,
+            overall_score=base_overall_score,
             tech_score=tech_score,
             f_score=f_score,
             v_score=v_score,
@@ -2361,6 +3513,8 @@ class StockAnalyst:
             regime=regime,
             bullish_trend=bullish_trend,
             bearish_trend=bearish_trend,
+            data_quality="High",
+            momentum_1y=momentum_1y,
             settings=settings,
         )
 
@@ -2381,6 +3535,29 @@ class StockAnalyst:
             "Score_Val": v_score,
             "Score_Sentiment": sentiment["score"],
             "Sector": sector,
+            "Stock_Type": stock_profile["primary_type"],
+            "Cap_Bucket": stock_profile["cap_bucket"],
+            "Style_Tags": stock_profile["style_tags"],
+            "Type_Strategy": stock_profile["type_strategy"],
+            "Type_Confidence": stock_profile["type_confidence"],
+            "Engine_Weight_Profile": engine_weight_profile,
+            "Market_Cap": market_cap,
+            "Dividend_Yield": dividend_yield,
+            "Payout_Ratio": payout_ratio,
+            "Equity_Beta": equity_beta,
+            "Trend_Strength": trend_strength,
+            "Range_Position_52W": range_position_52w,
+            "Distance_52W_High": distance_52w_high,
+            "Distance_52W_Low": distance_52w_low,
+            "Volatility_1M": volatility_1m,
+            "Volatility_1Y": volatility_1y,
+            "Momentum_1M_Risk_Adjusted": momentum_1m_risk_adjusted,
+            "Quality_Score": quality_score,
+            "Dividend_Safety_Score": dividend_safety_score,
+            "Valuation_Signal_Count": valuation_signal_count,
+            "Valuation_Confidence": valuation_confidence,
+            "Sentiment_Conviction": sentiment_conviction,
+            "Risk_Flags": " | ".join(risk_flags),
             "PE_Ratio": pe,
             "Forward_PE": forward_pe,
             "PEG_Ratio": peg_ratio,
@@ -2432,10 +3609,21 @@ class StockAnalyst:
             regime=regime,
             completeness=completeness,
         )
-        final_verdict = apply_confidence_guard(base_verdict, decision_confidence, quality_label, settings)
+        decision_confidence = adjust_type_based_confidence(decision_confidence, stock_profile, quality_label)
+        if has_numeric_value(trend_strength):
+            decision_confidence += np.clip(trend_strength / 12, -4, 6)
+        if has_numeric_value(quality_score):
+            decision_confidence += np.clip(quality_score * 2.5, -5, 8)
+        if has_numeric_value(valuation_confidence):
+            decision_confidence += np.clip((valuation_confidence - 50) / 8, -4, 5)
+        if has_numeric_value(sentiment_conviction):
+            decision_confidence += np.clip((sentiment_conviction - 50) / 10, -3, 4)
+        decision_confidence -= min(len(risk_flags), 5) * 2.0
+        decision_confidence = float(np.clip(round(decision_confidence, 1), 5.0, 95.0))
+        final_verdict = apply_confidence_guard(base_verdict, decision_confidence, quality_label, type_settings)
         record["Verdict_Overall"] = final_verdict
         record["Decision_Confidence"] = decision_confidence
-        record["Decision_Notes"] = build_decision_notes(
+        base_decision_notes = build_decision_notes(
             verdict=final_verdict,
             regime=regime,
             bias_summary=bias_summary,
@@ -2449,6 +3637,23 @@ class StockAnalyst:
             overextended=overextended,
             pullback_recovery=pullback_recovery,
         )
+        decision_note_parts = [
+            f"Type: {stock_profile['primary_type']}",
+            f"Cap: {stock_profile['cap_bucket']}",
+        ]
+        if stock_profile.get("classification_summary"):
+            decision_note_parts.append(stock_profile["classification_summary"])
+        decision_note_parts.extend(type_logic_notes[:2])
+        if risk_flags:
+            decision_note_parts.append("Risks: " + ", ".join(risk_flags[:3]))
+        if base_decision_notes:
+            decision_note_parts.extend(base_decision_notes.split(" | "))
+        deduped_notes = []
+        for note in decision_note_parts:
+            cleaned_note = str(note).strip()
+            if cleaned_note and cleaned_note not in deduped_notes:
+                deduped_notes.append(cleaned_note)
+        record["Decision_Notes"] = " | ".join(deduped_notes[:5])
         record["Data_Completeness"] = completeness
         record["Missing_Metric_Count"] = missing_count
         record["Data_Quality"] = quality_label
@@ -2924,6 +4129,16 @@ with stock_tab:
             with col_main_3:
                 st.metric("Sector", str(row["Sector"]))
 
+            profile_cols = st.columns(4)
+            profile_cols[0].metric("Stock Type", str(row.get("Stock_Type", "Legacy")))
+            profile_cols[1].metric("Cap Bucket", str(row.get("Cap_Bucket", "Unknown")))
+            profile_cols[2].metric("Type Confidence", format_value(row.get("Type_Confidence"), "{:,.0f}", "/100"))
+            profile_cols[3].metric("Market Cap", format_market_cap(row.get("Market_Cap")))
+            if row.get("Style_Tags"):
+                st.caption(f"Style tags: {row.get('Style_Tags')}")
+            if row.get("Type_Strategy"):
+                st.caption(str(row.get("Type_Strategy")))
+
             st.subheader("Method Breakdown")
             st.info("Observe how the verdict changes across technical, fundamental, valuation, and sentiment engines.")
             st.caption("New analyses use the active Options tab assumptions. If you changed assumptions recently, rerun this ticker to refresh its stored verdict.")
@@ -2943,6 +4158,16 @@ with stock_tab:
             trace_cols[4].metric("Confidence", format_value(row.get("Decision_Confidence"), "{:,.0f}", "/100"))
             trace_cols[5].metric("Regime", str(row.get("Market_Regime", "Unknown")))
             st.caption(f"Fingerprint: {row.get('Assumption_Fingerprint', 'Legacy')}")
+            refine_cols = st.columns(5)
+            refine_cols[0].metric("Trend Strength", format_value(row.get("Trend_Strength"), "{:,.0f}"))
+            refine_cols[1].metric("Quality Score", format_value(row.get("Quality_Score"), "{:,.1f}"))
+            refine_cols[2].metric("Dividend Safety", format_value(row.get("Dividend_Safety_Score"), "{:,.1f}"))
+            refine_cols[3].metric("Valuation Confidence", format_value(row.get("Valuation_Confidence"), "{:,.0f}", "/100"))
+            refine_cols[4].metric("Sentiment Conviction", format_value(row.get("Sentiment_Conviction"), "{:,.0f}", "/100"))
+            if row.get("Engine_Weight_Profile"):
+                st.caption(f"Dynamic engine weights: {row.get('Engine_Weight_Profile')}")
+            if row.get("Risk_Flags"):
+                st.caption(f"Risk flags: {row.get('Risk_Flags')}")
             if row.get("Decision_Notes"):
                 st.caption(str(row.get("Decision_Notes")))
             if str(row.get("Assumption_Fingerprint", "Legacy")) != active_assumption_fingerprint:
@@ -3024,6 +4249,10 @@ with stock_tab:
                         format_value(row["Current_Ratio"]),
                         f"Target: >{model_settings['fund_current_ratio_good']:.1f}",
                     )
+                    income_cols = st.columns(3)
+                    income_cols[0].metric("Dividend Yield", format_percent(row.get("Dividend_Yield")))
+                    income_cols[1].metric("Payout Ratio", format_percent(row.get("Payout_Ratio")))
+                    income_cols[2].metric("Equity Beta", format_value(row.get("Equity_Beta")))
 
             with tab_tech:
                 c_t1, c_t2 = st.columns([1, 2])
@@ -3162,9 +4391,13 @@ with compare_tab:
             [
                 "Ticker",
                 "Sector",
+                "Stock_Type",
+                "Cap_Bucket",
                 "Verdict_Overall",
                 "Composite Score",
                 "Decision_Confidence",
+                "Trend_Strength",
+                "Quality_Score",
                 "Market_Regime",
                 "Data_Quality",
                 "Assumption_Profile",
@@ -3182,6 +4415,12 @@ with compare_tab:
         comparison_display["Decision_Confidence"] = comparison_display["Decision_Confidence"].map(
             lambda value: format_value(value, "{:,.0f}", "/100")
         )
+        comparison_display["Trend_Strength"] = comparison_display["Trend_Strength"].map(
+            lambda value: format_value(value, "{:,.0f}")
+        )
+        comparison_display["Quality_Score"] = comparison_display["Quality_Score"].map(
+            lambda value: format_value(value, "{:,.1f}")
+        )
         comparison_display["Target Upside"] = comparison_display["Target Upside"].map(format_percent)
         comparison_display["Graham Discount"] = comparison_display["Graham Discount"].map(format_percent)
         st.dataframe(comparison_display, use_container_width=True)
@@ -3190,14 +4429,14 @@ with compare_tab:
         with engine_col:
             st.subheader("Engine Scorecard")
             scorecard = comparison_df[
-                ["Ticker", "Score_Tech", "Score_Fund", "Score_Val", "Score_Sentiment", "Composite Score"]
+                ["Ticker", "Stock_Type", "Score_Tech", "Score_Fund", "Score_Val", "Score_Sentiment", "Composite Score"]
             ].copy()
             st.dataframe(scorecard, use_container_width=True)
 
         with rationale_col:
             st.subheader("What to Look For")
             st.write("- Higher composite scores usually deserve more diligence before moving into the portfolio tab.")
-            st.write("- Target upside and Graham discount help separate momentum winners from valuation-driven ideas.")
+            st.write("- Stock type explains why the model may favor trend persistence for growth names but valuation discipline for value names.")
             st.write("- Large score disagreements across engines often mean the stock needs deeper judgment, not automatic sizing.")
 
 with portfolio_tab:
@@ -3400,7 +4639,7 @@ with backtest_tab:
     st.subheader("Signal Backtest")
     st.caption("Replay the current technical engine on historical prices to compare its trading path against a simple buy-and-hold baseline.")
     st.caption("This is a technical-rule backtest only. It does not recreate historical fundamentals, valuation, or news sentiment.")
-    st.caption("The replay now uses slower regime-based entries and exits so one weak swing does not immediately force a full sell signal.")
+    st.caption("The replay now uses stock-type-aware core sizing, trailing-stop behavior, and deeper-breakdown confirmation before fully exiting.")
 
     with st.form("backtest_form"):
         backtest_col_1, backtest_col_2, backtest_col_3 = st.columns([3, 1, 1])
@@ -3424,7 +4663,16 @@ with backtest_tab:
         else:
             with st.spinner(f"Replaying technical signals on {cleaned_ticker}..."):
                 hist, backtest_error = fetch_ticker_history_with_retry(cleaned_ticker, backtest_period)
-                backtest_result = compute_technical_backtest(hist, model_settings)
+                backtest_profile = {}
+                saved_backtest_row = db.get_analysis(cleaned_ticker)
+                if not saved_backtest_row.empty:
+                    backtest_profile = extract_stock_profile_from_saved_row(saved_backtest_row.iloc[0])
+                if not backtest_profile.get("primary_type") or backtest_profile.get("primary_type") == "Legacy":
+                    backtest_info, _ = fetch_ticker_info_with_retry(cleaned_ticker)
+                    if not backtest_info and not saved_backtest_row.empty:
+                        backtest_info = build_info_fallback_from_saved_analysis(saved_backtest_row.iloc[0])
+                    backtest_profile = infer_stock_profile_from_snapshot(backtest_info, hist, model_settings)
+                backtest_result = compute_technical_backtest(hist, model_settings, stock_profile=backtest_profile)
 
             if hist is None or hist.empty:
                 st.session_state.pop("backtest_result", None)
@@ -3451,25 +4699,41 @@ with backtest_tab:
         backtest_metrics = backtest_result["metrics"]
         history_display = backtest_result["history"].copy()
         trade_log_display = backtest_result["trade_log"].copy()
+        closed_trades_display = backtest_result.get("closed_trades", pd.DataFrame()).copy()
+        backtest_profile = backtest_result.get("stock_profile", {})
 
         st.divider()
         st.caption(
             f"Ticker: {backtest_config.get('ticker', '')} | Window: {backtest_config.get('period', '')} | "
             f"Profile: {active_preset_name} | Fingerprint: {active_assumption_fingerprint}"
         )
+        if backtest_profile:
+            st.caption(
+                f"Stock type: {backtest_profile.get('primary_type', 'Unknown')} | "
+                f"Cap bucket: {backtest_profile.get('cap_bucket', 'Unknown')} | "
+                f"Tags: {backtest_profile.get('style_tags', 'N/A')}"
+            )
+            if backtest_profile.get("type_strategy"):
+                st.caption(backtest_profile["type_strategy"])
 
-        backtest_metric_cols = st.columns(5)
+        backtest_metric_cols = st.columns(6)
         backtest_metric_cols[0].metric("Strategy Return", format_percent(backtest_metrics["Strategy Total Return"]))
         backtest_metric_cols[1].metric("Benchmark Return", format_percent(backtest_metrics["Benchmark Total Return"]))
-        backtest_metric_cols[2].metric("Strategy Sharpe", format_value(backtest_metrics["Strategy Sharpe"]))
-        backtest_metric_cols[3].metric("Max Drawdown", format_percent(backtest_metrics["Strategy Max Drawdown"]))
-        backtest_metric_cols[4].metric("Trades", str(int(backtest_metrics["Trades"])))
+        backtest_metric_cols[2].metric("Relative vs Benchmark", format_percent(backtest_metrics["Relative Return"]))
+        backtest_metric_cols[3].metric("Strategy Sharpe", format_value(backtest_metrics["Strategy Sharpe"]))
+        backtest_metric_cols[4].metric("Win Rate", format_percent(backtest_metrics["Win Rate"]))
+        backtest_metric_cols[5].metric("Max Drawdown", format_percent(backtest_metrics["Strategy Max Drawdown"]))
+
+        backtest_metric_cols_2 = st.columns(3)
+        backtest_metric_cols_2[0].metric("Position Changes", str(int(backtest_metrics["Position Changes"])))
+        backtest_metric_cols_2[1].metric("Closed Trades", str(int(backtest_metrics["Closed Trades"])))
+        backtest_metric_cols_2[2].metric("Avg Trade Return", format_percent(backtest_metrics["Average Trade Return"]))
 
         st.subheader("Equity Curve")
         chart_frame = history_display[["Date", "Strategy Equity", "Benchmark Equity"]].copy().set_index("Date")
         st.line_chart(chart_frame, use_container_width=True)
 
-        st.subheader("Trade Log")
+        st.subheader("Position Change Log")
         if trade_log_display.empty:
             st.info("No entries or exits were generated for this period under the active technical settings.")
         else:
@@ -3477,6 +4741,18 @@ with backtest_tab:
             trade_log_display["Close"] = trade_log_display["Close"].map(lambda value: f"${value:,.2f}")
             trade_log_display["Position"] = trade_log_display["Position"].map(format_percent)
             st.dataframe(trade_log_display, use_container_width=True)
+
+        st.subheader("Closed Trades")
+        if closed_trades_display.empty:
+            st.info("No closed trades were realized in this window, so win rate is not available yet.")
+        else:
+            closed_trades_display["Entry Date"] = pd.to_datetime(closed_trades_display["Entry Date"]).dt.strftime("%Y-%m-%d")
+            closed_trades_display["Exit Date"] = pd.to_datetime(closed_trades_display["Exit Date"]).dt.strftime("%Y-%m-%d")
+            closed_trades_display["Entry Price"] = closed_trades_display["Entry Price"].map(lambda value: f"${value:,.2f}")
+            closed_trades_display["Exit Price"] = closed_trades_display["Exit Price"].map(lambda value: f"${value:,.2f}")
+            closed_trades_display["Position Size"] = closed_trades_display["Position Size"].map(format_percent)
+            closed_trades_display["Return"] = closed_trades_display["Return"].map(format_percent)
+            st.dataframe(closed_trades_display, use_container_width=True)
 
 with library_tab:
     st.subheader("Research Library")
@@ -3520,12 +4796,15 @@ with library_tab:
     else:
         sector_options = sorted(sector for sector in library_df["Sector"].dropna().unique())
         verdict_options = sorted(verdict for verdict in library_df["Verdict_Overall"].dropna().unique())
-        filter_col_1, filter_col_2, filter_col_3 = st.columns([2, 2, 1])
+        stock_type_options = sorted(stock_type for stock_type in library_df["Stock_Type"].dropna().unique())
+        filter_col_1, filter_col_2, filter_col_3, filter_col_4 = st.columns([2, 2, 2, 1])
         with filter_col_1:
             selected_sectors = st.multiselect("Sector Filter", sector_options, default=sector_options)
         with filter_col_2:
             selected_verdicts = st.multiselect("Verdict Filter", verdict_options, default=verdict_options)
         with filter_col_3:
+            selected_stock_types = st.multiselect("Stock Type Filter", stock_type_options, default=stock_type_options)
+        with filter_col_4:
             fresh_only = st.checkbox("Only show last 7 days", value=False)
 
         filtered_library = library_df.copy()
@@ -3535,6 +4814,10 @@ with library_tab:
             filtered_library = filtered_library.iloc[0:0]
         if selected_verdicts:
             filtered_library = filtered_library[filtered_library["Verdict_Overall"].isin(selected_verdicts)]
+        else:
+            filtered_library = filtered_library.iloc[0:0]
+        if selected_stock_types:
+            filtered_library = filtered_library[filtered_library["Stock_Type"].isin(selected_stock_types)]
         else:
             filtered_library = filtered_library.iloc[0:0]
         if fresh_only:
@@ -3591,13 +4874,17 @@ with library_tab:
                 [
                     "Ticker",
                     "Sector",
-                    "Verdict_Overall",
-                    "Composite Score",
-                    "Decision_Confidence",
-                    "Market_Regime",
-                    "Data_Quality",
-                    "Assumption_Profile",
-                    "Price",
+                    "Stock_Type",
+                "Cap_Bucket",
+                "Verdict_Overall",
+                "Composite Score",
+                "Decision_Confidence",
+                "Trend_Strength",
+                "Quality_Score",
+                "Market_Regime",
+                "Data_Quality",
+                "Assumption_Profile",
+                "Price",
                     "Target Upside",
                     "Graham Discount",
                     "Freshness",
@@ -3607,6 +4894,12 @@ with library_tab:
             library_display["Price"] = library_display["Price"].map(lambda value: f"${value:,.2f}" if pd.notna(value) else "N/A")
             library_display["Decision_Confidence"] = library_display["Decision_Confidence"].map(
                 lambda value: format_value(value, "{:,.0f}", "/100")
+            )
+            library_display["Trend_Strength"] = library_display["Trend_Strength"].map(
+                lambda value: format_value(value, "{:,.0f}")
+            )
+            library_display["Quality_Score"] = library_display["Quality_Score"].map(
+                lambda value: format_value(value, "{:,.1f}")
             )
             library_display["Target Upside"] = library_display["Target Upside"].map(format_percent)
             library_display["Graham Discount"] = library_display["Graham Discount"].map(format_percent)
@@ -3651,8 +4944,10 @@ with changelog_tab:
     st.dataframe(pd.DataFrame(CHANGELOG_ENTRIES), use_container_width=True)
 
     st.subheader("What Changed Most Recently")
+    st.write("- The model now adds ten extra diagnostics such as trend strength, 52-week range context, volatility-adjusted momentum, quality score, dividend safety, valuation breadth, sentiment conviction, and explicit risk flags.")
+    st.write("- The model now assigns each stock a primary type such as Growth, Value, Dividend, Cyclical, Defensive, Blue-Chip, size-based, or Speculative and uses that profile in verdict and backtest logic.")
+    st.write("- The backtest now holds a core position during durable bullish regimes, exits later on deeper breakdowns, and reports win rate plus average closed-trade return.")
     st.write("- The Options tab now includes inline ? explanations for every slider and preset selector.")
-    st.write("- Conservative and Aggressive presets were widened so they meaningfully change conviction, valuation strictness, and backtest pacing.")
     st.write("- Regime, confidence, and decision-note transparency remain visible across stock, compare, sensitivity, and library views.")
 
 with methodology_tab:
@@ -3725,6 +5020,38 @@ with methodology_tab:
             ]
         )
         st.dataframe(verdict_table, use_container_width=True)
+
+    st.subheader("Stock Type Framework")
+    stock_type_framework = pd.DataFrame(
+        [
+            {"Type": "Growth Stocks", "How The Model Recognizes It": "Fast growth, premium multiples, low yield, and strong momentum", "Logic Tilt": "Trend persistence matters more than cheap valuation"},
+            {"Type": "Value Stocks", "How The Model Recognizes It": "Undervaluation, discounted multiples, and at least stable fundamentals", "Logic Tilt": "Valuation and balance-sheet support matter more"},
+            {"Type": "Dividend / Income Stocks", "How The Model Recognizes It": "Meaningful yield, payout support, income-heavy sectors, lower beta", "Logic Tilt": "Sustainability and steady compounding matter more"},
+            {"Type": "Cyclical Stocks", "How The Model Recognizes It": "Economically sensitive sectors and bigger beta or cycle swings", "Logic Tilt": "Timing and regime confirmation matter more"},
+            {"Type": "Defensive Stocks", "How The Model Recognizes It": "Resilient sectors, steadier beta, and stable fundamentals", "Logic Tilt": "The model tolerates slower upside and defends against over-trading"},
+            {"Type": "Blue-Chip Stocks", "How The Model Recognizes It": "Large scale, quality metrics, broad coverage, and durable fundamentals", "Logic Tilt": "Quality durability gets extra room"},
+            {"Type": "Small/Mid/Large-Cap", "How The Model Recognizes It": "Market capitalization bucket", "Logic Tilt": "Smaller caps require stronger confirmation; larger caps get more stability credit"},
+            {"Type": "Speculative / Penny Stocks", "How The Model Recognizes It": "Tiny scale, low price, weak fundamentals, thin coverage, or extreme beta", "Logic Tilt": "Buy thresholds rise and conviction is capped"},
+        ]
+    )
+    st.dataframe(stock_type_framework, use_container_width=True)
+
+    st.subheader("Refinement Layer")
+    refinement_df = pd.DataFrame(
+        [
+            {"Refinement": 1, "What Changed": "Trend Strength", "Purpose": "Uses SMA structure plus 1Y momentum as a continuous trend quality signal."},
+            {"Refinement": 2, "What Changed": "52-Week Range Context", "Purpose": "Tracks whether price is breaking out, mid-range, or stuck near lows."},
+            {"Refinement": 3, "What Changed": "Volatility-Adjusted Momentum", "Purpose": "Rewards momentum that is strong relative to realized volatility instead of raw price change alone."},
+            {"Refinement": 4, "What Changed": "Quality Score", "Purpose": "Combines profitability, leverage, liquidity, and growth consistency into a cleaner business-quality signal."},
+            {"Refinement": 5, "What Changed": "Dividend Safety Score", "Purpose": "Checks whether income stocks appear to have a more sustainable payout profile."},
+            {"Refinement": 6, "What Changed": "Valuation Breadth", "Purpose": "Scales valuation influence based on how many usable valuation signals are actually available."},
+            {"Refinement": 7, "What Changed": "Sentiment Conviction", "Purpose": "Separates noisy sentiment from higher-conviction sentiment backed by coverage and target alignment."},
+            {"Refinement": 8, "What Changed": "Risk Flags", "Purpose": "Collects visible red flags like negative EPS, high debt, weak liquidity, high volatility, and speculation."},
+            {"Refinement": 9, "What Changed": "Dynamic Engine Weights", "Purpose": "Lets Growth, Value, Income, Cyclical, and Speculative names use different engine mixes."},
+            {"Refinement": 10, "What Changed": "Profile-Aware Trailing Stops", "Purpose": "Makes the backtest protect gains differently for growth, defensive, cyclical, and speculative stocks."},
+        ]
+    )
+    st.dataframe(refinement_df, use_container_width=True)
 
     st.subheader("Decision Guardrails")
     guardrail_df = pd.DataFrame(
