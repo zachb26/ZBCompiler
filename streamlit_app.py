@@ -9,6 +9,7 @@ import threading
 import time
 import copy
 import tempfile
+import shutil
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -1823,13 +1824,37 @@ class DatabaseManager:
         self._write_lock = threading.RLock()
         self.create_tables()
 
-    def _connect(self):
+    def _connect(self, allow_recover=True):
         # Open a fresh connection per operation so each session sees other users' commits.
-        conn = sqlite3.connect(self.db_path, timeout=30, check_same_thread=False)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout = 30000")
-        conn.execute("PRAGMA synchronous = NORMAL")
-        return conn
+        conn = None
+        try:
+            conn = sqlite3.connect(self.db_path, timeout=30, check_same_thread=False)
+            conn.execute("PRAGMA busy_timeout = 30000")
+            conn.execute("PRAGMA synchronous = NORMAL")
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("SELECT name FROM sqlite_master LIMIT 1").fetchall()
+            return conn
+        except sqlite3.DatabaseError as exc:
+            if conn is not None:
+                conn.close()
+            if allow_recover and self._recover_database_file(exc):
+                return self._connect(allow_recover=False)
+            raise
+
+    def _recover_database_file(self, exc):
+        if not self.db_path.exists():
+            return False
+
+        try:
+            timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+            if self.db_path.stat().st_size == 0:
+                self.db_path.unlink()
+            else:
+                backup_path = self.db_path.with_name(f"{self.db_path.stem}.corrupt-{timestamp}{self.db_path.suffix}")
+                shutil.move(str(self.db_path), str(backup_path))
+            return True
+        except OSError:
+            return False
 
     @contextmanager
     def _connection(self):
@@ -1876,16 +1901,30 @@ class DatabaseManager:
                 conn.execute(sql, list(data.values()))
 
     def get_analysis(self, ticker):
-        with self._connection() as conn:
-            return pd.read_sql_query(
-                "SELECT * FROM analysis WHERE Ticker=?",
-                conn,
-                params=(ticker,),
-            )
+        try:
+            with self._connection() as conn:
+                return pd.read_sql_query(
+                    "SELECT * FROM analysis WHERE Ticker=?",
+                    conn,
+                    params=(ticker,),
+                )
+        except (pd.errors.DatabaseError, sqlite3.DatabaseError):
+            self.create_tables()
+            with self._connection() as conn:
+                return pd.read_sql_query(
+                    "SELECT * FROM analysis WHERE Ticker=?",
+                    conn,
+                    params=(ticker,),
+                )
 
     def get_all_analyses(self):
-        with self._connection() as conn:
-            return pd.read_sql_query("SELECT * FROM analysis", conn)
+        try:
+            with self._connection() as conn:
+                return pd.read_sql_query("SELECT * FROM analysis", conn)
+        except (pd.errors.DatabaseError, sqlite3.DatabaseError):
+            self.create_tables()
+            with self._connection() as conn:
+                return pd.read_sql_query("SELECT * FROM analysis", conn)
 
 
 @st.cache_resource
