@@ -22,7 +22,10 @@ DB_FILENAME = "stocks_data.db"
 APP_DIR = Path(__file__).resolve().parent
 CONFIGURED_DB_PATH = Path(os.environ.get("STOCKS_DB_PATH", DB_FILENAME)).expanduser()
 DB_PATH = CONFIGURED_DB_PATH if CONFIGURED_DB_PATH.is_absolute() else (APP_DIR / CONFIGURED_DB_PATH).resolve()
-BUILD_LABEL = datetime.datetime.fromtimestamp(Path(__file__).stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+# Increase by 0.0.1 after each major update pass that includes 10+ meaningful changes.
+APP_VERSION = "1.0.0"
+README_USAGE_TEXT = """
+"""
 TRADING_DAYS = 252
 DEFAULT_BENCHMARK_TICKER = "SPY"
 DEFAULT_PORTFOLIO_TICKERS = "AAPL, MSFT, NVDA, JNJ, XOM"
@@ -259,6 +262,109 @@ PRESET_DESCRIPTIONS = {
     "Conservative": "Conservative leans on fundamentals and valuation, demands stronger confirmation, and slows trading re-entry.",
     "Aggressive": "Aggressive leans on technicals and sentiment, accepts looser valuation, and reacts faster to price action.",
 }
+ANALYSIS_TONE_STYLES = {
+    "good": {
+        "accent": "#2b8a3e",
+        "background": "rgba(43, 138, 62, 0.10)",
+        "border": "rgba(43, 138, 62, 0.35)",
+    },
+    "bad": {
+        "accent": "#c92a2a",
+        "background": "rgba(201, 42, 42, 0.10)",
+        "border": "rgba(201, 42, 42, 0.35)",
+    },
+    "neutral": {
+        "accent": "#94a3b8",
+        "background": "rgba(148, 163, 184, 0.08)",
+        "border": "rgba(148, 163, 184, 0.24)",
+    },
+}
+ANALYSIS_HELP_TEXT = {
+    "Stock Type": "The model's best-fit stock category, such as Growth, Value, Dividend, Defensive, or Speculative.",
+    "Cap Bucket": "A simple size label based on market value: Small-Cap, Mid-Cap, or Large-Cap.",
+    "Type Confidence": "How confidently the model thinks this stock fits its assigned type.",
+    "Market Cap": "The company's total market value based on share price times shares outstanding.",
+    "Technical": "A score based on price trend, momentum, RSI, MACD, and moving averages. Higher is more constructive.",
+    "Fundamental": "A score based on profitability, growth, leverage, and liquidity. Higher usually means a stronger business profile.",
+    "Valuation": "A score showing whether the stock looks cheap, fair, or expensive compared with sector benchmarks and fair-value checks.",
+    "Sentiment": "A score based on headline tone, analyst views, and target prices. Positive numbers mean the market tone is more supportive.",
+    "Updated": "The last time this saved analysis was refreshed.",
+    "Overall Score": "The model's combined score after blending technical, fundamental, valuation, and sentiment inputs.",
+    "Data Quality": "A quick read on how complete and usable the underlying data was for this analysis.",
+    "Assumption Profile": "The preset or custom settings used when this analysis was generated.",
+    "Missing Metrics": "How many important data fields were unavailable during the analysis.",
+    "Confidence": "How strongly the model trusts its final verdict given signal agreement, trend context, and data quality.",
+    "Regime": "The current market backdrop the model sees in the stock: bullish trend, bearish trend, transition, or range-bound.",
+    "Trend Strength": "A blended measure of long-term price trend quality using moving averages and one-year momentum.",
+    "Quality Score": "A business-quality read based on returns, margins, balance-sheet strength, and growth consistency.",
+    "Dividend Safety": "A rough check on whether the dividend looks sustainable based on payout ratio, profitability, liquidity, and debt.",
+    "Valuation Confidence": "How much valuation evidence the model has available. More usable valuation inputs means higher confidence.",
+    "Sentiment Conviction": "How strong and well-supported the sentiment signal is, not just whether it is positive or negative.",
+    "Graham Fair Value": "A Graham-style fair value estimate based on earnings and book value when those inputs are available.",
+    "Graham Discount": "Shows how far the current price sits below or above the Graham fair value estimate. Positive is cheaper.",
+    "P/E Ratio": "Price divided by trailing earnings. Lower than peers can suggest cheaper valuation, but not always better quality.",
+    "Forward P/E": "Price divided by expected forward earnings. Useful for seeing what the market is paying for next year's profit.",
+    "PEG Ratio": "P/E adjusted for growth. Lower is often more attractive because you are paying less for each unit of growth.",
+    "P/S Ratio": "Price divided by sales. Helpful when earnings are noisy or thin, especially for growth businesses.",
+    "EV/EBITDA": "Enterprise value divided by EBITDA. A common valuation multiple that includes debt, not just equity price.",
+    "P/B Ratio": "Price divided by book value. More useful for asset-heavy businesses than for software or other asset-light companies.",
+    "ROE": "Return on equity measures how efficiently the company turns shareholder capital into profit.",
+    "Profit Margin": "Shows how much of each dollar of revenue becomes profit after costs.",
+    "Debt/Equity": "A leverage measure. Lower usually means the business is carrying less financial risk.",
+    "Revenue Growth": "How quickly the company's sales are growing. Stronger growth can support a higher valuation.",
+    "Current Ratio": "A liquidity check that compares short-term assets to short-term liabilities.",
+    "Dividend Yield": "Annual dividend income as a percentage of the stock price.",
+    "Payout Ratio": "The share of earnings paid out as dividends. Very high payout ratios can make dividends less durable.",
+    "Equity Beta": "How sensitive the stock has been to broad market moves. Above 1 is usually more volatile than the market.",
+    "RSI (14)": "A momentum oscillator that helps show whether a stock may be overbought, oversold, or in a healthier middle range.",
+    "RSI": "A short-term momentum reading. Very low or very high values can signal stretched conditions.",
+    "Trend": "A quick read on whether the stock's moving-average structure looks bullish, bearish, or neutral.",
+    "200-Day Trend": "A longer-term trend check. Many investors use the 200-day trend to separate stronger setups from weaker ones.",
+    "MACD": "A momentum indicator based on moving averages that helps show whether trend acceleration is improving or fading.",
+    "MACD Signal": "Tells you whether momentum currently looks bullish, bearish, or neutral based on MACD crossover behavior.",
+    "1M Momentum": "The stock's recent one-month move. Strong positive momentum can confirm trend strength.",
+    "1Y Momentum": "The stock's one-year move. It helps show whether the long-term trend has been strong or weak.",
+    "Headlines": "The number of recent news headlines the sentiment engine reviewed.",
+    "Analyst View": "The current analyst recommendation signal the model could retrieve, such as Buy or Sell.",
+    "Target Mean": "The average analyst target price. Higher than the current price can imply expected upside.",
+    "Highest Conviction": "The top-ranked stock in the current comparison after blending the four engines with the active settings.",
+    "Average Composite Score": "The average blended model score across the current comparison list. Higher means the group looks stronger overall.",
+    "Average Target Upside": "The average gap between current price and analyst target price across the current list.",
+    "Sectors Covered": "How many unique sectors are represented in the current comparison set.",
+    "Composite Score": "A weighted blend of the technical, fundamental, valuation, and sentiment engine scores.",
+    "Freshness": "How recently the saved analysis was updated.",
+    "Expected Return": "The portfolio's annualized return estimate based on the historical return sample in the selected lookback window.",
+    "Volatility": "The annualized variability of returns. Higher volatility usually means a bumpier ride.",
+    "Sharpe": "Return earned per unit of total volatility after subtracting the risk-free rate. Higher is generally better.",
+    "Sortino": "Return earned per unit of downside volatility. It focuses more on harmful drawdowns than total volatility does.",
+    "Treynor": "Return earned per unit of market beta after subtracting the risk-free rate.",
+    "Portfolio Beta": "How sensitive the recommended portfolio has been to the benchmark's moves. Around 1 means market-like sensitivity.",
+    "Downside Vol": "Volatility calculated only from downside return swings, not all swings.",
+    "Min-Vol Return": "The annualized return of the lowest-volatility portfolio found in the simulation set.",
+    "Effective Names": "An estimate of how diversified the portfolio really is after accounting for concentration, not just how many tickers it holds.",
+    "Robustness": "How stable the model's directional view stays when nearby guarded assumption sets are tested.",
+    "Dominant Bias": "The direction that showed up most often across the sensitivity scenarios: bullish, bearish, or neutral.",
+    "Scenario Count": "How many assumption scenarios were tested in the sensitivity run.",
+    "Verdict Variety": "How many different final verdicts appeared across the tested scenarios.",
+    "Bias": "A simplified label for direction: bullish, bearish, or neutral.",
+    "Assumption Drift": "How far a scenario's settings sit from the model's default baseline, shown as a rough percentage drift.",
+    "Fingerprint": "A short ID that represents the exact assumption set used for that run.",
+    "Strategy Return": "The total return produced by the technical backtest strategy over the selected history window.",
+    "Benchmark Return": "The total return from simply holding the stock over the same window with no trading rules.",
+    "Relative vs Benchmark": "How much the strategy outperformed or underperformed simple buy-and-hold.",
+    "Strategy Sharpe": "The backtest strategy's annualized return per unit of volatility.",
+    "Win Rate": "The share of closed trades that ended with a positive return.",
+    "Max Drawdown": "The deepest peak-to-trough decline the strategy experienced during the backtest.",
+    "Position Changes": "How many times the strategy changed exposure, including entries, adds, reductions, and exits.",
+    "Closed Trades": "How many completed round-trip trades were finished in the backtest window.",
+    "Avg Trade Return": "The average return across the strategy's closed trades.",
+    "Records": "How many saved analyses are currently shown in the filtered library view.",
+    "Buy / Strong Buy": "How many names in the current library view have a bullish final verdict.",
+    "Fresh in 24h": "How many saved rows were refreshed within the last 24 hours.",
+    "Tracked Sectors": "How many sectors are represented in the current library view.",
+    "Avg Composite Score": "The average blended model score across the names in that group.",
+    "Avg Target Upside": "The average analyst target upside across the names in that group.",
+}
 CHANGELOG_ENTRIES = [
     {
         "Date": "2026-04-02",
@@ -493,6 +599,220 @@ def format_age(value):
 
     total_days = total_hours // 24
     return f"{total_days}d ago"
+
+
+def escape_html_text(value):
+    return (
+        str(value)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def build_help_badge(help_text):
+    if not help_text:
+        return ""
+    safe_help = escape_html_text(help_text)
+    return (
+        '<span title="'
+        + safe_help
+        + '" style="display:inline-flex; align-items:center; justify-content:center; '
+          'width:1.05rem; height:1.05rem; margin-left:0.38rem; border-radius:999px; '
+          'border:1px solid rgba(148,163,184,0.35); color:#cbd5e1; font-size:0.72rem; '
+          'font-weight:700; cursor:help; vertical-align:middle;">?</span>'
+    )
+
+
+def render_help_legend(items):
+    fragments = []
+    for label, help_text in items:
+        if not help_text:
+            continue
+        safe_label = escape_html_text(label)
+        fragments.append(
+            f'<span style="display:inline-flex; align-items:center; margin-right:0.9rem;">'
+            f'<span>{safe_label}</span>{build_help_badge(help_text)}</span>'
+        )
+    if fragments:
+        st.markdown(
+            f'<div style="font-size:0.83rem; color:#94a3b8; margin:0.15rem 0 0.45rem 0;">{"".join(fragments)}</div>',
+            unsafe_allow_html=True,
+        )
+
+
+def tone_from_metric_threshold(value, *, good_min=None, good_max=None, bad_min=None, bad_max=None):
+    if not has_numeric_value(value):
+        return "neutral"
+    value = float(value)
+    has_good_rule = good_min is not None or good_max is not None
+    has_bad_rule = bad_min is not None or bad_max is not None
+
+    is_good = True
+    if good_min is not None and value < good_min:
+        is_good = False
+    if good_max is not None and value > good_max:
+        is_good = False
+    if has_good_rule and is_good:
+        return "good"
+
+    is_bad = True
+    if bad_min is not None and value < bad_min:
+        is_bad = False
+    if bad_max is not None and value > bad_max:
+        is_bad = False
+    if has_bad_rule and is_bad:
+        return "bad"
+
+    return "neutral"
+
+
+def tone_from_balanced_band(value, healthy_min, healthy_max, caution_low, caution_high):
+    if not has_numeric_value(value):
+        return "neutral"
+    value = float(value)
+    if healthy_min <= value <= healthy_max:
+        return "good"
+    if value <= caution_low or value >= caution_high:
+        return "bad"
+    return "neutral"
+
+
+def tone_from_signal_text(value, positives=None, negatives=None):
+    normalized = str(value or "").strip().upper()
+    positive_values = set(positives or [])
+    negative_values = set(negatives or [])
+    if normalized in positive_values:
+        return "good"
+    if normalized in negative_values:
+        return "bad"
+    return "neutral"
+
+
+def tone_from_quality_label(value):
+    normalized = str(value or "").strip().title()
+    if normalized == "High":
+        return "good"
+    if normalized == "Low":
+        return "bad"
+    return "neutral"
+
+
+def tone_from_regime(value):
+    normalized = str(value or "").strip()
+    if normalized == "Bullish Trend":
+        return "good"
+    if normalized == "Bearish Trend":
+        return "bad"
+    return "neutral"
+
+
+def tone_from_relative_multiple(value, benchmark):
+    score = score_relative_multiple(value, benchmark)
+    if score > 0:
+        return "good"
+    if score < 0:
+        return "bad"
+    return "neutral"
+
+
+def render_analysis_signal_cards(items, columns=4):
+    if not items:
+        return
+
+    cols = st.columns(columns)
+    for idx, item in enumerate(items):
+        tone = item.get("tone", "neutral")
+        style = ANALYSIS_TONE_STYLES.get(tone, ANALYSIS_TONE_STYLES["neutral"])
+        label = escape_html_text(item.get("label", ""))
+        value = escape_html_text(item.get("value", ""))
+        note = escape_html_text(item.get("note", ""))
+        help_badge = build_help_badge(item.get("help"))
+        with cols[idx % columns]:
+            st.markdown(
+                f"""
+                <div style="
+                    border: 1px solid {style['border']};
+                    background: {style['background']};
+                    border-radius: 14px;
+                    padding: 0.95rem 1rem;
+                    min-height: 132px;
+                    margin-bottom: 0.75rem;
+                    display: flex;
+                    flex-direction: column;
+                    justify-content: space-between;
+                    gap: 0.65rem;
+                ">
+                    <div style="min-height: 1.3rem; display: flex; align-items: center; flex-wrap: wrap; color: #cbd5e1; font-size: 0.82rem; font-weight: 600;">
+                        <span>{label}</span>{help_badge}
+                    </div>
+                    <div style="font-size: 1.55rem; font-weight: 700; color: {style['accent']}; line-height: 1.15; min-height: 2.1rem; display: flex; align-items: center;">{value}</div>
+                    <div style="font-size: 0.82rem; color: #94a3b8; min-height: 2.4rem; display: flex; align-items: flex-start;">{note}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+
+def render_analysis_signal_table(rows, reference_label="Reference"):
+    if not rows:
+        return
+
+    body_rows = []
+    for row in rows:
+        tone = row.get("tone", "neutral")
+        style = ANALYSIS_TONE_STYLES.get(tone, ANALYSIS_TONE_STYLES["neutral"])
+        metric = escape_html_text(row.get("metric", ""))
+        value = escape_html_text(row.get("value", ""))
+        reference = escape_html_text(row.get("reference", ""))
+        status = escape_html_text(row.get("status", tone.title()))
+        help_badge = build_help_badge(row.get("help"))
+        body_rows.append(
+            f"""
+            <tr>
+                <td style="padding: 0.78rem 0.8rem; border-bottom: 1px solid rgba(148, 163, 184, 0.14); vertical-align: top; font-weight: 600; color: #e2e8f0;">
+                    <span style="display: inline-flex; align-items: center; flex-wrap: wrap;">{metric}{help_badge}</span>
+                </td>
+                <td style="padding: 0.78rem 0.8rem; border-bottom: 1px solid rgba(148, 163, 184, 0.14); color: {style['accent']}; font-weight: 700; vertical-align: top;">{value}</td>
+                <td style="padding: 0.78rem 0.8rem; border-bottom: 1px solid rgba(148, 163, 184, 0.14); color: #cbd5e1; vertical-align: top;">{reference}</td>
+                <td style="padding: 0.78rem 0.8rem; border-bottom: 1px solid rgba(148, 163, 184, 0.14); vertical-align: top;">
+                    <span style="
+                        display: inline-block;
+                        padding: 0.18rem 0.5rem;
+                        border-radius: 999px;
+                        color: {style['accent']};
+                        background: {style['background']};
+                        border: 1px solid {style['border']};
+                        font-size: 0.78rem;
+                        font-weight: 700;
+                    ">{status}</span>
+                </td>
+            </tr>
+            """
+        )
+
+    header_reference = escape_html_text(reference_label)
+    st.markdown(
+        f"""
+        <div style="overflow-x: auto; margin-top: 0.4rem;">
+            <table style="width: 100%; border-collapse: collapse; border-spacing: 0;">
+                <thead>
+                    <tr style="text-align: left; color: #94a3b8; border-bottom: 1px solid rgba(148, 163, 184, 0.20);">
+                        <th style="padding: 0.55rem 0.8rem;">Metric</th>
+                        <th style="padding: 0.55rem 0.8rem;">Value</th>
+                        <th style="padding: 0.55rem 0.8rem;">{header_reference}</th>
+                        <th style="padding: 0.55rem 0.8rem;">Read</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {''.join(body_rows)}
+                </tbody>
+            </table>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def build_library_csv_bytes(df):
@@ -4060,7 +4380,7 @@ def render_frontier_chart(portfolio_cloud, frontier, cal, tangent, minimum_volat
     st.vega_lite_chart(chart_data, spec, use_container_width=True)
 
 
-st.set_page_config(page_title="Stock Engine Pro", layout="wide", page_icon="SE")
+st.set_page_config(page_title="ZB Compiler", layout="wide", page_icon="SE")
 
 db = get_database_manager()
 bot = StockAnalyst(db)
@@ -4069,9 +4389,8 @@ model_settings = get_model_settings()
 active_preset_name = detect_matching_preset(model_settings)
 active_assumption_fingerprint = get_assumption_fingerprint(model_settings)
 
-st.title("Stock Engine Pro")
-st.markdown("### Single-Stock Analysis and Portfolio Construction")
-st.caption(f"Build: {BUILD_LABEL} | Source: {Path(__file__).name}")
+st.title("ZB Compiler")
+st.caption(f"Version: {APP_VERSION}")
 
 startup_refresh_summary = {
     "started": False,
@@ -4093,8 +4412,8 @@ if os.environ.get("STOCK_ENGINE_SKIP_STARTUP_REFRESH") != "1":
 sensitivity_default_ticker = st.session_state.get("sensitivity_last_ticker") or st.session_state.get("single_ticker", "")
 backtest_default_ticker = st.session_state.get("backtest_last_ticker") or st.session_state.get("single_ticker", "")
 
-stock_tab, compare_tab, portfolio_tab, sensitivity_tab, backtest_tab, library_tab, changelog_tab, methodology_tab, options_tab = st.tabs(
-    ["Stock Analysis", "Compare", "Portfolio", "Sensitivity", "Backtest", "Library", "Changelog", "Methodology", "Options"]
+stock_tab, compare_tab, portfolio_tab, sensitivity_tab, backtest_tab, library_tab, readme_tab, changelog_tab, methodology_tab, options_tab = st.tabs(
+    ["Stock Analysis", "Compare", "Portfolio", "Sensitivity", "Backtest", "Library", "ReadMe / Usage", "Changelog", "Methodology", "Options"]
 )
 
 with stock_tab:
@@ -4129,41 +4448,177 @@ with stock_tab:
             with col_main_3:
                 st.metric("Sector", str(row["Sector"]))
 
-            profile_cols = st.columns(4)
-            profile_cols[0].metric("Stock Type", str(row.get("Stock_Type", "Legacy")))
-            profile_cols[1].metric("Cap Bucket", str(row.get("Cap_Bucket", "Unknown")))
-            profile_cols[2].metric("Type Confidence", format_value(row.get("Type_Confidence"), "{:,.0f}", "/100"))
-            profile_cols[3].metric("Market Cap", format_market_cap(row.get("Market_Cap")))
+            render_analysis_signal_cards(
+                [
+                    {
+                        "label": "Stock Type",
+                        "value": str(row.get("Stock_Type", "Legacy")),
+                        "note": "The stock category the model thinks fits best right now.",
+                        "tone": "neutral",
+                        "help": ANALYSIS_HELP_TEXT["Stock Type"],
+                    },
+                    {
+                        "label": "Cap Bucket",
+                        "value": str(row.get("Cap_Bucket", "Unknown")),
+                        "note": "A quick size label based on the company's market value.",
+                        "tone": "neutral",
+                        "help": ANALYSIS_HELP_TEXT["Cap Bucket"],
+                    },
+                    {
+                        "label": "Type Confidence",
+                        "value": format_value(row.get("Type_Confidence"), "{:,.0f}", "/100"),
+                        "note": "Higher numbers mean the model sees a cleaner fit.",
+                        "tone": tone_from_metric_threshold(row.get("Type_Confidence"), good_min=70, bad_max=45),
+                        "help": ANALYSIS_HELP_TEXT["Type Confidence"],
+                    },
+                    {
+                        "label": "Market Cap",
+                        "value": format_market_cap(row.get("Market_Cap")),
+                        "note": "The market's current estimate of the company's total equity value.",
+                        "tone": "neutral",
+                        "help": ANALYSIS_HELP_TEXT["Market Cap"],
+                    },
+                ],
+                columns=4,
+            )
             if row.get("Style_Tags"):
-                st.caption(f"Style tags: {row.get('Style_Tags')}")
+                st.caption(f"This stock currently reads as: {row.get('Style_Tags')}")
             if row.get("Type_Strategy"):
-                st.caption(str(row.get("Type_Strategy")))
+                st.caption(f"The model's default playbook for this kind of stock: {row.get('Type_Strategy')}")
 
             st.subheader("Method Breakdown")
-            st.info("Observe how the verdict changes across technical, fundamental, valuation, and sentiment engines.")
-            st.caption("New analyses use the active Options tab assumptions. If you changed assumptions recently, rerun this ticker to refresh its stored verdict.")
+            st.info("This section shows how each part of the model is reading the stock right now, so you can see what is helping or hurting the final verdict.")
+            st.caption("These results stay tied to the settings that were active when the analysis was run. If you changed something in Options, rerun the ticker to refresh this snapshot.")
 
-            summary_cols = st.columns(5)
-            summary_cols[0].metric("Technical", format_int(row["Score_Tech"]))
-            summary_cols[1].metric("Fundamental", format_int(row["Score_Fund"]))
-            summary_cols[2].metric("Valuation", format_int(row["Score_Val"]))
-            summary_cols[3].metric("Sentiment", format_int(row["Score_Sentiment"]))
-            summary_cols[4].metric("Updated", str(row["Last_Updated"]))
+            render_analysis_signal_cards(
+                [
+                    {
+                        "label": "Technical",
+                        "value": format_int(row["Score_Tech"]),
+                        "note": "Price action, momentum, and trend signals.",
+                        "tone": tone_from_metric_threshold(row["Score_Tech"], good_min=1, bad_max=-1),
+                        "help": ANALYSIS_HELP_TEXT["Technical"],
+                    },
+                    {
+                        "label": "Fundamental",
+                        "value": format_int(row["Score_Fund"]),
+                        "note": "Business strength, growth, and balance-sheet signals.",
+                        "tone": tone_from_metric_threshold(row["Score_Fund"], good_min=1, bad_max=-1),
+                        "help": ANALYSIS_HELP_TEXT["Fundamental"],
+                    },
+                    {
+                        "label": "Valuation",
+                        "value": format_int(row["Score_Val"]),
+                        "note": "How cheap or expensive the stock looks.",
+                        "tone": tone_from_metric_threshold(row["Score_Val"], good_min=1, bad_max=-1),
+                        "help": ANALYSIS_HELP_TEXT["Valuation"],
+                    },
+                    {
+                        "label": "Sentiment",
+                        "value": format_int(row["Score_Sentiment"]),
+                        "note": "News tone, analyst views, and target-price signals.",
+                        "tone": tone_from_metric_threshold(row["Score_Sentiment"], good_min=1, bad_max=-1),
+                        "help": ANALYSIS_HELP_TEXT["Sentiment"],
+                    },
+                    {
+                        "label": "Updated",
+                        "value": str(row["Last_Updated"]),
+                        "note": "When this saved analysis was last refreshed.",
+                        "tone": "neutral",
+                        "help": ANALYSIS_HELP_TEXT["Updated"],
+                    },
+                ],
+                columns=5,
+            )
 
-            trace_cols = st.columns(6)
-            trace_cols[0].metric("Overall Score", format_value(row.get("Overall_Score"), "{:,.1f}"))
-            trace_cols[1].metric("Data Quality", str(row.get("Data_Quality", "Unknown")))
-            trace_cols[2].metric("Assumption Profile", str(row.get("Assumption_Profile", "Legacy")))
-            trace_cols[3].metric("Missing Metrics", format_int(row.get("Missing_Metric_Count")))
-            trace_cols[4].metric("Confidence", format_value(row.get("Decision_Confidence"), "{:,.0f}", "/100"))
-            trace_cols[5].metric("Regime", str(row.get("Market_Regime", "Unknown")))
+            render_analysis_signal_cards(
+                [
+                    {
+                        "label": "Overall Score",
+                        "value": format_value(row.get("Overall_Score"), "{:,.1f}"),
+                        "note": "The model's combined read after blending all engines.",
+                        "tone": tone_from_metric_threshold(row.get("Overall_Score"), good_min=1, bad_max=-1),
+                        "help": ANALYSIS_HELP_TEXT["Overall Score"],
+                    },
+                    {
+                        "label": "Data Quality",
+                        "value": str(row.get("Data_Quality", "Unknown")),
+                        "note": "How complete and usable the source data was.",
+                        "tone": tone_from_quality_label(row.get("Data_Quality", "Unknown")),
+                        "help": ANALYSIS_HELP_TEXT["Data Quality"],
+                    },
+                    {
+                        "label": "Assumption Profile",
+                        "value": str(row.get("Assumption_Profile", "Legacy")),
+                        "note": "The preset or custom settings used for this run.",
+                        "tone": "neutral",
+                        "help": ANALYSIS_HELP_TEXT["Assumption Profile"],
+                    },
+                    {
+                        "label": "Missing Metrics",
+                        "value": format_int(row.get("Missing_Metric_Count")),
+                        "note": "How many important data points were unavailable.",
+                        "tone": tone_from_metric_threshold(row.get("Missing_Metric_Count"), good_max=1, bad_min=5),
+                        "help": ANALYSIS_HELP_TEXT["Missing Metrics"],
+                    },
+                    {
+                        "label": "Confidence",
+                        "value": format_value(row.get("Decision_Confidence"), "{:,.0f}", "/100"),
+                        "note": "How strongly the model trusts its final call.",
+                        "tone": tone_from_metric_threshold(row.get("Decision_Confidence"), good_min=70, bad_max=45),
+                        "help": ANALYSIS_HELP_TEXT["Confidence"],
+                    },
+                    {
+                        "label": "Regime",
+                        "value": str(row.get("Market_Regime", "Unknown")),
+                        "note": "The market backdrop the model sees in the chart.",
+                        "tone": tone_from_regime(row.get("Market_Regime", "Unknown")),
+                        "help": ANALYSIS_HELP_TEXT["Regime"],
+                    },
+                ],
+                columns=6,
+            )
             st.caption(f"Fingerprint: {row.get('Assumption_Fingerprint', 'Legacy')}")
-            refine_cols = st.columns(5)
-            refine_cols[0].metric("Trend Strength", format_value(row.get("Trend_Strength"), "{:,.0f}"))
-            refine_cols[1].metric("Quality Score", format_value(row.get("Quality_Score"), "{:,.1f}"))
-            refine_cols[2].metric("Dividend Safety", format_value(row.get("Dividend_Safety_Score"), "{:,.1f}"))
-            refine_cols[3].metric("Valuation Confidence", format_value(row.get("Valuation_Confidence"), "{:,.0f}", "/100"))
-            refine_cols[4].metric("Sentiment Conviction", format_value(row.get("Sentiment_Conviction"), "{:,.0f}", "/100"))
+            render_analysis_signal_cards(
+                [
+                    {
+                        "label": "Trend Strength",
+                        "value": format_value(row.get("Trend_Strength"), "{:,.0f}"),
+                        "note": "A quick read on how healthy the long-term trend looks.",
+                        "tone": tone_from_metric_threshold(row.get("Trend_Strength"), good_min=20, bad_max=-20),
+                        "help": ANALYSIS_HELP_TEXT["Trend Strength"],
+                    },
+                    {
+                        "label": "Quality Score",
+                        "value": format_value(row.get("Quality_Score"), "{:,.1f}"),
+                        "note": "A shorthand measure of business durability.",
+                        "tone": tone_from_metric_threshold(row.get("Quality_Score"), good_min=2, bad_max=0),
+                        "help": ANALYSIS_HELP_TEXT["Quality Score"],
+                    },
+                    {
+                        "label": "Dividend Safety",
+                        "value": format_value(row.get("Dividend_Safety_Score"), "{:,.1f}"),
+                        "note": "A rough check on how safe the dividend appears.",
+                        "tone": tone_from_metric_threshold(row.get("Dividend_Safety_Score"), good_min=1.5, bad_max=0),
+                        "help": ANALYSIS_HELP_TEXT["Dividend Safety"],
+                    },
+                    {
+                        "label": "Valuation Confidence",
+                        "value": format_value(row.get("Valuation_Confidence"), "{:,.0f}", "/100"),
+                        "note": "Higher means the valuation read is backed by more usable inputs.",
+                        "tone": tone_from_metric_threshold(row.get("Valuation_Confidence"), good_min=70, bad_max=40),
+                        "help": ANALYSIS_HELP_TEXT["Valuation Confidence"],
+                    },
+                    {
+                        "label": "Sentiment Conviction",
+                        "value": format_value(row.get("Sentiment_Conviction"), "{:,.0f}", "/100"),
+                        "note": "How strong and well-supported the sentiment read looks.",
+                        "tone": tone_from_metric_threshold(row.get("Sentiment_Conviction"), good_min=65, bad_max=35),
+                        "help": ANALYSIS_HELP_TEXT["Sentiment Conviction"],
+                    },
+                ],
+                columns=5,
+            )
             if row.get("Engine_Weight_Profile"):
                 st.caption(f"Dynamic engine weights: {row.get('Engine_Weight_Profile')}")
             if row.get("Risk_Flags"):
@@ -4182,121 +4637,304 @@ with stock_tab:
             with tab_val:
                 c_v1, c_v2 = st.columns([1, 2])
                 with c_v1:
+                    graham_discount = row.get("Graham Discount")
                     st.markdown(f"### Verdict: **{row['Verdict_Valuation']}**")
-                    st.caption("Based on relative multiples and Graham-style fair value.")
-                    st.metric(
-                        "Graham Fair Value",
-                        f"${row['Graham_Number']:,.2f}",
-                        delta=f"{row['Price'] - row['Graham_Number']:,.2f} diff",
-                        delta_color="inverse",
+                    st.caption("This view asks a simple question: does the stock look cheap, expensive, or roughly fair compared with peers and fair-value estimates?")
+                    render_analysis_signal_cards(
+                        [
+                            {
+                                "label": "Graham Fair Value",
+                                "value": f"${row['Graham_Number']:,.2f}",
+                                "note": f"Compared with today's price, the gap is ${row['Price'] - row['Graham_Number']:,.2f}.",
+                                "tone": tone_from_metric_threshold(graham_discount, good_min=0.0, bad_max=-0.15),
+                                "help": ANALYSIS_HELP_TEXT["Graham Fair Value"],
+                            },
+                            {
+                                "label": "Graham Discount",
+                                "value": format_percent(graham_discount),
+                                "note": "Positive means the stock is trading below this fair-value estimate.",
+                                "tone": tone_from_metric_threshold(graham_discount, good_min=0.0, bad_max=-0.15),
+                                "help": ANALYSIS_HELP_TEXT["Graham Discount"],
+                            },
+                            {
+                                "label": "Valuation Confidence",
+                                "value": format_value(row.get("Valuation_Confidence"), "{:,.0f}", "/100"),
+                                "note": "Higher means the valuation read is supported by more usable data.",
+                                "tone": tone_from_metric_threshold(row.get("Valuation_Confidence"), good_min=70, bad_max=40),
+                                "help": ANALYSIS_HELP_TEXT["Valuation Confidence"],
+                            },
+                        ],
+                        columns=1,
                     )
                 with c_v2:
-                    st.dataframe(
-                        pd.DataFrame(
+                    render_analysis_signal_table(
+                        [
                             {
-                                "Metric": ["P/E Ratio", "Forward P/E", "PEG Ratio", "P/S Ratio", "EV/EBITDA", "P/B Ratio"],
-                                "Stock Value": [
-                                    format_value(row["PE_Ratio"]),
-                                    format_value(row["Forward_PE"]),
-                                    format_value(row["PEG_Ratio"]),
-                                    format_value(row["PS_Ratio"]),
-                                    format_value(row["EV_EBITDA"]),
-                                    format_value(row["PB_Ratio"]),
-                                ],
-                                "Benchmark": [
-                                    format_value(sector_bench["PE"]),
-                                    format_value(sector_bench["PE"]),
-                                    format_value(model_settings["valuation_peg_threshold"]),
-                                    format_value(sector_bench["PS"]),
-                                    format_value(sector_bench["EV_EBITDA"]),
-                                    format_value(sector_bench["PB"]),
-                                ],
-                            }
-                        ),
-                        use_container_width=True,
+                                "metric": "P/E Ratio",
+                                "value": format_value(row["PE_Ratio"]),
+                                "reference": format_value(sector_bench["PE"]),
+                                "status": "Cheap" if tone_from_relative_multiple(row["PE_Ratio"], sector_bench["PE"]) == "good" else "Rich" if tone_from_relative_multiple(row["PE_Ratio"], sector_bench["PE"]) == "bad" else "Fair",
+                                "tone": tone_from_relative_multiple(row["PE_Ratio"], sector_bench["PE"]),
+                                "help": ANALYSIS_HELP_TEXT["P/E Ratio"],
+                            },
+                            {
+                                "metric": "Forward P/E",
+                                "value": format_value(row["Forward_PE"]),
+                                "reference": format_value(sector_bench["PE"]),
+                                "status": "Cheap" if tone_from_relative_multiple(row["Forward_PE"], sector_bench["PE"]) == "good" else "Rich" if tone_from_relative_multiple(row["Forward_PE"], sector_bench["PE"]) == "bad" else "Fair",
+                                "tone": tone_from_relative_multiple(row["Forward_PE"], sector_bench["PE"]),
+                                "help": ANALYSIS_HELP_TEXT["Forward P/E"],
+                            },
+                            {
+                                "metric": "PEG Ratio",
+                                "value": format_value(row["PEG_Ratio"]),
+                                "reference": format_value(model_settings["valuation_peg_threshold"]),
+                                "status": "Favorable" if tone_from_metric_threshold(row["PEG_Ratio"], good_max=model_settings["valuation_peg_threshold"] * 0.9, bad_min=model_settings["valuation_peg_threshold"] * 1.35) == "good" else "Stretched" if tone_from_metric_threshold(row["PEG_Ratio"], good_max=model_settings["valuation_peg_threshold"] * 0.9, bad_min=model_settings["valuation_peg_threshold"] * 1.35) == "bad" else "Mixed",
+                                "tone": tone_from_metric_threshold(row["PEG_Ratio"], good_max=model_settings["valuation_peg_threshold"] * 0.9, bad_min=model_settings["valuation_peg_threshold"] * 1.35),
+                                "help": ANALYSIS_HELP_TEXT["PEG Ratio"],
+                            },
+                            {
+                                "metric": "P/S Ratio",
+                                "value": format_value(row["PS_Ratio"]),
+                                "reference": format_value(sector_bench["PS"]),
+                                "status": "Cheap" if tone_from_relative_multiple(row["PS_Ratio"], sector_bench["PS"]) == "good" else "Rich" if tone_from_relative_multiple(row["PS_Ratio"], sector_bench["PS"]) == "bad" else "Fair",
+                                "tone": tone_from_relative_multiple(row["PS_Ratio"], sector_bench["PS"]),
+                                "help": ANALYSIS_HELP_TEXT["P/S Ratio"],
+                            },
+                            {
+                                "metric": "EV/EBITDA",
+                                "value": format_value(row["EV_EBITDA"]),
+                                "reference": format_value(sector_bench["EV_EBITDA"]),
+                                "status": "Cheap" if tone_from_relative_multiple(row["EV_EBITDA"], sector_bench["EV_EBITDA"]) == "good" else "Rich" if tone_from_relative_multiple(row["EV_EBITDA"], sector_bench["EV_EBITDA"]) == "bad" else "Fair",
+                                "tone": tone_from_relative_multiple(row["EV_EBITDA"], sector_bench["EV_EBITDA"]),
+                                "help": ANALYSIS_HELP_TEXT["EV/EBITDA"],
+                            },
+                            {
+                                "metric": "P/B Ratio",
+                                "value": format_value(row["PB_Ratio"]),
+                                "reference": format_value(sector_bench["PB"]),
+                                "status": "Cheap" if tone_from_relative_multiple(row["PB_Ratio"], sector_bench["PB"]) == "good" else "Rich" if tone_from_relative_multiple(row["PB_Ratio"], sector_bench["PB"]) == "bad" else "Fair",
+                                "tone": tone_from_relative_multiple(row["PB_Ratio"], sector_bench["PB"]),
+                                "help": ANALYSIS_HELP_TEXT["P/B Ratio"],
+                            },
+                        ],
+                        reference_label="Benchmark",
                     )
 
             with tab_fund:
                 c_f1, c_f2 = st.columns([1, 2])
                 with c_f1:
                     st.markdown(f"### Verdict: **{row['Verdict_Fundamental']}**")
-                    st.caption("Based on profitability, growth, leverage, and liquidity.")
+                    st.caption("This view focuses on business strength: profitability, growth, balance-sheet pressure, and short-term financial flexibility.")
                 with c_f2:
-                    col_m1, col_m2, col_m3, col_m4, col_m5 = st.columns(5)
-                    col_m1.metric(
-                        "ROE",
-                        format_percent(row["ROE"]),
-                        f"Target: >{model_settings['fund_roe_threshold'] * 100:.0f}%",
+                    render_analysis_signal_table(
+                        [
+                            {
+                                "metric": "ROE",
+                                "value": format_percent(row["ROE"]),
+                                "reference": f">{model_settings['fund_roe_threshold'] * 100:.0f}%",
+                                "status": "Strong" if tone_from_metric_threshold(row["ROE"], good_min=model_settings["fund_roe_threshold"], bad_max=max(0.0, model_settings["fund_roe_threshold"] * 0.5)) == "good" else "Weak" if tone_from_metric_threshold(row["ROE"], good_min=model_settings["fund_roe_threshold"], bad_max=max(0.0, model_settings["fund_roe_threshold"] * 0.5)) == "bad" else "Mixed",
+                                "tone": tone_from_metric_threshold(row["ROE"], good_min=model_settings["fund_roe_threshold"], bad_max=max(0.0, model_settings["fund_roe_threshold"] * 0.5)),
+                                "help": ANALYSIS_HELP_TEXT["ROE"],
+                            },
+                            {
+                                "metric": "Profit Margin",
+                                "value": format_percent(row["Profit_Margins"]),
+                                "reference": f">{model_settings['fund_profit_margin_threshold'] * 100:.0f}%",
+                                "status": "Strong" if tone_from_metric_threshold(row["Profit_Margins"], good_min=model_settings["fund_profit_margin_threshold"], bad_max=max(0.0, model_settings["fund_profit_margin_threshold"] * 0.5)) == "good" else "Weak" if tone_from_metric_threshold(row["Profit_Margins"], good_min=model_settings["fund_profit_margin_threshold"], bad_max=max(0.0, model_settings["fund_profit_margin_threshold"] * 0.5)) == "bad" else "Mixed",
+                                "tone": tone_from_metric_threshold(row["Profit_Margins"], good_min=model_settings["fund_profit_margin_threshold"], bad_max=max(0.0, model_settings["fund_profit_margin_threshold"] * 0.5)),
+                                "help": ANALYSIS_HELP_TEXT["Profit Margin"],
+                            },
+                            {
+                                "metric": "Debt/Equity",
+                                "value": format_value(row["Debt_to_Equity"], "{:,.0f}", "%"),
+                                "reference": f"<{model_settings['fund_debt_good_threshold']:.0f}%",
+                                "status": "Healthy" if tone_from_metric_threshold(row["Debt_to_Equity"], good_max=model_settings["fund_debt_good_threshold"], bad_min=model_settings["fund_debt_bad_threshold"]) == "good" else "Stretched" if tone_from_metric_threshold(row["Debt_to_Equity"], good_max=model_settings["fund_debt_good_threshold"], bad_min=model_settings["fund_debt_bad_threshold"]) == "bad" else "Watch",
+                                "tone": tone_from_metric_threshold(row["Debt_to_Equity"], good_max=model_settings["fund_debt_good_threshold"], bad_min=model_settings["fund_debt_bad_threshold"]),
+                                "help": ANALYSIS_HELP_TEXT["Debt/Equity"],
+                            },
+                            {
+                                "metric": "Revenue Growth",
+                                "value": format_percent(row["Revenue_Growth"]),
+                                "reference": f">{model_settings['fund_revenue_growth_threshold'] * 100:.0f}%",
+                                "status": "Strong" if tone_from_metric_threshold(row["Revenue_Growth"], good_min=model_settings["fund_revenue_growth_threshold"], bad_max=0.0) == "good" else "Weak" if tone_from_metric_threshold(row["Revenue_Growth"], good_min=model_settings["fund_revenue_growth_threshold"], bad_max=0.0) == "bad" else "Mixed",
+                                "tone": tone_from_metric_threshold(row["Revenue_Growth"], good_min=model_settings["fund_revenue_growth_threshold"], bad_max=0.0),
+                                "help": ANALYSIS_HELP_TEXT["Revenue Growth"],
+                            },
+                            {
+                                "metric": "Current Ratio",
+                                "value": format_value(row["Current_Ratio"]),
+                                "reference": f">{model_settings['fund_current_ratio_good']:.1f}",
+                                "status": "Healthy" if tone_from_metric_threshold(row["Current_Ratio"], good_min=model_settings["fund_current_ratio_good"], bad_max=model_settings["fund_current_ratio_bad"]) == "good" else "Weak" if tone_from_metric_threshold(row["Current_Ratio"], good_min=model_settings["fund_current_ratio_good"], bad_max=model_settings["fund_current_ratio_bad"]) == "bad" else "Mixed",
+                                "tone": tone_from_metric_threshold(row["Current_Ratio"], good_min=model_settings["fund_current_ratio_good"], bad_max=model_settings["fund_current_ratio_bad"]),
+                                "help": ANALYSIS_HELP_TEXT["Current Ratio"],
+                            },
+                            {
+                                "metric": "Dividend Yield",
+                                "value": format_percent(row.get("Dividend_Yield")),
+                                "reference": "Income support",
+                                "status": "Supportive" if tone_from_metric_threshold(row.get("Dividend_Yield"), good_min=0.02) == "good" else "Neutral",
+                                "tone": tone_from_metric_threshold(row.get("Dividend_Yield"), good_min=0.02),
+                                "help": ANALYSIS_HELP_TEXT["Dividend Yield"],
+                            },
+                            {
+                                "metric": "Payout Ratio",
+                                "value": format_percent(row.get("Payout_Ratio")),
+                                "reference": "<75% preferred",
+                                "status": "Safe" if tone_from_metric_threshold(row.get("Payout_Ratio"), good_max=0.75, bad_min=1.0) == "good" else "Stretched" if tone_from_metric_threshold(row.get("Payout_Ratio"), good_max=0.75, bad_min=1.0) == "bad" else "Mixed",
+                                "tone": tone_from_metric_threshold(row.get("Payout_Ratio"), good_max=0.75, bad_min=1.0),
+                                "help": ANALYSIS_HELP_TEXT["Payout Ratio"],
+                            },
+                            {
+                                "metric": "Equity Beta",
+                                "value": format_value(row.get("Equity_Beta")),
+                                "reference": "<1.0 steadier",
+                                "status": "Stable" if tone_from_metric_threshold(row.get("Equity_Beta"), good_max=1.0, bad_min=1.5) == "good" else "Volatile" if tone_from_metric_threshold(row.get("Equity_Beta"), good_max=1.0, bad_min=1.5) == "bad" else "Normal",
+                                "tone": tone_from_metric_threshold(row.get("Equity_Beta"), good_max=1.0, bad_min=1.5),
+                                "help": ANALYSIS_HELP_TEXT["Equity Beta"],
+                            },
+                        ],
+                        reference_label="Target",
                     )
-                    col_m2.metric(
-                        "Profit Margin",
-                        format_percent(row["Profit_Margins"]),
-                        f"Target: >{model_settings['fund_profit_margin_threshold'] * 100:.0f}%",
-                    )
-                    col_m3.metric(
-                        "Debt/Equity",
-                        format_value(row["Debt_to_Equity"], "{:,.0f}", "%"),
-                        f"Target: <{model_settings['fund_debt_good_threshold']:.0f}%",
-                        delta_color="inverse",
-                    )
-                    col_m4.metric(
-                        "Revenue Growth",
-                        format_percent(row["Revenue_Growth"]),
-                        f"Target: >{model_settings['fund_revenue_growth_threshold'] * 100:.0f}%",
-                    )
-                    col_m5.metric(
-                        "Current Ratio",
-                        format_value(row["Current_Ratio"]),
-                        f"Target: >{model_settings['fund_current_ratio_good']:.1f}",
-                    )
-                    income_cols = st.columns(3)
-                    income_cols[0].metric("Dividend Yield", format_percent(row.get("Dividend_Yield")))
-                    income_cols[1].metric("Payout Ratio", format_percent(row.get("Payout_Ratio")))
-                    income_cols[2].metric("Equity Beta", format_value(row.get("Equity_Beta")))
 
             with tab_tech:
                 c_t1, c_t2 = st.columns([1, 2])
                 with c_t1:
                     st.markdown(f"### Verdict: **{row['Verdict_Technical']}**")
-                    st.caption("Based on RSI, MACD, moving averages, and momentum.")
+                    st.caption("This view focuses on chart behavior: trend direction, momentum, and whether the stock looks stretched or healthy.")
                 with c_t2:
-                    col_t1, col_t2, col_t3, col_t4 = st.columns(4)
-                    col_t1.metric(
-                        "RSI (14)",
-                        format_value(row["RSI"], "{:,.1f}"),
-                        f"{int(model_settings['tech_rsi_oversold'])}=Oversold, {int(model_settings['tech_rsi_overbought'])}=Overbought",
+                    render_analysis_signal_cards(
+                        [
+                            {
+                                "label": "RSI (14)",
+                                "value": format_value(row["RSI"], "{:,.1f}"),
+                                "note": f"{int(model_settings['tech_rsi_oversold'])} oversold / {int(model_settings['tech_rsi_overbought'])} overbought",
+                                "tone": tone_from_balanced_band(
+                                    row["RSI"],
+                                    healthy_min=model_settings["tech_rsi_oversold"] + 5,
+                                    healthy_max=model_settings["tech_rsi_overbought"] - 5,
+                                    caution_low=model_settings["tech_rsi_oversold"],
+                                    caution_high=model_settings["tech_rsi_overbought"],
+                                ),
+                                "help": ANALYSIS_HELP_TEXT["RSI (14)"],
+                            },
+                            {
+                                "label": "Trend",
+                                "value": str(row["SMA_Status"]),
+                                "note": "A quick read on the moving-average trend.",
+                                "tone": tone_from_signal_text(row["SMA_Status"], positives={"BULLISH"}, negatives={"BEARISH"}),
+                                "help": ANALYSIS_HELP_TEXT["Trend"],
+                            },
+                            {
+                                "label": "MACD",
+                                "value": format_value(row["MACD_Value"], "{:,.2f}"),
+                                "note": f"Current signal: {row['MACD_Signal']}",
+                                "tone": tone_from_signal_text(row["MACD_Signal"], positives={"BULLISH CROSSOVER"}, negatives={"BEARISH CROSSOVER"}),
+                                "help": ANALYSIS_HELP_TEXT["MACD"],
+                            },
+                            {
+                                "label": "1M Momentum",
+                                "value": format_percent(row["Momentum_1M"]),
+                                "note": "The stock's short-term move over roughly one month.",
+                                "tone": tone_from_metric_threshold(row["Momentum_1M"], good_min=model_settings["tech_momentum_threshold"], bad_max=-model_settings["tech_momentum_threshold"]),
+                                "help": ANALYSIS_HELP_TEXT["1M Momentum"],
+                            },
+                        ],
+                        columns=4,
                     )
-                    col_t2.metric("Trend", str(row["SMA_Status"]))
-                    col_t3.metric("MACD", format_value(row["MACD_Value"], "{:,.2f}"), str(row["MACD_Signal"]))
-                    col_t4.metric("1M Momentum", format_percent(row["Momentum_1M"]), "Short-term move")
 
-                st.dataframe(
-                    pd.DataFrame(
+                render_analysis_signal_table(
+                    [
                         {
-                            "Signal": ["RSI", "200-Day Trend", "MACD Signal", "1Y Momentum"],
-                            "Value": [
-                                format_value(row["RSI"], "{:,.1f}"),
-                                str(row["SMA_Status"]),
-                                str(row["MACD_Signal"]),
-                                format_percent(row["Momentum_1Y"]),
-                            ],
-                        }
-                    ),
-                    use_container_width=True,
+                            "metric": "RSI",
+                            "value": format_value(row["RSI"], "{:,.1f}"),
+                            "reference": "Balanced range",
+                            "status": "Healthy" if tone_from_balanced_band(row["RSI"], healthy_min=model_settings["tech_rsi_oversold"] + 5, healthy_max=model_settings["tech_rsi_overbought"] - 5, caution_low=model_settings["tech_rsi_oversold"], caution_high=model_settings["tech_rsi_overbought"]) == "good" else "Extreme" if tone_from_balanced_band(row["RSI"], healthy_min=model_settings["tech_rsi_oversold"] + 5, healthy_max=model_settings["tech_rsi_overbought"] - 5, caution_low=model_settings["tech_rsi_oversold"], caution_high=model_settings["tech_rsi_overbought"]) == "bad" else "Mixed",
+                            "tone": tone_from_balanced_band(row["RSI"], healthy_min=model_settings["tech_rsi_oversold"] + 5, healthy_max=model_settings["tech_rsi_overbought"] - 5, caution_low=model_settings["tech_rsi_oversold"], caution_high=model_settings["tech_rsi_overbought"]),
+                            "help": ANALYSIS_HELP_TEXT["RSI"],
+                        },
+                        {
+                            "metric": "200-Day Trend",
+                            "value": str(row["SMA_Status"]),
+                            "reference": "Trend direction",
+                            "status": "Bullish" if tone_from_signal_text(row["SMA_Status"], positives={"BULLISH"}, negatives={"BEARISH"}) == "good" else "Bearish" if tone_from_signal_text(row["SMA_Status"], positives={"BULLISH"}, negatives={"BEARISH"}) == "bad" else "Neutral",
+                            "tone": tone_from_signal_text(row["SMA_Status"], positives={"BULLISH"}, negatives={"BEARISH"}),
+                            "help": ANALYSIS_HELP_TEXT["200-Day Trend"],
+                        },
+                        {
+                            "metric": "MACD Signal",
+                            "value": str(row["MACD_Signal"]),
+                            "reference": "Momentum crossover",
+                            "status": "Bullish" if tone_from_signal_text(row["MACD_Signal"], positives={"BULLISH CROSSOVER"}, negatives={"BEARISH CROSSOVER"}) == "good" else "Bearish" if tone_from_signal_text(row["MACD_Signal"], positives={"BULLISH CROSSOVER"}, negatives={"BEARISH CROSSOVER"}) == "bad" else "Neutral",
+                            "tone": tone_from_signal_text(row["MACD_Signal"], positives={"BULLISH CROSSOVER"}, negatives={"BEARISH CROSSOVER"}),
+                            "help": ANALYSIS_HELP_TEXT["MACD Signal"],
+                        },
+                        {
+                            "metric": "1Y Momentum",
+                            "value": format_percent(row["Momentum_1Y"]),
+                            "reference": "Long-term move",
+                            "status": "Strong" if tone_from_metric_threshold(row["Momentum_1Y"], good_min=max(model_settings["tech_momentum_threshold"] * 3, 0.10), bad_max=-max(model_settings["tech_momentum_threshold"] * 3, 0.10)) == "good" else "Weak" if tone_from_metric_threshold(row["Momentum_1Y"], good_min=max(model_settings["tech_momentum_threshold"] * 3, 0.10), bad_max=-max(model_settings["tech_momentum_threshold"] * 3, 0.10)) == "bad" else "Mixed",
+                            "tone": tone_from_metric_threshold(row["Momentum_1Y"], good_min=max(model_settings["tech_momentum_threshold"] * 3, 0.10), bad_max=-max(model_settings["tech_momentum_threshold"] * 3, 0.10)),
+                            "help": ANALYSIS_HELP_TEXT["1Y Momentum"],
+                        },
+                        {
+                            "metric": "Trend Strength",
+                            "value": format_value(row["Trend_Strength"], "{:,.0f}"),
+                            "reference": ">20 constructive",
+                            "status": "Strong" if tone_from_metric_threshold(row["Trend_Strength"], good_min=20, bad_max=-20) == "good" else "Weak" if tone_from_metric_threshold(row["Trend_Strength"], good_min=20, bad_max=-20) == "bad" else "Mixed",
+                            "tone": tone_from_metric_threshold(row["Trend_Strength"], good_min=20, bad_max=-20),
+                            "help": ANALYSIS_HELP_TEXT["Trend Strength"],
+                        },
+                    ],
+                    reference_label="Read",
                 )
 
             with tab_sent:
                 c_s1, c_s2 = st.columns([1, 2])
                 with c_s1:
                     st.markdown(f"### Verdict: **{row['Verdict_Sentiment']}**")
-                    st.caption("Based on recent headline tone and analyst expectations.")
-                    s1, s2, s3 = st.columns(3)
-                    s1.metric("Headlines", format_int(row["Sentiment_Headline_Count"]))
-                    s2.metric("Analyst View", str(row["Recommendation_Key"]))
+                    st.caption("This view looks at what the recent news and analyst community are signaling, and how strong that signal really is.")
                     target_price = row["Target_Mean_Price"]
-                    s3.metric("Target Mean", "N/A" if pd.isna(target_price) else f"${target_price:,.2f}")
+                    target_upside = safe_divide(target_price - row["Price"], row["Price"]) if has_numeric_value(target_price) and has_numeric_value(row["Price"]) else None
+                    render_analysis_signal_cards(
+                        [
+                            {
+                                "label": "Headlines",
+                                "value": format_int(row["Sentiment_Headline_Count"]),
+                                "note": "The number of recent headlines used in the sentiment read.",
+                                "tone": tone_from_metric_threshold(row["Sentiment_Headline_Count"], good_min=1),
+                                "help": ANALYSIS_HELP_TEXT["Headlines"],
+                            },
+                            {
+                                "label": "Analyst View",
+                                "value": str(row["Recommendation_Key"]),
+                                "note": "The broad analyst recommendation signal the model found.",
+                                "tone": tone_from_signal_text(
+                                    row["Recommendation_Key"],
+                                    positives={"BUY", "STRONG_BUY", "OUTPERFORM", "OVERWEIGHT"},
+                                    negatives={"SELL", "STRONG_SELL", "UNDERPERFORM", "UNDERWEIGHT"},
+                                ),
+                                "help": ANALYSIS_HELP_TEXT["Analyst View"],
+                            },
+                            {
+                                "label": "Target Mean",
+                                "value": "N/A" if pd.isna(target_price) else f"${target_price:,.2f}",
+                                "note": "The average analyst target price, when available.",
+                                "tone": tone_from_metric_threshold(target_upside, good_min=model_settings["sentiment_upside_mid"], bad_max=-model_settings["sentiment_downside_mid"]),
+                                "help": ANALYSIS_HELP_TEXT["Target Mean"],
+                            },
+                            {
+                                "label": "Sentiment Conviction",
+                                "value": format_value(row.get("Sentiment_Conviction"), "{:,.0f}", "/100"),
+                                "note": "How strong and well-supported the sentiment signal looks.",
+                                "tone": tone_from_metric_threshold(row.get("Sentiment_Conviction"), good_min=65, bad_max=35),
+                                "help": ANALYSIS_HELP_TEXT["Sentiment Conviction"],
+                            },
+                        ],
+                        columns=2,
+                    )
                 with c_s2:
-                    st.write("Recent sentiment summary")
+                    st.write("What the model is seeing in the latest headlines")
                     st.caption(str(row["Sentiment_Summary"]))
         else:
             st.info("Run the full analysis to save this ticker into the shared research library.")
@@ -4360,11 +4998,39 @@ with compare_tab:
 
         top_pick = comparison_df.iloc[0]
         average_upside = comparison_df["Target Upside"].dropna().mean()
-        comparison_metrics = st.columns(4)
-        comparison_metrics[0].metric("Highest Conviction", str(top_pick["Ticker"]), str(top_pick["Verdict_Overall"]))
-        comparison_metrics[1].metric("Average Composite Score", format_value(comparison_df["Composite Score"].mean(), "{:,.1f}"))
-        comparison_metrics[2].metric("Average Target Upside", format_percent(average_upside))
-        comparison_metrics[3].metric("Sectors Covered", str(comparison_df["Sector"].nunique()))
+        render_analysis_signal_cards(
+            [
+                {
+                    "label": "Highest Conviction",
+                    "value": str(top_pick["Ticker"]),
+                    "note": f"Current top-ranked name with a verdict of {top_pick['Verdict_Overall']}.",
+                    "tone": tone_from_metric_threshold(top_pick.get("Decision_Confidence"), good_min=70, bad_max=45),
+                    "help": ANALYSIS_HELP_TEXT["Highest Conviction"],
+                },
+                {
+                    "label": "Average Composite Score",
+                    "value": format_value(comparison_df["Composite Score"].mean(), "{:,.1f}"),
+                    "note": "A higher average means the watchlist looks stronger overall.",
+                    "tone": tone_from_metric_threshold(comparison_df["Composite Score"].mean(), good_min=1, bad_max=-1),
+                    "help": ANALYSIS_HELP_TEXT["Average Composite Score"],
+                },
+                {
+                    "label": "Average Target Upside",
+                    "value": format_percent(average_upside),
+                    "note": "The average analyst upside across the names in this shortlist.",
+                    "tone": tone_from_metric_threshold(average_upside, good_min=0.10, bad_max=-0.05),
+                    "help": ANALYSIS_HELP_TEXT["Average Target Upside"],
+                },
+                {
+                    "label": "Sectors Covered",
+                    "value": str(comparison_df["Sector"].nunique()),
+                    "note": "More sectors usually means the list is less concentrated in one theme.",
+                    "tone": "neutral",
+                    "help": ANALYSIS_HELP_TEXT["Sectors Covered"],
+                },
+            ],
+            columns=4,
+        )
 
         status_notes = []
         if meta.get("refreshed"):
@@ -4387,6 +5053,17 @@ with compare_tab:
             st.caption("This comparison includes rows generated under different assumption fingerprints. Refresh live data for a cleaner apples-to-apples ranking.")
 
         st.subheader("Shortlist Ranking")
+        render_help_legend(
+            [
+                ("Composite Score", ANALYSIS_HELP_TEXT["Composite Score"]),
+                ("Confidence", ANALYSIS_HELP_TEXT["Confidence"]),
+                ("Trend Strength", ANALYSIS_HELP_TEXT["Trend Strength"]),
+                ("Quality Score", ANALYSIS_HELP_TEXT["Quality Score"]),
+                ("Target Upside", ANALYSIS_HELP_TEXT["Target Mean"]),
+                ("Graham Discount", ANALYSIS_HELP_TEXT["Graham Discount"]),
+                ("Freshness", ANALYSIS_HELP_TEXT["Freshness"]),
+            ]
+        )
         comparison_display = comparison_df[
             [
                 "Ticker",
@@ -4428,6 +5105,15 @@ with compare_tab:
         engine_col, rationale_col = st.columns([2, 1])
         with engine_col:
             st.subheader("Engine Scorecard")
+            render_help_legend(
+                [
+                    ("Technical", ANALYSIS_HELP_TEXT["Technical"]),
+                    ("Fundamental", ANALYSIS_HELP_TEXT["Fundamental"]),
+                    ("Valuation", ANALYSIS_HELP_TEXT["Valuation"]),
+                    ("Sentiment", ANALYSIS_HELP_TEXT["Sentiment"]),
+                    ("Composite Score", ANALYSIS_HELP_TEXT["Composite Score"]),
+                ]
+            )
             scorecard = comparison_df[
                 ["Ticker", "Stock_Type", "Score_Tech", "Score_Fund", "Score_Val", "Score_Sentiment", "Composite Score"]
             ].copy()
@@ -4514,24 +5200,94 @@ with portfolio_tab:
         )
         st.caption(f"Assumption profile: {active_preset_name} | Fingerprint: {active_assumption_fingerprint}")
 
-        metric_cols = st.columns(5)
-        metric_cols[0].metric("Expected Return", format_percent(tangent["Return"]))
-        metric_cols[1].metric("Volatility", format_percent(tangent["Volatility"]))
-        metric_cols[2].metric("Sharpe", format_value(tangent["Sharpe"]))
-        metric_cols[3].metric("Sortino", format_value(tangent["Sortino"]))
-        metric_cols[4].metric("Treynor", format_value(tangent["Treynor"]))
+        render_analysis_signal_cards(
+            [
+                {
+                    "label": "Expected Return",
+                    "value": format_percent(tangent["Return"]),
+                    "note": "The annualized return estimate for the max-Sharpe portfolio.",
+                    "tone": tone_from_metric_threshold(tangent["Return"], good_min=0.10, bad_max=0.03),
+                    "help": ANALYSIS_HELP_TEXT["Expected Return"],
+                },
+                {
+                    "label": "Volatility",
+                    "value": format_percent(tangent["Volatility"]),
+                    "note": "This is the expected bumpiness of returns over a full year.",
+                    "tone": tone_from_metric_threshold(tangent["Volatility"], good_max=0.22, bad_min=0.35),
+                    "help": ANALYSIS_HELP_TEXT["Volatility"],
+                },
+                {
+                    "label": "Sharpe",
+                    "value": format_value(tangent["Sharpe"]),
+                    "note": "Higher Sharpe usually means a better return-to-risk tradeoff.",
+                    "tone": tone_from_metric_threshold(tangent["Sharpe"], good_min=1.0, bad_max=0.3),
+                    "help": ANALYSIS_HELP_TEXT["Sharpe"],
+                },
+                {
+                    "label": "Sortino",
+                    "value": format_value(tangent["Sortino"]),
+                    "note": "This focuses on downside risk instead of all volatility.",
+                    "tone": tone_from_metric_threshold(tangent["Sortino"], good_min=1.2, bad_max=0.4),
+                    "help": ANALYSIS_HELP_TEXT["Sortino"],
+                },
+                {
+                    "label": "Treynor",
+                    "value": format_value(tangent["Treynor"]),
+                    "note": "This compares excess return with market sensitivity, not total volatility.",
+                    "tone": tone_from_metric_threshold(tangent["Treynor"], good_min=0.08, bad_max=0.0),
+                    "help": ANALYSIS_HELP_TEXT["Treynor"],
+                },
+            ],
+            columns=5,
+        )
 
-        metric_cols_2 = st.columns(4)
-        metric_cols_2[0].metric("Portfolio Beta", format_value(tangent["Beta"]))
-        metric_cols_2[1].metric("Downside Vol", format_percent(tangent["Downside Volatility"]))
-        metric_cols_2[2].metric("Min-Vol Return", format_percent(min_vol["Return"]))
-        metric_cols_2[3].metric("Effective Names", format_value(result["effective_names"], "{:,.1f}"))
+        render_analysis_signal_cards(
+            [
+                {
+                    "label": "Portfolio Beta",
+                    "value": format_value(tangent["Beta"]),
+                    "note": "Around 1 means the portfolio has moved roughly in line with the benchmark.",
+                    "tone": tone_from_balanced_band(tangent["Beta"], 0.8, 1.1, 0.6, 1.4),
+                    "help": ANALYSIS_HELP_TEXT["Portfolio Beta"],
+                },
+                {
+                    "label": "Downside Vol",
+                    "value": format_percent(tangent["Downside Volatility"]),
+                    "note": "This isolates the roughness coming from negative return swings.",
+                    "tone": tone_from_metric_threshold(tangent["Downside Volatility"], good_max=0.15, bad_min=0.28),
+                    "help": ANALYSIS_HELP_TEXT["Downside Vol"],
+                },
+                {
+                    "label": "Min-Vol Return",
+                    "value": format_percent(min_vol["Return"]),
+                    "note": "The return estimate for the lowest-volatility portfolio the simulation found.",
+                    "tone": tone_from_metric_threshold(min_vol["Return"], good_min=0.07, bad_max=0.02),
+                    "help": ANALYSIS_HELP_TEXT["Min-Vol Return"],
+                },
+                {
+                    "label": "Effective Names",
+                    "value": format_value(result["effective_names"], "{:,.1f}"),
+                    "note": "This shows how diversified the weights really are after concentration is considered.",
+                    "tone": tone_from_metric_threshold(result["effective_names"], good_min=5, bad_max=3),
+                    "help": ANALYSIS_HELP_TEXT["Effective Names"],
+                },
+            ],
+            columns=4,
+        )
 
         st.subheader("Efficient Frontier and CAL")
         st.caption("The green diamond is the tangent portfolio with the highest Sharpe ratio. The red dashed line is the Capital Allocation Line.")
         render_frontier_chart(result["portfolio_cloud"], result["frontier"], result["cal"], tangent, min_vol)
 
         st.subheader("Recommended Allocation")
+        render_help_legend(
+            [
+                ("Sharpe", ANALYSIS_HELP_TEXT["Sharpe"]),
+                ("Sortino", ANALYSIS_HELP_TEXT["Sortino"]),
+                ("Treynor", ANALYSIS_HELP_TEXT["Treynor"]),
+                ("Beta", ANALYSIS_HELP_TEXT["Portfolio Beta"]),
+            ]
+        )
         recommendations_display = recommendations[
             ["Ticker", "Name", "Sector", "Recommended Weight", "Role", "Sharpe Ratio", "Sortino Ratio", "Treynor Ratio", "Beta", "Rationale"]
         ].copy()
@@ -4551,6 +5307,17 @@ with portfolio_tab:
 
         with metrics_col:
             st.subheader("Per-Stock Metrics")
+            render_help_legend(
+                [
+                    ("Annual Return", ANALYSIS_HELP_TEXT["Expected Return"]),
+                    ("Volatility", ANALYSIS_HELP_TEXT["Volatility"]),
+                    ("Downside Volatility", ANALYSIS_HELP_TEXT["Downside Vol"]),
+                    ("Beta", ANALYSIS_HELP_TEXT["Portfolio Beta"]),
+                    ("Sharpe", ANALYSIS_HELP_TEXT["Sharpe"]),
+                    ("Sortino", ANALYSIS_HELP_TEXT["Sortino"]),
+                    ("Treynor", ANALYSIS_HELP_TEXT["Treynor"]),
+                ]
+            )
             asset_display = result["asset_metrics"].copy()
             for column in ["Annual Return", "Volatility", "Downside Volatility"]:
                 asset_display[column] = asset_display[column].map(format_percent)
@@ -4607,11 +5374,47 @@ with sensitivity_tab:
             f"Ticker: {checked_ticker} | Active profile: {active_preset_name} | Active fingerprint: {active_assumption_fingerprint}"
         )
 
-        sensitivity_metrics = st.columns(4)
-        sensitivity_metrics[0].metric("Robustness", sensitivity_summary.get("robustness_label", "N/A"))
-        sensitivity_metrics[1].metric("Dominant Bias", sensitivity_summary.get("dominant_bias", "N/A"))
-        sensitivity_metrics[2].metric("Scenario Count", str(sensitivity_summary.get("scenario_count", 0)))
-        sensitivity_metrics[3].metric("Verdict Variety", str(sensitivity_summary.get("verdict_count", 0)))
+        render_analysis_signal_cards(
+            [
+                {
+                    "label": "Robustness",
+                    "value": sensitivity_summary.get("robustness_label", "N/A"),
+                    "note": "This shows how stable the directional read stayed across guarded scenario changes.",
+                    "tone": tone_from_signal_text(
+                        sensitivity_summary.get("robustness_label"),
+                        positives={"HIGH"},
+                        negatives={"LOW"},
+                    ),
+                    "help": ANALYSIS_HELP_TEXT["Robustness"],
+                },
+                {
+                    "label": "Dominant Bias",
+                    "value": sensitivity_summary.get("dominant_bias", "N/A"),
+                    "note": "The direction the model landed on most often across the scenarios.",
+                    "tone": tone_from_signal_text(
+                        sensitivity_summary.get("dominant_bias"),
+                        positives={"BULLISH"},
+                        negatives={"BEARISH"},
+                    ),
+                    "help": ANALYSIS_HELP_TEXT["Dominant Bias"],
+                },
+                {
+                    "label": "Scenario Count",
+                    "value": str(sensitivity_summary.get("scenario_count", 0)),
+                    "note": "How many nearby assumption sets were tested against the same market snapshot.",
+                    "tone": "neutral",
+                    "help": ANALYSIS_HELP_TEXT["Scenario Count"],
+                },
+                {
+                    "label": "Verdict Variety",
+                    "value": str(sensitivity_summary.get("verdict_count", 0)),
+                    "note": "More verdict variety usually means the name is more sensitive to model settings.",
+                    "tone": tone_from_metric_threshold(sensitivity_summary.get("verdict_count", 0), good_max=2, bad_min=4),
+                    "help": ANALYSIS_HELP_TEXT["Verdict Variety"],
+                },
+            ],
+            columns=4,
+        )
 
         robustness_ratio = sensitivity_summary.get("robustness_ratio")
         if robustness_ratio is not None:
@@ -4623,6 +5426,14 @@ with sensitivity_tab:
         else:
             st.success("The direction stayed fairly consistent across the guarded scenario set.")
 
+        render_help_legend(
+            [
+                ("Bias", ANALYSIS_HELP_TEXT["Bias"]),
+                ("Confidence", ANALYSIS_HELP_TEXT["Confidence"]),
+                ("Assumption Drift", ANALYSIS_HELP_TEXT["Assumption Drift"]),
+                ("Fingerprint", ANALYSIS_HELP_TEXT["Fingerprint"]),
+            ]
+        )
         sensitivity_display = sensitivity_df.copy()
         sensitivity_display["Overall Score"] = sensitivity_display["Overall Score"].map(
             lambda value: format_value(value, "{:,.1f}")
@@ -4716,24 +5527,92 @@ with backtest_tab:
             if backtest_profile.get("type_strategy"):
                 st.caption(backtest_profile["type_strategy"])
 
-        backtest_metric_cols = st.columns(6)
-        backtest_metric_cols[0].metric("Strategy Return", format_percent(backtest_metrics["Strategy Total Return"]))
-        backtest_metric_cols[1].metric("Benchmark Return", format_percent(backtest_metrics["Benchmark Total Return"]))
-        backtest_metric_cols[2].metric("Relative vs Benchmark", format_percent(backtest_metrics["Relative Return"]))
-        backtest_metric_cols[3].metric("Strategy Sharpe", format_value(backtest_metrics["Strategy Sharpe"]))
-        backtest_metric_cols[4].metric("Win Rate", format_percent(backtest_metrics["Win Rate"]))
-        backtest_metric_cols[5].metric("Max Drawdown", format_percent(backtest_metrics["Strategy Max Drawdown"]))
+        render_analysis_signal_cards(
+            [
+                {
+                    "label": "Strategy Return",
+                    "value": format_percent(backtest_metrics["Strategy Total Return"]),
+                    "note": "The total return generated by the trading rules in this replay.",
+                    "tone": tone_from_metric_threshold(backtest_metrics["Strategy Total Return"], good_min=0.10, bad_max=-0.05),
+                    "help": ANALYSIS_HELP_TEXT["Strategy Return"],
+                },
+                {
+                    "label": "Benchmark Return",
+                    "value": format_percent(backtest_metrics["Benchmark Total Return"]),
+                    "note": "This is what simple buy-and-hold would have produced over the same period.",
+                    "tone": tone_from_metric_threshold(backtest_metrics["Benchmark Total Return"], good_min=0.10, bad_max=-0.05),
+                    "help": ANALYSIS_HELP_TEXT["Benchmark Return"],
+                },
+                {
+                    "label": "Relative vs Benchmark",
+                    "value": format_percent(backtest_metrics["Relative Return"]),
+                    "note": "Positive means the strategy beat buy-and-hold. Negative means it lagged.",
+                    "tone": tone_from_metric_threshold(backtest_metrics["Relative Return"], good_min=0.0, bad_max=-0.05),
+                    "help": ANALYSIS_HELP_TEXT["Relative vs Benchmark"],
+                },
+                {
+                    "label": "Strategy Sharpe",
+                    "value": format_value(backtest_metrics["Strategy Sharpe"]),
+                    "note": "This compares the strategy's return with the volatility it took to earn it.",
+                    "tone": tone_from_metric_threshold(backtest_metrics["Strategy Sharpe"], good_min=0.8, bad_max=0.2),
+                    "help": ANALYSIS_HELP_TEXT["Strategy Sharpe"],
+                },
+                {
+                    "label": "Win Rate",
+                    "value": format_percent(backtest_metrics["Win Rate"]),
+                    "note": "This only counts closed trades, so it can stay unavailable when nothing closed.",
+                    "tone": tone_from_metric_threshold(backtest_metrics["Win Rate"], good_min=0.55, bad_max=0.40),
+                    "help": ANALYSIS_HELP_TEXT["Win Rate"],
+                },
+                {
+                    "label": "Max Drawdown",
+                    "value": format_percent(backtest_metrics["Strategy Max Drawdown"]),
+                    "note": "This shows the worst peak-to-trough drop during the replay.",
+                    "tone": tone_from_metric_threshold(backtest_metrics["Strategy Max Drawdown"], good_min=-0.12, bad_max=-0.30),
+                    "help": ANALYSIS_HELP_TEXT["Max Drawdown"],
+                },
+            ],
+            columns=6,
+        )
 
-        backtest_metric_cols_2 = st.columns(3)
-        backtest_metric_cols_2[0].metric("Position Changes", str(int(backtest_metrics["Position Changes"])))
-        backtest_metric_cols_2[1].metric("Closed Trades", str(int(backtest_metrics["Closed Trades"])))
-        backtest_metric_cols_2[2].metric("Avg Trade Return", format_percent(backtest_metrics["Average Trade Return"]))
+        render_analysis_signal_cards(
+            [
+                {
+                    "label": "Position Changes",
+                    "value": str(int(backtest_metrics["Position Changes"])),
+                    "note": "Entries, exits, adds, and reductions all count toward this total.",
+                    "tone": "neutral",
+                    "help": ANALYSIS_HELP_TEXT["Position Changes"],
+                },
+                {
+                    "label": "Closed Trades",
+                    "value": str(int(backtest_metrics["Closed Trades"])),
+                    "note": "Only completed trades count here, not open positions that are still running.",
+                    "tone": "neutral",
+                    "help": ANALYSIS_HELP_TEXT["Closed Trades"],
+                },
+                {
+                    "label": "Avg Trade Return",
+                    "value": format_percent(backtest_metrics["Average Trade Return"]),
+                    "note": "This is the average result across the strategy's closed trades.",
+                    "tone": tone_from_metric_threshold(backtest_metrics["Average Trade Return"], good_min=0.03, bad_max=-0.02),
+                    "help": ANALYSIS_HELP_TEXT["Avg Trade Return"],
+                },
+            ],
+            columns=3,
+        )
 
         st.subheader("Equity Curve")
         chart_frame = history_display[["Date", "Strategy Equity", "Benchmark Equity"]].copy().set_index("Date")
         st.line_chart(chart_frame, use_container_width=True)
 
         st.subheader("Position Change Log")
+        render_help_legend(
+            [
+                ("Signal", ANALYSIS_HELP_TEXT["Technical"]),
+                ("Position", ANALYSIS_HELP_TEXT["Position Changes"]),
+            ]
+        )
         if trade_log_display.empty:
             st.info("No entries or exits were generated for this period under the active technical settings.")
         else:
@@ -4743,6 +5622,12 @@ with backtest_tab:
             st.dataframe(trade_log_display, use_container_width=True)
 
         st.subheader("Closed Trades")
+        render_help_legend(
+            [
+                ("Return", ANALYSIS_HELP_TEXT["Avg Trade Return"]),
+                ("Position Size", ANALYSIS_HELP_TEXT["Position Changes"]),
+            ]
+        )
         if closed_trades_display.empty:
             st.info("No closed trades were realized in this window, so win rate is not available yet.")
         else:
@@ -4859,17 +5744,53 @@ with library_tab:
                 filtered_library["Last_Updated_Parsed"].notna()
                 & (filtered_library["Last_Updated_Parsed"] >= datetime.datetime.now() - datetime.timedelta(days=1))
             ).sum()
-            library_metrics = st.columns(4)
-            library_metrics[0].metric("Records", str(len(filtered_library)))
-            library_metrics[1].metric(
-                "Buy / Strong Buy",
-                str(filtered_library["Verdict_Overall"].isin(["BUY", "STRONG BUY"]).sum()),
+            render_analysis_signal_cards(
+                [
+                    {
+                        "label": "Records",
+                        "value": str(len(filtered_library)),
+                        "note": "The number of saved analyses visible under the current filters.",
+                        "tone": "neutral",
+                        "help": ANALYSIS_HELP_TEXT["Records"],
+                    },
+                    {
+                        "label": "Buy / Strong Buy",
+                        "value": str(filtered_library["Verdict_Overall"].isin(["BUY", "STRONG BUY"]).sum()),
+                        "note": "These are the names currently carrying a bullish final verdict.",
+                        "tone": "good",
+                        "help": ANALYSIS_HELP_TEXT["Buy / Strong Buy"],
+                    },
+                    {
+                        "label": "Fresh in 24h",
+                        "value": str(int(fresh_24h)),
+                        "note": "Rows refreshed within the last day usually reflect the latest saved research pass.",
+                        "tone": tone_from_metric_threshold(fresh_24h, good_min=5, bad_max=1),
+                        "help": ANALYSIS_HELP_TEXT["Fresh in 24h"],
+                    },
+                    {
+                        "label": "Tracked Sectors",
+                        "value": str(filtered_library["Sector"].nunique()),
+                        "note": "This shows how broad the current library slice is across industries.",
+                        "tone": "neutral",
+                        "help": ANALYSIS_HELP_TEXT["Tracked Sectors"],
+                    },
+                ],
+                columns=4,
             )
-            library_metrics[2].metric("Fresh in 24h", str(int(fresh_24h)))
-            library_metrics[3].metric("Tracked Sectors", str(filtered_library["Sector"].nunique()))
 
             st.caption(f"Shared database path: {DB_PATH}")
 
+            render_help_legend(
+                [
+                    ("Composite Score", ANALYSIS_HELP_TEXT["Composite Score"]),
+                    ("Confidence", ANALYSIS_HELP_TEXT["Confidence"]),
+                    ("Trend Strength", ANALYSIS_HELP_TEXT["Trend Strength"]),
+                    ("Quality Score", ANALYSIS_HELP_TEXT["Quality Score"]),
+                    ("Target Upside", ANALYSIS_HELP_TEXT["Target Mean"]),
+                    ("Graham Discount", ANALYSIS_HELP_TEXT["Graham Discount"]),
+                    ("Freshness", ANALYSIS_HELP_TEXT["Freshness"]),
+                ]
+            )
             library_display = filtered_library[
                 [
                     "Ticker",
@@ -4908,6 +5829,12 @@ with library_tab:
             library_left, library_right = st.columns(2)
             with library_left:
                 st.subheader("Sector Summary")
+                render_help_legend(
+                    [
+                        ("Avg Composite Score", ANALYSIS_HELP_TEXT["Avg Composite Score"]),
+                        ("Avg Target Upside", ANALYSIS_HELP_TEXT["Avg Target Upside"]),
+                    ]
+                )
                 sector_summary = (
                     filtered_library.groupby("Sector", dropna=False)
                     .agg(
@@ -4926,11 +5853,33 @@ with library_tab:
 
             with library_right:
                 st.subheader("Top Conviction Names")
+                render_help_legend(
+                    [
+                        ("Composite Score", ANALYSIS_HELP_TEXT["Composite Score"]),
+                        ("Target Upside", ANALYSIS_HELP_TEXT["Target Mean"]),
+                        ("Freshness", ANALYSIS_HELP_TEXT["Freshness"]),
+                    ]
+                )
                 conviction_table = filtered_library[
                     ["Ticker", "Verdict_Overall", "Composite Score", "Target Upside", "Freshness"]
                 ].head(10).copy()
                 conviction_table["Target Upside"] = conviction_table["Target Upside"].map(format_percent)
                 st.dataframe(conviction_table, use_container_width=True)
+
+with readme_tab:
+    st.subheader("ReadMe / Usage")
+    st.caption("Edit the README_USAGE_TEXT constant near the top of streamlit_app.py to customize this section.")
+    if README_USAGE_TEXT.strip():
+        st.markdown(README_USAGE_TEXT)
+    else:
+        st.text_area(
+            "ReadMe / Usage Placeholder",
+            value="",
+            height=240,
+            placeholder="Add your ReadMe / Usage copy in the README_USAGE_TEXT constant in streamlit_app.py.",
+            disabled=True,
+            label_visibility="collapsed",
+        )
 
 with changelog_tab:
     st.subheader("Changelog")
@@ -4939,7 +5888,7 @@ with changelog_tab:
     changelog_metrics = st.columns(3)
     changelog_metrics[0].metric("Latest Logged Update", CHANGELOG_ENTRIES[0]["Date"])
     changelog_metrics[1].metric("Logged Changes", str(len(CHANGELOG_ENTRIES)))
-    changelog_metrics[2].metric("Current Build", BUILD_LABEL)
+    changelog_metrics[2].metric("App Version", APP_VERSION)
 
     st.dataframe(pd.DataFrame(CHANGELOG_ENTRIES), use_container_width=True)
 
