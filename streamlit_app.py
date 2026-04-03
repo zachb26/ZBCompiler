@@ -69,10 +69,9 @@ SEC_GUIDANCE_PATTERNS = [
     "revenue of approximately",
     "we project",
 ]
-SEC_USER_AGENT = os.environ.get(
-    "SEC_EDGAR_USER_AGENT",
-    "ZB Compiler research app (local analysis; set SEC_EDGAR_USER_AGENT for production use)",
-)
+SEC_EDGAR_ORGANIZATION = os.environ.get("SEC_EDGAR_ORGANIZATION", f"ZB Compiler/{APP_VERSION}").strip()
+SEC_EDGAR_CONTACT_EMAIL = os.environ.get("SEC_EDGAR_CONTACT_EMAIL", "").strip()
+SEC_USER_AGENT = os.environ.get("SEC_EDGAR_USER_AGENT", "").strip()
 STARTUP_REFRESH_LOCK = threading.RLock()
 STARTUP_REFRESH_STATE = {
     "started": False,
@@ -318,23 +317,6 @@ PRESET_DESCRIPTIONS = {
     "Balanced": "Balanced keeps the four engines close to equal and is the best general starting point.",
     "Conservative": "Conservative leans on fundamentals and valuation, demands stronger confirmation, and slows trading re-entry.",
     "Aggressive": "Aggressive leans on technicals and sentiment, accepts looser valuation, and reacts faster to price action.",
-}
-ANALYSIS_TONE_STYLES = {
-    "good": {
-        "accent": "#2b8a3e",
-        "background": "rgba(43, 138, 62, 0.10)",
-        "border": "rgba(43, 138, 62, 0.35)",
-    },
-    "bad": {
-        "accent": "#c92a2a",
-        "background": "rgba(201, 42, 42, 0.10)",
-        "border": "rgba(201, 42, 42, 0.35)",
-    },
-    "neutral": {
-        "accent": "#94a3b8",
-        "background": "rgba(148, 163, 184, 0.08)",
-        "border": "rgba(148, 163, 184, 0.24)",
-    },
 }
 ANALYSIS_HELP_TEXT = {
     "Stock Type": "The model's best-fit stock category, such as Growth, Value, Dividend, Defensive, or Speculative.",
@@ -616,6 +598,34 @@ def get_color(verdict):
     return "gray"
 
 
+def escape_markdown_text(value):
+    return (
+        str(value)
+        .replace("\\", "\\\\")
+        .replace("[", "\\[")
+        .replace("]", "\\]")
+    )
+
+
+def colorize_markdown_text(value, color):
+    safe_text = escape_markdown_text(value)
+    if color == "green":
+        return f":green[{safe_text}]"
+    if color == "red":
+        return f":red[{safe_text}]"
+    if color in {"gray", "grey"}:
+        return f":gray[{safe_text}]"
+    return safe_text
+
+
+def tone_to_color(tone):
+    return {
+        "good": "green",
+        "bad": "red",
+        "neutral": "gray",
+    }.get(str(tone or "neutral"), "gray")
+
+
 def format_value(value, fmt="{:,.2f}", suffix=""):
     if value is None or pd.isna(value):
         return "N/A"
@@ -690,35 +700,16 @@ def escape_html_text(value):
     )
 
 
-def build_help_badge(help_text):
-    if not help_text:
-        return ""
-    safe_help = escape_html_text(help_text)
-    return (
-        '<span title="'
-        + safe_help
-        + '" style="display:inline-flex; align-items:center; justify-content:center; '
-          'width:1.05rem; height:1.05rem; margin-left:0.38rem; border-radius:999px; '
-          'border:1px solid rgba(148,163,184,0.35); color:#cbd5e1; font-size:0.72rem; '
-          'font-weight:700; cursor:help; vertical-align:middle;">?</span>'
-    )
-
-
 def render_help_legend(items):
-    fragments = []
-    for label, help_text in items:
-        if not help_text:
-            continue
-        safe_label = escape_html_text(label)
-        fragments.append(
-            f'<span style="display:inline-flex; align-items:center; margin-right:0.9rem;">'
-            f'<span>{safe_label}</span>{build_help_badge(help_text)}</span>'
-        )
-    if fragments:
-        st.markdown(
-            f'<div style="font-size:0.83rem; color:#94a3b8; margin:0.15rem 0 0.45rem 0;">{"".join(fragments)}</div>',
-            unsafe_allow_html=True,
-        )
+    legend_items = [(label, help_text) for label, help_text in items if help_text]
+    if not legend_items:
+        return
+
+    st.caption("Hover the labels below for quick definitions.")
+    legend_columns = st.columns(min(4, len(legend_items)))
+    for idx, (label, help_text) in enumerate(legend_items):
+        with legend_columns[idx % len(legend_columns)]:
+            st.caption(label, help=help_text)
 
 
 def tone_from_metric_threshold(value, *, good_min=None, good_max=None, bad_min=None, bad_max=None):
@@ -803,110 +794,42 @@ def render_analysis_signal_cards(items, columns=4):
     cols = st.columns(columns)
     for idx, item in enumerate(items):
         tone = item.get("tone", "neutral")
-        style = ANALYSIS_TONE_STYLES.get(tone, ANALYSIS_TONE_STYLES["neutral"])
-        label = escape_html_text(item.get("label", ""))
-        value = escape_html_text(item.get("value", ""))
-        note = escape_html_text(item.get("note", ""))
-        help_badge = build_help_badge(item.get("help"))
+        label = str(item.get("label", ""))
+        value = str(item.get("value", ""))
+        note = str(item.get("note", "")).strip()
+        badge_label = "Constructive" if tone == "good" else "Caution" if tone == "bad" else "Mixed"
         with cols[idx % columns]:
-            st.markdown(
-                f"""
-                <div style="
-                    border: 1px solid {style['border']};
-                    background: {style['background']};
-                    border-radius: 14px;
-                    padding: 0.95rem 1rem;
-                    min-height: 132px;
-                    margin-bottom: 0.75rem;
-                    display: flex;
-                    flex-direction: column;
-                    justify-content: space-between;
-                    gap: 0.65rem;
-                ">
-                    <div style="min-height: 1.3rem; display: flex; align-items: center; flex-wrap: wrap; color: #cbd5e1; font-size: 0.82rem; font-weight: 600;">
-                        <span>{label}</span>{help_badge}
-                    </div>
-                    <div style="font-size: 1.55rem; font-weight: 700; color: {style['accent']}; line-height: 1.15; min-height: 2.1rem; display: flex; align-items: center;">{value}</div>
-                    <div style="font-size: 0.82rem; color: #94a3b8; min-height: 2.4rem; display: flex; align-items: flex-start;">{note}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+            with st.container(border=True):
+                st.caption(label, help=item.get("help"))
+                st.markdown(f"### {colorize_markdown_text(value, tone_to_color(tone))}")
+                st.badge(badge_label, color=tone_to_color(tone))
+                if note:
+                    st.caption(note)
 
 
 def render_analysis_signal_table(rows, reference_label="Reference"):
     if not rows:
         return
 
-    body_rows = []
-    for row in rows:
-        tone = row.get("tone", "neutral")
-        style = ANALYSIS_TONE_STYLES.get(tone, ANALYSIS_TONE_STYLES["neutral"])
-        metric = escape_html_text(row.get("metric", ""))
-        value = escape_html_text(row.get("value", ""))
-        reference = escape_html_text(row.get("reference", ""))
-        status = escape_html_text(row.get("status", tone.title()))
-        help_badge = build_help_badge(row.get("help"))
-        body_rows.append(
-            f"""
-            <div style="
-                display: grid;
-                grid-template-columns: minmax(170px, 1.4fr) minmax(120px, 0.9fr) minmax(120px, 0.9fr) minmax(110px, 0.8fr);
-                gap: 0;
-                align-items: start;
-                border-bottom: 1px solid rgba(148, 163, 184, 0.14);
-            ">
-                <div style="padding: 0.78rem 0.8rem; font-weight: 600; color: #e2e8f0;">
-                    <span style="display: inline-flex; align-items: center; flex-wrap: wrap;">{metric}{help_badge}</span>
-                </div>
-                <div style="padding: 0.78rem 0.8rem; color: {style['accent']}; font-weight: 700;">{value}</div>
-                <div style="padding: 0.78rem 0.8rem; color: #cbd5e1;">{reference}</div>
-                <div style="padding: 0.78rem 0.8rem;">
-                    <span style="
-                        display: inline-block;
-                        padding: 0.18rem 0.5rem;
-                        border-radius: 999px;
-                        color: {style['accent']};
-                        background: {style['background']};
-                        border: 1px solid {style['border']};
-                        font-size: 0.78rem;
-                        font-weight: 700;
-                    ">{status}</span>
-                </div>
-            </div>
-            """
-        )
+    with st.container(border=True):
+        header_cols = st.columns([1.4, 0.9, 0.9, 0.8])
+        header_cols[0].caption("Metric")
+        header_cols[1].caption("Value")
+        header_cols[2].caption(str(reference_label))
+        header_cols[3].caption("Read")
 
-    header_reference = escape_html_text(reference_label)
-    st.markdown(
-        f"""
-        <div style="
-            margin-top: 0.4rem;
-            border: 1px solid rgba(148, 163, 184, 0.16);
-            border-radius: 14px;
-            overflow: hidden;
-            background: rgba(15, 23, 42, 0.16);
-        ">
-            <div style="
-                display: grid;
-                grid-template-columns: minmax(170px, 1.4fr) minmax(120px, 0.9fr) minmax(120px, 0.9fr) minmax(110px, 0.8fr);
-                gap: 0;
-                color: #94a3b8;
-                border-bottom: 1px solid rgba(148, 163, 184, 0.20);
-                font-size: 0.82rem;
-                font-weight: 600;
-                background: rgba(15, 23, 42, 0.22);
-            ">
-                <div style="padding: 0.55rem 0.8rem;">Metric</div>
-                <div style="padding: 0.55rem 0.8rem;">Value</div>
-                <div style="padding: 0.55rem 0.8rem;">{header_reference}</div>
-                <div style="padding: 0.55rem 0.8rem;">Read</div>
-            </div>
-            {''.join(body_rows)}
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+        for idx, row in enumerate(rows):
+            st.divider()
+            tone = row.get("tone", "neutral")
+            metric = str(row.get("metric", ""))
+            value = str(row.get("value", ""))
+            reference = str(row.get("reference", ""))
+            status = str(row.get("status", tone.title()))
+            row_cols = st.columns([1.4, 0.9, 0.9, 0.8])
+            row_cols[0].caption(metric, help=row.get("help"))
+            row_cols[1].markdown(colorize_markdown_text(value, tone_to_color(tone)))
+            row_cols[2].write(reference)
+            row_cols[3].badge(status, color=tone_to_color(tone))
 
 
 def build_library_csv_bytes(df):
@@ -1482,11 +1405,36 @@ def safe_json_loads(value, default=None):
 
 
 def get_sec_request_headers():
-    return {
-        "User-Agent": SEC_USER_AGENT,
+    user_agent = SEC_USER_AGENT or (
+        f"{SEC_EDGAR_ORGANIZATION} {SEC_EDGAR_CONTACT_EMAIL}"
+        if SEC_EDGAR_CONTACT_EMAIL
+        else f"{SEC_EDGAR_ORGANIZATION} (set SEC_EDGAR_CONTACT_EMAIL for SEC EDGAR access)"
+    )
+    headers = {
+        "User-Agent": user_agent,
         "Accept": "application/json, text/html;q=0.9, */*;q=0.8",
         "Accept-Encoding": "gzip, deflate",
+        "Accept-Language": "en-US,en;q=0.8",
     }
+    if SEC_EDGAR_CONTACT_EMAIL:
+        headers["From"] = SEC_EDGAR_CONTACT_EMAIL
+    return headers
+
+
+def get_sec_access_hint():
+    return (
+        "Set SEC_EDGAR_CONTACT_EMAIL=you@example.com before starting the app. "
+        "You can also set SEC_EDGAR_ORGANIZATION='Your App Name' or provide a full SEC_EDGAR_USER_AGENT value."
+    )
+
+
+def explain_upstream_fetch_error(url, exc):
+    message = summarize_fetch_error(exc)
+    response = getattr(exc, "response", None)
+    status_code = getattr(response, "status_code", None)
+    if "sec.gov" in str(url).lower() and (status_code == 403 or "403" in message):
+        return f"SEC EDGAR returned HTTP 403. {get_sec_access_hint()}"
+    return message
 
 
 def fetch_json_url_with_retry(url, *, headers=None, attempts=3, timeout=15):
@@ -1504,7 +1452,9 @@ def fetch_json_url_with_retry(url, *, headers=None, attempts=3, timeout=15):
             time.sleep(SEC_REQUEST_DELAY_SECONDS)
             return payload, None
         except Exception as exc:
-            last_error = summarize_fetch_error(exc)
+            last_error = explain_upstream_fetch_error(url, exc)
+            if "SEC EDGAR returned HTTP 403" in str(last_error):
+                break
         if attempt < attempts - 1:
             time.sleep(0.35 * (attempt + 1))
     return None, last_error
@@ -1524,7 +1474,9 @@ def fetch_text_url_with_retry(url, *, headers=None, attempts=3, timeout=20):
             time.sleep(SEC_REQUEST_DELAY_SECONDS)
             return response.text, None
         except Exception as exc:
-            last_error = summarize_fetch_error(exc)
+            last_error = explain_upstream_fetch_error(url, exc)
+            if "SEC EDGAR returned HTTP 403" in str(last_error):
+                break
         if attempt < attempts - 1:
             time.sleep(0.35 * (attempt + 1))
     return None, last_error
@@ -5444,10 +5396,11 @@ with stock_tab:
             with col_main_1:
                 st.metric("Current Price", f"${row['Price']:,.2f}")
             with col_main_2:
-                st.markdown(
-                    f"<h2 style='text-align: center; color: {get_color(row['Verdict_Overall'])};'>VERDICT: {row['Verdict_Overall']}</h2>",
-                    unsafe_allow_html=True,
+                verdict_text = colorize_markdown_text(
+                    f"VERDICT: {row['Verdict_Overall']}",
+                    get_color(row["Verdict_Overall"]),
                 )
+                st.markdown(f"## {verdict_text}")
             with col_main_3:
                 st.metric("Sector", str(row["Sector"]))
 
@@ -5887,6 +5840,8 @@ with stock_tab:
                             st.write(f"- {excerpt}")
                 else:
                     st.caption("A five-year DCF could not be built from the recent SEC filing data for this run, so this valuation view leaned on relative multiples and Graham-style checks.")
+                    if row.get("DCF_Guidance_Summary"):
+                        st.caption(str(row.get("DCF_Guidance_Summary")))
 
             with tab_fund:
                 c_f1, c_f2 = st.columns([1, 2])
