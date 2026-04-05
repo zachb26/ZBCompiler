@@ -173,6 +173,7 @@ ANALYSIS_COLUMNS = {
     "DCF_Guidance_Summary": "TEXT",
     "DCF_Filing_Form": "TEXT",
     "DCF_Filing_Date": "TEXT",
+    "DCF_Last_Updated": "TEXT",
     "Profit_Margins": "REAL",
     "ROE": "REAL",
     "Debt_to_Equity": "REAL",
@@ -202,6 +203,7 @@ ANALYSIS_COLUMNS = {
 ANALYSIS_NUMERIC_COLUMNS = [
     name for name, definition in ANALYSIS_COLUMNS.items() if definition in {"REAL", "INTEGER"}
 ]
+DCF_ANALYSIS_COLUMNS = [name for name in ANALYSIS_COLUMNS if name.startswith("DCF_")]
 DEFAULT_MODEL_SETTINGS = {
     "weight_technical": 1.0,
     "weight_fundamental": 1.0,
@@ -325,7 +327,7 @@ ANALYSIS_HELP_TEXT = {
     "Market Cap": "The company's total market value based on share price times shares outstanding.",
     "Technical": "A score based on price trend, momentum, RSI, MACD, and moving averages. Higher is more constructive.",
     "Fundamental": "A score based on profitability, growth, leverage, and liquidity. Higher usually means a stronger business profile.",
-    "Valuation": "A score showing whether the stock looks cheap, fair, or expensive based on sector multiples, Graham-style checks, and a five-year DCF when SEC filing data is usable.",
+    "Valuation": "A score showing whether the stock looks cheap, fair, or expensive based on sector multiples and Graham-style checks, with an optional manual five-year DCF snapshot when you create one.",
     "Sentiment": "A score based on headline tone, analyst views, and target prices. Positive numbers mean the market tone is more supportive.",
     "Updated": "The last time this saved analysis was refreshed.",
     "Overall Score": "The model's combined score after blending technical, fundamental, valuation, and sentiment inputs.",
@@ -341,8 +343,8 @@ ANALYSIS_HELP_TEXT = {
     "Sentiment Conviction": "How strong and well-supported the sentiment signal is, not just whether it is positive or negative.",
     "Graham Fair Value": "A conservative Graham-style fair value estimate based on earnings and book value when those inputs are available. It is most useful for profitable, asset-heavy businesses and less reliable for modern growth companies.",
     "Graham Discount": "Shows how far the current price sits below or above the Graham fair value estimate. Positive is cheaper. It is most useful for profitable, asset-heavy businesses and less reliable for modern growth companies.",
-    "DCF Fair Value": "A five-year discounted cash flow estimate built from SEC filing history, a selected growth assumption, and a discounted terminal value.",
-    "DCF Upside": "The percentage gap between the current stock price and the DCF fair value estimate. Positive means the DCF points to upside.",
+    "DCF Fair Value": "An on-demand five-year discounted cash flow estimate built from SEC filing history, a selected growth assumption, and a discounted terminal value.",
+    "DCF Upside": "The percentage gap between the current stock price and the manual DCF fair value estimate. Positive means the DCF points to upside.",
     "DCF WACC": "The discount rate used in the DCF. It blends the estimated cost of equity and cost of debt into a weighted average cost of capital.",
     "DCF Growth Rate": "The starting growth rate used for projected free cash flow before it fades toward the terminal growth assumption by year five.",
     "DCF Source": "Shows whether the DCF growth assumption came from filing guidance or from the company's own historical cash-flow and revenue trend.",
@@ -859,6 +861,79 @@ def build_database_download_bytes(db_path):
         source_conn.close()
         if temp_path is not None and temp_path.exists():
             temp_path.unlink()
+
+
+def extract_dcf_fields(record):
+    if record is None:
+        return {}
+
+    extracted = {}
+    for field_name in DCF_ANALYSIS_COLUMNS:
+        value = record.get(field_name) if hasattr(record, "get") else None
+        if isinstance(value, float) and pd.isna(value):
+            value = None
+        extracted[field_name] = value
+    return extracted
+
+
+def has_dcf_snapshot(record):
+    if record is None or not hasattr(record, "get"):
+        return False
+
+    if has_numeric_value(record.get("DCF_Intrinsic_Value")):
+        return True
+
+    last_updated = str(record.get("DCF_Last_Updated") or "").strip()
+    if last_updated:
+        return True
+
+    for field_name in ["DCF_History", "DCF_Projection", "DCF_Sensitivity"]:
+        payload = str(record.get(field_name) or "").strip()
+        if payload and payload not in {"[]", "{}"}:
+            return True
+    return False
+
+
+def build_dcf_download_bytes(record):
+    if not has_dcf_snapshot(record):
+        return b""
+
+    payload = {
+        "ticker": str(record.get("Ticker", "")).strip().upper(),
+        "price": safe_num(record.get("Price")),
+        "assumption_profile": record.get("Assumption_Profile"),
+        "analysis_last_updated": record.get("Last_Updated"),
+        "dcf_last_updated": record.get("DCF_Last_Updated") or record.get("Last_Updated"),
+        "dcf_summary": {
+            "intrinsic_value_per_share": safe_num(record.get("DCF_Intrinsic_Value")),
+            "upside": safe_num(record.get("DCF_Upside")),
+            "wacc": safe_num(record.get("DCF_WACC")),
+            "risk_free_rate": safe_num(record.get("DCF_Risk_Free_Rate")),
+            "beta": safe_num(record.get("DCF_Beta")),
+            "cost_of_equity": safe_num(record.get("DCF_Cost_of_Equity")),
+            "cost_of_debt": safe_num(record.get("DCF_Cost_of_Debt")),
+            "equity_weight": safe_num(record.get("DCF_Equity_Weight")),
+            "debt_weight": safe_num(record.get("DCF_Debt_Weight")),
+            "growth_rate": safe_num(record.get("DCF_Growth_Rate")),
+            "terminal_growth": safe_num(record.get("DCF_Terminal_Growth")),
+            "base_fcf": safe_num(record.get("DCF_Base_FCF")),
+            "enterprise_value": safe_num(record.get("DCF_Enterprise_Value")),
+            "equity_value": safe_num(record.get("DCF_Equity_Value")),
+            "historical_fcf_growth": safe_num(record.get("DCF_Historical_FCF_Growth")),
+            "historical_revenue_growth": safe_num(record.get("DCF_Historical_Revenue_Growth")),
+            "guidance_growth": safe_num(record.get("DCF_Guidance_Growth")),
+            "source": record.get("DCF_Source"),
+            "confidence": record.get("DCF_Confidence"),
+            "filing_form": record.get("DCF_Filing_Form"),
+            "filing_date": record.get("DCF_Filing_Date"),
+            "guidance_summary": record.get("DCF_Guidance_Summary"),
+        },
+        "history": safe_json_loads(record.get("DCF_History"), default=[]),
+        "projection": safe_json_loads(record.get("DCF_Projection"), default=[]),
+        "sensitivity": safe_json_loads(record.get("DCF_Sensitivity"), default=[]),
+        "guidance_excerpts": safe_json_loads(record.get("DCF_Guidance_Excerpts"), default=[]),
+    }
+    return json.dumps(payload, indent=2).encode("utf-8")
 
 
 def get_startup_refresh_snapshot():
@@ -3841,6 +3916,10 @@ def prepare_analysis_dataframe(df, settings=None):
         enriched["DCF_Confidence"] = "low"
     else:
         enriched["DCF_Confidence"] = enriched["DCF_Confidence"].fillna("low")
+    if "DCF_Last_Updated" not in enriched.columns:
+        enriched["DCF_Last_Updated"] = ""
+    else:
+        enriched["DCF_Last_Updated"] = enriched["DCF_Last_Updated"].fillna("")
     for text_column in ["DCF_History", "DCF_Projection", "DCF_Sensitivity", "DCF_Guidance_Excerpts", "DCF_Guidance_Summary"]:
         if text_column not in enriched.columns:
             enriched[text_column] = ""
@@ -4422,7 +4501,7 @@ class StockAnalyst:
             "summary": " | ".join(headlines[:3]) if headlines else "No recent headlines available.",
         }
 
-    def build_record_from_market_data(self, ticker, hist, info, news, settings=None):
+    def build_record_from_market_data(self, ticker, hist, info, news, settings=None, compute_dcf=False):
         settings = get_model_settings() if settings is None else settings
         ticker = ticker.strip().upper()
         info = info or {}
@@ -4646,23 +4725,16 @@ class StockAnalyst:
         elif has_numeric_value(eps) and eps <= 0:
             v_score -= 1
 
-        dcf_result = build_sec_dcf_model(ticker, price, info)
+        dcf_result = {}
         dcf_intrinsic_value = None
         dcf_upside = None
-        if dcf_result.get("available") and has_numeric_value(dcf_result.get("intrinsic_value_per_share")):
-            dcf_intrinsic_value = safe_num(dcf_result.get("intrinsic_value_per_share"))
-            dcf_upside = safe_num(dcf_result.get("upside"))
-            intrinsic_value = dcf_intrinsic_value
-            valuation_signal_count += 1
-            if has_numeric_value(dcf_upside):
-                if dcf_upside >= 0.25:
-                    v_score += 2
-                elif dcf_upside >= 0.10:
-                    v_score += 1
-                elif dcf_upside <= -0.25:
-                    v_score -= 2
-                elif dcf_upside <= -0.10:
-                    v_score -= 1
+        dcf_last_updated = None
+        if compute_dcf:
+            dcf_result = build_sec_dcf_model(ticker, price, info)
+            if dcf_result.get("available") and has_numeric_value(dcf_result.get("intrinsic_value_per_share")):
+                dcf_intrinsic_value = safe_num(dcf_result.get("intrinsic_value_per_share"))
+                dcf_upside = safe_num(dcf_result.get("upside"))
+                dcf_last_updated = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
 
         if valuation_signal_count < 2 and v_score < settings["valuation_fair_score_threshold"]:
             v_val = "FAIR VALUE"
@@ -4836,6 +4908,7 @@ class StockAnalyst:
             "DCF_Guidance_Summary": dcf_result.get("guidance_summary") or dcf_result.get("error", ""),
             "DCF_Filing_Form": dcf_result.get("filing_form"),
             "DCF_Filing_Date": dcf_result.get("filing_date"),
+            "DCF_Last_Updated": dcf_last_updated,
             "Profit_Margins": margins,
             "ROE": roe,
             "Debt_to_Equity": debt_eq,
@@ -4913,11 +4986,6 @@ class StockAnalyst:
         ]
         if stock_profile.get("classification_summary"):
             decision_note_parts.append(stock_profile["classification_summary"])
-        if has_numeric_value(dcf_upside):
-            dcf_direction = "upside" if dcf_upside >= 0 else "downside"
-            decision_note_parts.append(f"DCF points to {abs(dcf_upside) * 100:.0f}% {dcf_direction}")
-        elif dcf_result.get("error"):
-            decision_note_parts.append("DCF fell back to other valuation checks")
         decision_note_parts.extend(type_logic_notes[:2])
         if risk_flags:
             decision_note_parts.append("Risks: " + ", ".join(risk_flags[:3]))
@@ -4934,10 +5002,15 @@ class StockAnalyst:
         record["Data_Quality"] = quality_label
         return record
 
-    def analyze(self, ticker, settings=None, persist=True, preloaded=None):
+    def analyze(self, ticker, settings=None, persist=True, preloaded=None, compute_dcf=False):
         active_settings = get_model_settings() if settings is None else settings
         ticker = ticker.strip().upper()
         self.last_error = None
+        existing_row = None
+        if persist:
+            existing = self.db.get_analysis(ticker)
+            if not existing.empty:
+                existing_row = existing.iloc[0].to_dict()
         if preloaded is None:
             hist, info, news = self.get_data(ticker)
         else:
@@ -4949,19 +5022,21 @@ class StockAnalyst:
             info,
             news,
             settings=active_settings,
+            compute_dcf=compute_dcf,
         )
         if record is None and self.last_error is None:
             self.last_error = (
                 f"Unable to build an analysis for {ticker}. Yahoo returned incomplete or unusable market data."
             )
         if record is None and persist:
-            existing = self.db.get_analysis(ticker)
-            if not existing.empty:
+            if existing_row is not None:
                 self.last_error = (
                     f"Live fetch failed for {ticker}; showing the most recent saved analysis instead."
                 )
-                return existing.iloc[0].to_dict()
+                return existing_row
         if record and persist:
+            if existing_row and (not compute_dcf or not has_dcf_snapshot(record)):
+                record.update(extract_dcf_fields(existing_row))
             self.db.save_analysis(record)
         return record
 
@@ -5390,6 +5465,13 @@ with stock_tab:
         if not df.empty:
             row = df.iloc[0]
             sector_bench = get_sector_benchmarks(row["Sector"], model_settings)
+            dcf_feedback = st.session_state.get("dcf_action_feedback")
+            if isinstance(dcf_feedback, dict) and dcf_feedback.get("ticker") == str(row["Ticker"]):
+                if dcf_feedback.get("kind") == "success":
+                    st.success(str(dcf_feedback.get("message")))
+                elif dcf_feedback.get("kind") == "warning":
+                    st.warning(str(dcf_feedback.get("message")))
+                st.session_state.pop("dcf_action_feedback", None)
 
             st.divider()
             col_main_1, col_main_2, col_main_3 = st.columns([1, 2, 1])
@@ -5596,8 +5678,59 @@ with stock_tab:
                     graham_discount = row.get("Graham Discount")
                     dcf_intrinsic_value = safe_num(row.get("DCF_Intrinsic_Value"))
                     dcf_upside = safe_num(row.get("DCF Upside"))
+                    dcf_snapshot_exists = has_dcf_snapshot(row)
+                    dcf_download_bytes = build_dcf_download_bytes(row) if dcf_snapshot_exists else b""
+                    dcf_last_updated = str(row.get("DCF_Last_Updated") or row.get("Last_Updated") or "").strip()
                     st.markdown(f"### Verdict: **{row['Verdict_Valuation']}**")
-                    st.caption("This view blends market multiples, Graham-style value checks, and a five-year DCF built from SEC filing history when the filing data is usable.")
+                    st.caption("This view blends market multiples, Graham-style value checks, and an optional manual five-year DCF built from SEC filing history when you create it.")
+                    dcf_action_col_1, dcf_action_col_2 = st.columns(2)
+                    with dcf_action_col_1:
+                        create_dcf_label = "Refresh DCF" if dcf_snapshot_exists else "Create DCF"
+                        if st.button(
+                            create_dcf_label,
+                            key=f"create_dcf_{row['Ticker']}",
+                            use_container_width=True,
+                        ):
+                            with st.spinner(f"Building DCF model for {row['Ticker']}..."):
+                                dcf_record = bot.analyze(
+                                    str(row["Ticker"]),
+                                    settings=model_settings,
+                                    persist=False,
+                                    compute_dcf=True,
+                                )
+                            if not dcf_record:
+                                st.error(bot.last_error or "Unable to build a DCF for this ticker right now.")
+                            elif has_dcf_snapshot(dcf_record):
+                                db.save_analysis(dcf_record)
+                                st.session_state["dcf_action_feedback"] = {
+                                    "ticker": str(row["Ticker"]),
+                                    "kind": "success",
+                                    "message": f"Saved a fresh manual DCF snapshot for {row['Ticker']}.",
+                                }
+                                st.rerun()
+                            else:
+                                st.warning(
+                                    str(
+                                        dcf_record.get("DCF_Guidance_Summary")
+                                        or "A manual DCF could not be built from the available SEC filing data."
+                                    )
+                                )
+                    with dcf_action_col_2:
+                        st.download_button(
+                            "Download DCF",
+                            data=dcf_download_bytes,
+                            file_name=f"{row['Ticker']}_dcf.json",
+                            mime="application/json",
+                            disabled=not dcf_snapshot_exists,
+                            key=f"download_dcf_{row['Ticker']}",
+                            use_container_width=True,
+                        )
+                    if dcf_snapshot_exists:
+                        st.caption(
+                            f"Manual DCF snapshot last created: {dcf_last_updated} ({format_age(dcf_last_updated)})."
+                        )
+                    else:
+                        st.caption("DCF is manual now. Click Create DCF to fetch SEC filing data and build the five-year cash-flow model for this ticker.")
                     render_analysis_signal_cards(
                         [
                             {
@@ -5839,7 +5972,7 @@ with stock_tab:
                         for excerpt in dcf_excerpts[:3]:
                             st.write(f"- {excerpt}")
                 else:
-                    st.caption("A five-year DCF could not be built from the recent SEC filing data for this run, so this valuation view leaned on relative multiples and Graham-style checks.")
+                    st.caption("No manual DCF snapshot is currently saved for this ticker, so this valuation view is leaning on relative multiples and Graham-style checks.")
                     if row.get("DCF_Guidance_Summary"):
                         st.caption(str(row.get("DCF_Guidance_Summary")))
 
@@ -7048,7 +7181,7 @@ with methodology_tab:
     methodology_flow = pd.DataFrame(
         [
             {"Step": 1, "What Happens": "Download one year of price history plus company profile and news from Yahoo Finance."},
-            {"Step": 2, "What Happens": "Score four engines: technical, fundamental, valuation, and sentiment."},
+            {"Step": 2, "What Happens": "Score four engines: technical, fundamental, valuation, and sentiment. The DCF is optional and only runs when you create it manually."},
             {"Step": 3, "What Happens": "Classify market regime, measure engine agreement, and estimate decision confidence."},
             {"Step": 4, "What Happens": "Apply hold buffers and data-quality guardrails before publishing the final verdict."},
             {"Step": 5, "What Happens": "Store the full result with timestamp, assumption fingerprint, and quality stats in the shared library."},
@@ -7073,8 +7206,8 @@ with methodology_tab:
                 },
                 {
                     "Engine": "Valuation",
-                    "Uses": "P/E, forward P/E, PEG, P/S, EV/EBITDA, P/B, Graham value, five-year SEC-based DCF, premium/discount bands",
-                    "Strong Signals": "Positive earnings, cheaper-than-sector multiples, discount to intrinsic value, supportive DCF upside",
+                    "Uses": "P/E, forward P/E, PEG, P/S, EV/EBITDA, P/B, Graham value, premium/discount bands, plus an optional manual SEC-based DCF snapshot",
+                    "Strong Signals": "Positive earnings, cheaper-than-sector multiples, and discounts to fair-value anchors such as Graham value or a manual DCF snapshot",
                 },
                 {
                     "Engine": "Sentiment",
