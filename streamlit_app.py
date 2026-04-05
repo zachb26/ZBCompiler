@@ -3831,6 +3831,8 @@ def prepare_analysis_dataframe(df, settings=None):
         column for column in ["Score_Tech", "Score_Fund", "Score_Val", "Score_Sentiment"]
         if column in enriched.columns
     ]
+    if "Composite Score" not in enriched.columns:
+        enriched["Composite Score"] = np.nan
     if score_columns:
         score_weights = {
             "Score_Tech": active_settings["weight_technical"],
@@ -3843,6 +3845,8 @@ def prepare_analysis_dataframe(df, settings=None):
             composite_score = composite_score + enriched[column].fillna(0) * score_weights.get(column, 1.0)
         enriched["Composite Score"] = composite_score
 
+    if "Target Upside" not in enriched.columns:
+        enriched["Target Upside"] = np.nan
     if {"Price", "Target_Mean_Price"}.issubset(enriched.columns):
         enriched["Target Upside"] = np.where(
             enriched["Price"].notna() & (enriched["Price"] != 0),
@@ -3850,6 +3854,8 @@ def prepare_analysis_dataframe(df, settings=None):
             np.nan,
         )
 
+    if "Graham Discount" not in enriched.columns:
+        enriched["Graham Discount"] = np.nan
     if {"Price", "Graham_Number"}.issubset(enriched.columns):
         enriched["Graham Discount"] = np.where(
             enriched["Price"].notna() & (enriched["Price"] != 0) & enriched["Graham_Number"].notna(),
@@ -3857,6 +3863,8 @@ def prepare_analysis_dataframe(df, settings=None):
             np.nan,
         )
 
+    if "DCF Upside" not in enriched.columns:
+        enriched["DCF Upside"] = np.nan
     if {"Price", "DCF_Intrinsic_Value"}.issubset(enriched.columns):
         enriched["DCF Upside"] = np.where(
             enriched["Price"].notna() & (enriched["Price"] != 0) & enriched["DCF_Intrinsic_Value"].notna(),
@@ -3966,6 +3974,8 @@ def prepare_analysis_dataframe(df, settings=None):
         enriched = enriched.sort_values(sort_columns, ascending=ascending, na_position="last")
     elif "Composite Score" in enriched.columns:
         enriched = enriched.sort_values(["Composite Score", "Ticker"], ascending=[False, True], na_position="last")
+    if "Freshness" not in enriched.columns:
+        enriched["Freshness"] = "Unknown"
 
     return enriched.reset_index(drop=True)
 
