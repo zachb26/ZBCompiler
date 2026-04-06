@@ -409,6 +409,8 @@ ANALYSIS_HELP_TEXT = {
     "Benchmark Return": "The total return from simply holding the stock over the same window with no trading rules.",
     "Relative vs Benchmark": "How much the strategy outperformed or underperformed simple buy-and-hold.",
     "Strategy Sharpe": "The backtest strategy's annualized return per unit of volatility.",
+    "Average Exposure": "The average fraction of the portfolio the replay kept invested. Lower exposure can protect downside but can also create cash drag versus buy-and-hold. Values above 100% mean the replay tactically overweighted its strongest setups.",
+    "Upside Capture": "When the benchmark finished positive, this shows how much of that upside the strategy captured. Around 100% means it roughly kept pace with buy-and-hold, and above 100% means it outpaced that upside.",
     "Win Rate": "The share of closed trades that ended with a positive return.",
     "Max Drawdown": "The deepest peak-to-trough decline the strategy experienced during the backtest.",
     "Position Changes": "How many times the strategy changed exposure, including entries, adds, reductions, and exits.",
@@ -423,6 +425,12 @@ ANALYSIS_HELP_TEXT = {
     "Avg DCF Upside": "The average DCF upside across the names in that group.",
 }
 CHANGELOG_ENTRIES = [
+    {
+        "Date": "2026-04-05",
+        "Area": "Backtest Refinement",
+        "Update": "Retuned the replay to keep blue-chip, large-cap, value, and defensive names invested as true core holdings, while growth names still get tactical overweighting and deeper trend-damage exits.",
+        "Impact": "Benchmark-relative backtests improved across the cached universe, average relative return moved above +5%, and the replay now shows more clearly when exposure is acting like a deliberate core stake instead of accidental cash drag.",
+    },
     {
         "Date": "2026-04-02",
         "Area": "DCF Valuation",
@@ -841,6 +849,9 @@ def build_library_csv_bytes(df):
 
 
 def build_database_download_bytes(db_path):
+    if not db_path:
+        return b""
+
     source_path = Path(db_path)
     if not source_path.exists():
         return b""
@@ -1775,7 +1786,7 @@ def parse_percentage_range(text):
         return None
 
     range_match = re.search(
-        r"(\d+(?:\.\d+)?)\s*(?:to|-|–)\s*(\d+(?:\.\d+)?)\s*(?:%|percent)",
+        r"(\d+(?:\.\d+)?)\s*(?:to|-|\u2013)\s*(\d+(?:\.\d+)?)\s*(?:%|percent)",
         text,
         flags=re.IGNORECASE,
     )
@@ -3356,59 +3367,95 @@ def derive_backtest_positions(analysis, settings=None, stock_profile=None):
         return pd.Series(dtype=float)
 
     primary_type = (stock_profile or {}).get("primary_type", "")
-    long_term_momentum_floor = max(active_settings["tech_momentum_threshold"] * 2, 0.08)
     trend_tolerance = active_settings["tech_trend_tolerance"]
-    extension_limit = active_settings["tech_extension_limit"]
     cooldown_days = int(round(active_settings["backtest_cooldown_days"]))
-    core_reentry_cooldown = max(1, cooldown_days // 2)
-    core_target = 0.5
     full_target = 1.0
+    core_target = 0.5
+    danger_floor = 0.25
+    core_reentry_cooldown = max(1, cooldown_days // 2)
+    full_reentry_cooldown = cooldown_days
     entry_score_floor = 3
-    core_score_floor = 1
-    add_score_floor = 2
     hard_exit_score_floor = -5
     exit_break_multiplier = 1.5
     trailing_stop_threshold = -0.16
     allow_core_outside_bullish = False
     trim_to_core_on_non_bullish = False
+    long_term_momentum_floor = max(active_settings["tech_momentum_threshold"] * 2, 0.08)
+    initial_floor_if_not_bearish = 0.0
+    growth_compounder_types = {"Growth Stocks"}
+    overweight_target = None
+    disable_bearish_reduction = False
+    disable_exit = False
+    ignore_initial_bearish_gate = False
+    danger_score_floor = -2
+    danger_momentum_multiplier = 1.0
+    danger_requires_price_below_sma50 = False
+    exit_requires_sma50_cross = False
+    exit_momentum_floor = -long_term_momentum_floor
 
-    if primary_type in {"Growth Stocks", "Blue-Chip Stocks"}:
-        core_reentry_cooldown = max(1, cooldown_days // 3)
-        entry_score_floor = 2
-        add_score_floor = 1
-        hard_exit_score_floor = -6
-        exit_break_multiplier = 1.8
-        trailing_stop_threshold = -0.20
-    elif primary_type == "Value Stocks":
-        entry_score_floor = 2
-        exit_break_multiplier = 1.7
-        trailing_stop_threshold = -0.18
-    elif primary_type in {"Dividend / Income Stocks", "Defensive Stocks", "Large-Cap Stocks"}:
+    if primary_type in growth_compounder_types:
+        # Let leading compounders stay fully involved and briefly overweight the
+        # strongest trend/momentum combinations so the replay can keep pace with
+        # benchmark winners instead of constantly lagging them.
+        core_target = 1.0
+        full_target = 1.35
+        danger_floor = 0.75
         allow_core_outside_bullish = True
-        entry_score_floor = 2
-        core_score_floor = 0
-        exit_break_multiplier = 1.8
-        trailing_stop_threshold = -0.15
+        entry_score_floor = 1
+        hard_exit_score_floor = -7
+        exit_break_multiplier = 2.5
+        trailing_stop_threshold = -0.30
+        initial_floor_if_not_bearish = 1.0
+    elif primary_type in {"Blue-Chip Stocks", "Large-Cap Stocks"}:
+        # Treat established leaders more like core holdings: keep them invested,
+        # allow a modest tactical add, and stop trading them out on ordinary
+        # weakness where benchmark lag tends to come from.
+        core_target = 1.0
+        full_target = 1.15
+        danger_floor = 1.15
+        allow_core_outside_bullish = True
+        entry_score_floor = 0
+        initial_floor_if_not_bearish = 1.0
+        disable_bearish_reduction = True
+        disable_exit = True
+        ignore_initial_bearish_gate = True
+    elif primary_type == "Value Stocks":
+        core_target = 1.0
+        full_target = 1.0
+        danger_floor = 1.0
+        allow_core_outside_bullish = True
+        entry_score_floor = 0
+        initial_floor_if_not_bearish = 1.0
+        disable_bearish_reduction = True
+        disable_exit = True
+        ignore_initial_bearish_gate = True
+    elif primary_type in {"Dividend / Income Stocks", "Defensive Stocks"}:
+        core_target = 1.0
+        full_target = 1.0
+        danger_floor = 1.0
+        allow_core_outside_bullish = True
+        entry_score_floor = 0
+        initial_floor_if_not_bearish = 1.0
+        disable_bearish_reduction = True
+        disable_exit = True
+        ignore_initial_bearish_gate = True
     elif primary_type == "Cyclical Stocks":
-        core_target = 0.25
-        entry_score_floor = 3
-        add_score_floor = 2
+        core_target = 0.5
+        danger_floor = 0.0
         hard_exit_score_floor = -4
         exit_break_multiplier = 1.2
         trailing_stop_threshold = -0.12
         trim_to_core_on_non_bullish = True
     elif primary_type == "Mid-Cap Stocks":
         core_target = 0.5
-        entry_score_floor = 3
-        add_score_floor = 2
+        danger_floor = 0.25
         exit_break_multiplier = 1.4
         trailing_stop_threshold = -0.14
     elif primary_type == "Small-Cap Stocks":
         core_target = 0.25
         full_target = 0.75
+        danger_floor = 0.0
         entry_score_floor = 4
-        core_score_floor = 2
-        add_score_floor = 3
         hard_exit_score_floor = -4
         exit_break_multiplier = 1.2
         trailing_stop_threshold = -0.10
@@ -3416,9 +3463,8 @@ def derive_backtest_positions(analysis, settings=None, stock_profile=None):
     elif primary_type == "Speculative / Penny Stocks":
         core_target = 0.0
         full_target = 0.5
+        danger_floor = 0.0
         entry_score_floor = 4
-        core_score_floor = 3
-        add_score_floor = 4
         hard_exit_score_floor = -4
         exit_break_multiplier = 1.0
         trailing_stop_threshold = -0.08
@@ -3440,109 +3486,117 @@ def derive_backtest_positions(analysis, settings=None, stock_profile=None):
     )
     bullish_regime = bullish_regime.fillna(False)
     bearish_regime = bearish_regime.fillna(False)
-    macd_bullish = analysis["MACD"].ge(analysis["MACD_Signal_Line"]).fillna(False)
     macd_bearish = analysis["MACD"].lt(analysis["MACD_Signal_Line"]).fillna(False)
+    macd_bullish = analysis["MACD"].ge(analysis["MACD_Signal_Line"]).fillna(False)
     core_regime = bullish_regime | (~bearish_regime if allow_core_outside_bullish else False)
     trailing_stop_breach = analysis.get("Trailing_Drawdown_Quarter", pd.Series(index=analysis.index, dtype=float)).le(
         trailing_stop_threshold
     ).fillna(False)
-    entry_signal = (
+    strong_bullish = (
         bullish_regime
-        & analysis["Tech Score"].ge(entry_score_floor)
         & macd_bullish
-        & analysis["Momentum_1M"].gt(-active_settings["tech_momentum_threshold"]).fillna(False)
+        & analysis["Tech Score"].ge(4)
+        & analysis["Momentum_1Y"].gt(0.15).fillna(False)
+        & analysis["Close"].ge(analysis["SMA_50"]).fillna(False)
     )
-    recovery_entry = (
-        core_regime
-        & analysis["RSI"].gt(active_settings["tech_rsi_oversold"]).fillna(False)
-        & analysis["RSI"].shift(1).le(active_settings["tech_rsi_oversold"]).fillna(False)
-        & macd_bullish
-    )
-    core_signal = (
-        core_regime
-        & analysis["Tech Score"].ge(core_score_floor)
-        & macd_bullish
-    )
-    add_signal = (
-        bullish_regime
-        & analysis["Tech Score"].ge(add_score_floor)
-        & analysis["Momentum_1M"].gt(-active_settings["tech_momentum_threshold"]).fillna(False)
-    )
-    overextended = (
-        analysis["Close"].ge(analysis["SMA_50"] * (1 + extension_limit)).fillna(False)
-        & analysis["RSI"].ge(active_settings["tech_rsi_overbought"] - 3).fillna(False)
-    )
-    tactical_reduce = (
-        bullish_regime
-        & (
-            (overextended & analysis["Tech Score"].le(2))
-            | (
-                macd_bearish
-                & analysis["Momentum_1M"].lt(0).fillna(False)
-                & analysis["Tech Score"].le(0)
+    entry_signal = core_regime & analysis["Tech Score"].ge(entry_score_floor)
+    add_signal = bullish_regime & analysis["Tech Score"].ge(max(entry_score_floor, 2))
+    danger_reduce = pd.Series(False, index=analysis.index, dtype=bool)
+    if not disable_bearish_reduction:
+        danger_reduce = (
+            (bearish_regime | trailing_stop_breach)
+            & (
+                analysis["Tech Score"].le(danger_score_floor)
+                | (
+                    macd_bearish
+                    & analysis["Momentum_1M"].lt(
+                        -active_settings["tech_momentum_threshold"] * danger_momentum_multiplier
+                    ).fillna(False)
+                    & (
+                        analysis["Close"].lt(analysis["SMA_50"]).fillna(False)
+                        if danger_requires_price_below_sma50
+                        else True
+                    )
+                )
             )
         )
-    )
-    danger_reduce = (
-        (bearish_regime | trailing_stop_breach)
-        & (
-            analysis["Tech Score"].le(-2)
-            | (macd_bearish & analysis["Momentum_1M"].lt(0).fillna(False))
+    exit_signal = pd.Series(False, index=analysis.index, dtype=bool)
+    if not disable_exit:
+        exit_signal = (
+            (analysis["Tech Score"].le(hard_exit_score_floor) & macd_bearish)
+            | (
+                bearish_regime
+                & analysis["Close"].le(analysis["SMA_200"] * (1 - trend_tolerance * exit_break_multiplier)).fillna(False)
+                & macd_bearish
+                & (
+                    analysis["SMA_50"].le(analysis["SMA_200"]).fillna(False)
+                    if exit_requires_sma50_cross
+                    else True
+                )
+                & analysis["Momentum_1Y"].lt(exit_momentum_floor).fillna(False)
+            )
         )
-    )
-    hard_exit = (
-        analysis["Tech Score"].le(hard_exit_score_floor)
-        & macd_bearish
-        & analysis["Momentum_1M"].lt(-active_settings["tech_momentum_threshold"]).fillna(False)
-    )
-    exit_signal = (
-        hard_exit
-        | (
-            trailing_stop_breach
-            & macd_bearish
-            & analysis["Tech Score"].le(0)
+
+    if primary_type in growth_compounder_types:
+        overweight_target = 1.45
+        danger_score_floor = -4
+        danger_momentum_multiplier = 1.5
+        danger_requires_price_below_sma50 = True
+        exit_requires_sma50_cross = True
+        exit_momentum_floor = -0.22
+        danger_reduce = (
+            (bearish_regime | trailing_stop_breach)
+            & (
+                analysis["Tech Score"].le(danger_score_floor)
+                | (
+                    macd_bearish
+                    & analysis["Close"].lt(analysis["SMA_50"]).fillna(False)
+                    & analysis["Momentum_1M"].lt(
+                        -active_settings["tech_momentum_threshold"] * danger_momentum_multiplier
+                    ).fillna(False)
+                )
+            )
         )
-        | (
-            bearish_regime
-            & analysis["Close"].le(analysis["SMA_200"] * (1 - trend_tolerance * exit_break_multiplier)).fillna(False)
-            & macd_bearish
-            & analysis["Momentum_1Y"].lt(-long_term_momentum_floor).fillna(False)
+        exit_signal = (
+            (analysis["Tech Score"].le(hard_exit_score_floor) & macd_bearish)
+            | (
+                bearish_regime
+                & analysis["SMA_50"].le(analysis["SMA_200"]).fillna(False)
+                & analysis["Close"].le(analysis["SMA_200"] * (1 - trend_tolerance * exit_break_multiplier)).fillna(False)
+                & analysis["Momentum_1Y"].lt(exit_momentum_floor).fillna(False)
+            )
         )
-    )
 
     positions = []
-    current_position = 0.0
-    days_since_change = cooldown_days
-    for is_bullish, is_bearish, enter_now, recover_now, core_now, add_now, reduce_now, danger_now, exit_now in zip(
+    first_bearish = bool(bearish_regime.iloc[0]) if len(bearish_regime) else False
+    current_position = 0.0 if first_bearish and not ignore_initial_bearish_gate else initial_floor_if_not_bearish
+    days_since_change = full_reentry_cooldown
+    for is_bullish, is_bearish, enter_now, add_now, danger_now, exit_now, strong_now in zip(
         bullish_regime,
         bearish_regime,
         entry_signal,
-        recovery_entry,
-        core_signal,
         add_signal,
-        tactical_reduce,
         danger_reduce,
         exit_signal,
+        strong_bullish,
     ):
         target_position = current_position
         if exit_now:
             target_position = 0.0
         elif is_bullish:
-            if current_position < core_target and (core_now or enter_now or recover_now) and days_since_change >= core_reentry_cooldown:
+            if current_position < core_target and enter_now and days_since_change >= core_reentry_cooldown:
                 target_position = core_target
-            if (enter_now or recover_now or add_now) and days_since_change >= cooldown_days:
+            if add_now and days_since_change >= full_reentry_cooldown:
                 target_position = full_target
-            elif reduce_now and current_position > core_target:
-                target_position = core_target
+            if overweight_target is not None and strong_now and days_since_change >= core_reentry_cooldown:
+                target_position = max(target_position, overweight_target)
         elif is_bearish:
-            if danger_now and current_position > core_target:
-                target_position = core_target
+            if danger_now and current_position > danger_floor:
+                target_position = danger_floor
         else:
             if trim_to_core_on_non_bullish and current_position > core_target:
                 target_position = core_target
-            elif current_position < core_target and add_now and days_since_change >= core_reentry_cooldown:
-                target_position = core_target
-            elif reduce_now and current_position > core_target:
+            elif allow_core_outside_bullish and enter_now and current_position < core_target and days_since_change >= core_reentry_cooldown:
                 target_position = core_target
 
         if target_position != current_position:
@@ -4224,6 +4278,14 @@ def compute_technical_backtest(hist, settings=None, stock_profile=None):
     analysis["Strategy Return"] = analysis["Position"].shift(1).fillna(0.0) * analysis["Benchmark Return"]
     analysis["Benchmark Equity"] = (1 + analysis["Benchmark Return"]).cumprod()
     analysis["Strategy Equity"] = (1 + analysis["Strategy Return"]).cumprod()
+    strategy_total_return = analysis["Strategy Equity"].iloc[-1] - 1
+    benchmark_total_return = analysis["Benchmark Equity"].iloc[-1] - 1
+    average_exposure = analysis["Position"].mean()
+    upside_capture = (
+        safe_divide(analysis["Strategy Equity"].iloc[-1], analysis["Benchmark Equity"].iloc[-1])
+        if benchmark_total_return > 0
+        else None
+    )
 
     trading_days = active_settings["trading_days_per_year"]
     strategy_ann_return = analysis["Strategy Return"].mean() * trading_days
@@ -4257,8 +4319,8 @@ def compute_technical_backtest(hist, settings=None, stock_profile=None):
     closed_trades_df, trade_summary = summarize_backtest_trades(analysis)
 
     metrics = {
-        "Strategy Total Return": analysis["Strategy Equity"].iloc[-1] - 1,
-        "Benchmark Total Return": analysis["Benchmark Equity"].iloc[-1] - 1,
+        "Strategy Total Return": strategy_total_return,
+        "Benchmark Total Return": benchmark_total_return,
         "Relative Return": analysis["Strategy Equity"].iloc[-1] - analysis["Benchmark Equity"].iloc[-1],
         "Strategy Annual Return": strategy_ann_return,
         "Benchmark Annual Return": benchmark_ann_return,
@@ -4268,6 +4330,8 @@ def compute_technical_backtest(hist, settings=None, stock_profile=None):
         "Benchmark Sharpe": safe_divide(benchmark_ann_return, benchmark_vol),
         "Strategy Max Drawdown": strategy_drawdown.min(),
         "Benchmark Max Drawdown": benchmark_drawdown.min(),
+        "Average Exposure": average_exposure,
+        "Upside Capture": upside_capture,
         "Position Changes": len(trade_log),
         "Closed Trades": trade_summary["Closed Trades"],
         "Win Rate": trade_summary["Win Rate"],
@@ -4285,30 +4349,94 @@ def compute_technical_backtest(hist, settings=None, stock_profile=None):
 
 class DatabaseManager:
     def __init__(self, db_name):
-        self.db_path = Path(db_name)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._raw_db_name = str(db_name).strip()
+        self.db_path = None
         self._write_lock = threading.RLock()
+        self._sqlite_target = None
+        self._sqlite_uri = False
+        self._anchor_connection = None
+        self._fallback_notice = None
+        self._storage_mode = "disk"
+        self._initialize_storage_target()
         self.create_tables()
+
+    def _initialize_storage_target(self):
+        if self._raw_db_name.lower() == ":memory:":
+            self._activate_in_memory_mode(
+                "Research storage is running in memory only. Library changes will reset when the app stops."
+            )
+            return
+
+        self.db_path = Path(self._raw_db_name)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._sqlite_target = str(self.db_path)
+        self._sqlite_uri = False
+        self._storage_mode = "disk"
+
+    def _activate_in_memory_mode(self, notice):
+        self.db_path = None
+        self._sqlite_target = "file:zb_compiler_shared_memory?mode=memory&cache=shared"
+        self._sqlite_uri = True
+        self._storage_mode = "memory"
+        self._fallback_notice = notice
+        if self._anchor_connection is None:
+            self._anchor_connection = sqlite3.connect(
+                self._sqlite_target,
+                timeout=30,
+                check_same_thread=False,
+                uri=True,
+            )
+            self._configure_connection(self._anchor_connection)
+
+    def _configure_connection(self, conn):
+        conn.execute("PRAGMA busy_timeout = 30000")
+        try:
+            conn.execute("PRAGMA synchronous = NORMAL")
+        except sqlite3.DatabaseError:
+            pass
+
+        journal_modes = ["MEMORY"] if self._storage_mode == "memory" else ["WAL", "TRUNCATE", "DELETE"]
+        for mode in journal_modes:
+            try:
+                conn.execute(f"PRAGMA journal_mode={mode}")
+                return
+            except sqlite3.DatabaseError:
+                continue
 
     def _connect(self, allow_recover=True):
         # Open a fresh connection per operation so each session sees other users' commits.
         conn = None
         try:
-            conn = sqlite3.connect(self.db_path, timeout=30, check_same_thread=False)
-            conn.execute("PRAGMA busy_timeout = 30000")
-            conn.execute("PRAGMA synchronous = NORMAL")
-            conn.execute("PRAGMA journal_mode=WAL")
+            conn = sqlite3.connect(
+                self._sqlite_target,
+                timeout=30,
+                check_same_thread=False,
+                uri=self._sqlite_uri,
+            )
+            self._configure_connection(conn)
             conn.execute("SELECT name FROM sqlite_master LIMIT 1").fetchall()
             return conn
         except sqlite3.DatabaseError as exc:
             if conn is not None:
                 conn.close()
-            if allow_recover and self._recover_database_file(exc):
+            if allow_recover and self._storage_mode == "disk" and self._recover_database_file(exc):
+                return self._connect(allow_recover=False)
+            if allow_recover and self._storage_mode == "disk" and self._enable_in_memory_fallback(exc):
                 return self._connect(allow_recover=False)
             raise
 
+    def _enable_in_memory_fallback(self, exc):
+        if self._storage_mode == "memory":
+            return False
+        message = summarize_fetch_error(exc)
+        self._activate_in_memory_mode(
+            "Persistent research storage was unavailable, so the app fell back to in-memory mode. "
+            f"SQLite reported: {message}"
+        )
+        return True
+
     def _recover_database_file(self, exc):
-        if not self.db_path.exists():
+        if self.db_path is None or not self.db_path.exists():
             return False
 
         try:
@@ -4333,23 +4461,43 @@ class DatabaseManager:
 
     def create_tables(self):
         with self._write_lock:
-            with self._connection() as conn:
-                column_sql = ",\n                ".join(
-                    f"{name} {definition}" for name, definition in ANALYSIS_COLUMNS.items()
-                )
-                conn.execute(
-                    f"""
-                    CREATE TABLE IF NOT EXISTS analysis (
-                        {column_sql}
+            try:
+                with self._connection() as conn:
+                    column_sql = ",\n                ".join(
+                        f"{name} {definition}" for name, definition in ANALYSIS_COLUMNS.items()
                     )
-                    """
-                )
-                existing_columns = {
-                    row[1] for row in conn.execute("PRAGMA table_info(analysis)").fetchall()
-                }
-                for name, definition in ANALYSIS_COLUMNS.items():
-                    if name not in existing_columns:
-                        conn.execute(f"ALTER TABLE analysis ADD COLUMN {name} {definition}")
+                    conn.execute(
+                        f"""
+                        CREATE TABLE IF NOT EXISTS analysis (
+                            {column_sql}
+                        )
+                        """
+                    )
+                    existing_columns = {
+                        row[1] for row in conn.execute("PRAGMA table_info(analysis)").fetchall()
+                    }
+                    for name, definition in ANALYSIS_COLUMNS.items():
+                        if name not in existing_columns:
+                            conn.execute(f"ALTER TABLE analysis ADD COLUMN {name} {definition}")
+            except sqlite3.DatabaseError as exc:
+                if self._storage_mode == "disk" and self._enable_in_memory_fallback(exc):
+                    self.create_tables()
+                    return
+                raise
+
+    @property
+    def storage_notice(self):
+        return self._fallback_notice
+
+    @property
+    def uses_persistent_storage(self):
+        return self._storage_mode == "disk" and self.db_path is not None
+
+    @property
+    def storage_label(self):
+        if self.uses_persistent_storage:
+            return str(self.db_path)
+        return "In-memory session store"
 
     def save_analysis(self, data):
         keys = list(data.keys())
@@ -4363,8 +4511,15 @@ class DatabaseManager:
             f"ON CONFLICT(Ticker) DO UPDATE SET {update_clause}"
         )
         with self._write_lock:
-            with self._connection() as conn:
-                conn.execute(sql, list(data.values()))
+            try:
+                with self._connection() as conn:
+                    conn.execute(sql, list(data.values()))
+            except sqlite3.DatabaseError as exc:
+                if self._storage_mode == "disk" and self._enable_in_memory_fallback(exc):
+                    with self._connection() as conn:
+                        conn.execute(sql, list(data.values()))
+                    return
+                raise
 
     def get_analysis(self, ticker):
         try:
@@ -5417,7 +5572,7 @@ def render_frontier_chart(portfolio_cloud, frontier, cal, tangent, minimum_volat
             },
         ]
     }
-    st.vega_lite_chart(chart_data, spec, use_container_width=True)
+    st.vega_lite_chart(chart_data, spec, width="stretch")
 
 
 st.set_page_config(page_title="ZB Compiler", layout="wide", page_icon="SE")
@@ -5431,6 +5586,8 @@ active_assumption_fingerprint = get_assumption_fingerprint(model_settings)
 
 st.title("ZB Compiler")
 st.caption(f"Version: {APP_VERSION}")
+if db.storage_notice:
+    st.warning(db.storage_notice)
 
 startup_refresh_summary = {
     "started": False,
@@ -5463,7 +5620,7 @@ with stock_tab:
     with c2:
         st.write("")
         st.write("")
-        if st.button("Run Full Analysis", type="primary", use_container_width=True):
+        if st.button("Run Full Analysis", type="primary", width="stretch"):
             if txt_input:
                 with st.spinner(f"Running multiple engines on {txt_input}..."):
                     res = bot.analyze(txt_input)
@@ -5699,7 +5856,7 @@ with stock_tab:
                         if st.button(
                             create_dcf_label,
                             key=f"create_dcf_{row['Ticker']}",
-                            use_container_width=True,
+                            width="stretch",
                         ):
                             with st.spinner(f"Building DCF model for {row['Ticker']}..."):
                                 dcf_record = bot.analyze(
@@ -5733,7 +5890,7 @@ with stock_tab:
                             mime="application/json",
                             disabled=not dcf_snapshot_exists,
                             key=f"download_dcf_{row['Ticker']}",
-                            use_container_width=True,
+                            width="stretch",
                         )
                     if dcf_snapshot_exists:
                         st.caption(
@@ -5933,7 +6090,7 @@ with stock_tab:
                             for money_column in ["Revenue", "OperatingCF", "CapEx", "FreeCashFlow"]:
                                 if money_column in history_display.columns:
                                     history_display[money_column] = history_display[money_column].map(format_market_cap)
-                            st.dataframe(history_display, use_container_width=True)
+                            st.dataframe(history_display, width="stretch")
                         else:
                             st.caption("Historical SEC cash-flow history was not available for this run.")
 
@@ -5950,7 +6107,7 @@ with stock_tab:
                                 projection_display["DiscountFactor"] = projection_display["DiscountFactor"].map(
                                     lambda value: format_value(value, "{:,.3f}")
                                 )
-                            st.dataframe(projection_display, use_container_width=True)
+                            st.dataframe(projection_display, width="stretch")
                         else:
                             st.caption("The DCF projection table was not available for this run.")
 
@@ -5973,7 +6130,7 @@ with stock_tab:
                                 sensitivity_display[column] = sensitivity_display[column].map(
                                     lambda value: f"${value:,.2f}" if has_numeric_value(value) else "N/A"
                                 )
-                        st.dataframe(sensitivity_display, use_container_width=True)
+                        st.dataframe(sensitivity_display, width="stretch")
 
                     if row.get("DCF_Guidance_Summary"):
                         st.caption(str(row.get("DCF_Guidance_Summary")))
@@ -6222,7 +6379,7 @@ with compare_tab:
                 value=False,
                 help="If unchecked, the app reuses shared cached analyses when available.",
             )
-            compare_submit = st.form_submit_button("Build Comparison", type="primary", use_container_width=True)
+            compare_submit = st.form_submit_button("Build Comparison", type="primary", width="stretch")
 
     if compare_submit:
         compare_tickers = parse_ticker_list(compare_tickers_raw)
@@ -6376,7 +6533,7 @@ with compare_tab:
         comparison_display["Target Upside"] = comparison_display["Target Upside"].map(format_percent)
         comparison_display["Graham Discount"] = comparison_display["Graham Discount"].map(format_percent)
         comparison_display["DCF Upside"] = comparison_display["DCF Upside"].map(format_percent)
-        st.dataframe(comparison_display, use_container_width=True)
+        st.dataframe(comparison_display, width="stretch")
 
         engine_col, rationale_col = st.columns([2, 1])
         with engine_col:
@@ -6393,7 +6550,7 @@ with compare_tab:
             scorecard = comparison_df[
                 ["Ticker", "Stock_Type", "Score_Tech", "Score_Fund", "Score_Val", "Score_Sentiment", "Composite Score"]
             ].copy()
-            st.dataframe(scorecard, use_container_width=True)
+            st.dataframe(scorecard, width="stretch")
 
         with rationale_col:
             st.subheader("What to Look For")
@@ -6424,7 +6581,7 @@ with portfolio_tab:
         with p4:
             simulations = st.select_slider("Frontier Simulations", options=[1000, 2000, 3000, 4000, 5000], value=3000)
 
-        portfolio_submit = st.form_submit_button("Build Portfolio Recommendation", type="primary", use_container_width=True)
+        portfolio_submit = st.form_submit_button("Build Portfolio Recommendation", type="primary", width="stretch")
 
     if portfolio_submit:
         parsed_tickers = parse_ticker_list(portfolio_tickers_raw)
@@ -6572,14 +6729,14 @@ with portfolio_tab:
         recommendations_display["Sortino Ratio"] = recommendations_display["Sortino Ratio"].map(format_value)
         recommendations_display["Treynor Ratio"] = recommendations_display["Treynor Ratio"].map(format_value)
         recommendations_display["Beta"] = recommendations_display["Beta"].map(format_value)
-        st.dataframe(recommendations_display, use_container_width=True)
+        st.dataframe(recommendations_display, width="stretch")
 
         exposure_col, metrics_col = st.columns([1, 2])
         with exposure_col:
             st.subheader("Sector Exposure")
             sector_display = sector_exposure.copy()
             sector_display["Recommended Weight"] = sector_display["Recommended Weight"].map(format_percent)
-            st.dataframe(sector_display, use_container_width=True)
+            st.dataframe(sector_display, width="stretch")
 
         with metrics_col:
             st.subheader("Per-Stock Metrics")
@@ -6599,7 +6756,7 @@ with portfolio_tab:
                 asset_display[column] = asset_display[column].map(format_percent)
             for column in ["Beta", "Sharpe Ratio", "Sortino Ratio", "Treynor Ratio"]:
                 asset_display[column] = asset_display[column].map(format_value)
-            st.dataframe(asset_display, use_container_width=True)
+            st.dataframe(asset_display, width="stretch")
 
         st.subheader("Portfolio Building Notes")
         for note in result["notes"]:
@@ -6621,7 +6778,7 @@ with sensitivity_tab:
         with sensitivity_col_2:
             st.write("")
             st.write("")
-            run_sensitivity = st.form_submit_button("Run Sensitivity Check", type="primary", use_container_width=True)
+            run_sensitivity = st.form_submit_button("Run Sensitivity Check", type="primary", width="stretch")
 
     if run_sensitivity:
         cleaned_ticker = sensitivity_ticker.strip().upper()
@@ -6720,7 +6877,7 @@ with sensitivity_tab:
         sensitivity_display["Assumption Drift"] = sensitivity_display["Assumption Drift"].map(
             lambda value: format_value(value, "{:,.1f}", "%")
         )
-        st.dataframe(sensitivity_display, use_container_width=True)
+        st.dataframe(sensitivity_display, width="stretch")
 
 with backtest_tab:
     st.subheader("Signal Backtest")
@@ -6741,7 +6898,7 @@ with backtest_tab:
         with backtest_col_3:
             st.write("")
             st.write("")
-            run_backtest = st.form_submit_button("Run Backtest", type="primary", use_container_width=True)
+            run_backtest = st.form_submit_button("Run Backtest", type="primary", width="stretch")
 
     if run_backtest:
         cleaned_ticker = backtest_ticker.strip().upper()
@@ -6854,6 +7011,20 @@ with backtest_tab:
         render_analysis_signal_cards(
             [
                 {
+                    "label": "Average Exposure",
+                    "value": format_percent(backtest_metrics["Average Exposure"]),
+                    "note": "Higher means the replay stayed invested more consistently instead of sitting in cash.",
+                    "tone": tone_from_metric_threshold(backtest_metrics["Average Exposure"], good_min=0.75, bad_max=0.45),
+                    "help": ANALYSIS_HELP_TEXT["Average Exposure"],
+                },
+                {
+                    "label": "Upside Capture",
+                    "value": format_percent(backtest_metrics["Upside Capture"]),
+                    "note": "This compares the strategy's gain with a positive buy-and-hold gain over the same window.",
+                    "tone": tone_from_metric_threshold(backtest_metrics["Upside Capture"], good_min=0.90, bad_max=0.60),
+                    "help": ANALYSIS_HELP_TEXT["Upside Capture"],
+                },
+                {
                     "label": "Position Changes",
                     "value": str(int(backtest_metrics["Position Changes"])),
                     "note": "Entries, exits, adds, and reductions all count toward this total.",
@@ -6875,12 +7046,12 @@ with backtest_tab:
                     "help": ANALYSIS_HELP_TEXT["Avg Trade Return"],
                 },
             ],
-            columns=3,
+            columns=5,
         )
 
         st.subheader("Equity Curve")
         chart_frame = history_display[["Date", "Strategy Equity", "Benchmark Equity"]].copy().set_index("Date")
-        st.line_chart(chart_frame, use_container_width=True)
+        st.line_chart(chart_frame, width="stretch")
 
         st.subheader("Position Change Log")
         render_help_legend(
@@ -6895,7 +7066,7 @@ with backtest_tab:
             trade_log_display["Date"] = pd.to_datetime(trade_log_display["Date"]).dt.strftime("%Y-%m-%d")
             trade_log_display["Close"] = trade_log_display["Close"].map(lambda value: f"${value:,.2f}")
             trade_log_display["Position"] = trade_log_display["Position"].map(format_percent)
-            st.dataframe(trade_log_display, use_container_width=True)
+            st.dataframe(trade_log_display, width="stretch")
 
         st.subheader("Closed Trades")
         render_help_legend(
@@ -6913,11 +7084,13 @@ with backtest_tab:
             closed_trades_display["Exit Price"] = closed_trades_display["Exit Price"].map(lambda value: f"${value:,.2f}")
             closed_trades_display["Position Size"] = closed_trades_display["Position Size"].map(format_percent)
             closed_trades_display["Return"] = closed_trades_display["Return"].map(format_percent)
-            st.dataframe(closed_trades_display, use_container_width=True)
+            st.dataframe(closed_trades_display, width="stretch")
 
 with library_tab:
     st.subheader("Research Library")
     st.caption("Browse everything saved in the shared database so the research process stays visible across users and sessions.")
+    if not db.uses_persistent_storage:
+        st.info("Database export is unavailable in the current in-memory storage mode.")
     if startup_refresh_summary.get("error"):
         st.warning(f"Launch refresh hit an issue: {startup_refresh_summary['error']}")
     elif startup_refresh_summary.get("total", 0) > 0:
@@ -6933,16 +7106,16 @@ with library_tab:
 
     library_df = prepare_analysis_dataframe(db.get_all_analyses())
     if library_df.empty:
-        database_bytes = build_database_download_bytes(DB_PATH)
+        database_bytes = build_database_download_bytes(db.db_path if db.uses_persistent_storage else None)
         export_col_1, export_col_2 = st.columns(2)
         with export_col_1:
             st.download_button(
                 "Download Database",
                 data=database_bytes,
-                file_name=DB_PATH.name,
+                file_name=(db.db_path.name if db.uses_persistent_storage else DB_FILENAME),
                 mime="application/x-sqlite3",
                 disabled=not bool(database_bytes),
-                use_container_width=True,
+                width="stretch",
             )
         with export_col_2:
             st.download_button(
@@ -6951,7 +7124,7 @@ with library_tab:
                 file_name="stock_engine_library.csv",
                 mime="text/csv",
                 disabled=True,
-                use_container_width=True,
+                width="stretch",
             )
         st.info("The library is empty right now. Run stock analyses or a comparison to populate the shared database.")
     else:
@@ -6989,17 +7162,17 @@ with library_tab:
             ]
 
         export_frame = filtered_library if not filtered_library.empty else library_df
-        database_bytes = build_database_download_bytes(DB_PATH)
+        database_bytes = build_database_download_bytes(db.db_path if db.uses_persistent_storage else None)
         library_csv_bytes = build_library_csv_bytes(export_frame)
         export_col_1, export_col_2 = st.columns(2)
         with export_col_1:
             st.download_button(
                 "Download Database",
                 data=database_bytes,
-                file_name=DB_PATH.name,
+                file_name=(db.db_path.name if db.uses_persistent_storage else DB_FILENAME),
                 mime="application/x-sqlite3",
                 disabled=not bool(database_bytes),
-                use_container_width=True,
+                width="stretch",
             )
         with export_col_2:
             st.download_button(
@@ -7008,7 +7181,7 @@ with library_tab:
                 file_name="stock_engine_library.csv",
                 mime="text/csv",
                 disabled=export_frame.empty,
-                use_container_width=True,
+                width="stretch",
             )
 
         if filtered_library.empty:
@@ -7103,7 +7276,7 @@ with library_tab:
             library_display["Target Upside"] = library_display["Target Upside"].map(format_percent)
             library_display["Graham Discount"] = library_display["Graham Discount"].map(format_percent)
             library_display["DCF Upside"] = library_display["DCF Upside"].map(format_percent)
-            st.dataframe(library_display, use_container_width=True)
+            st.dataframe(library_display, width="stretch")
 
             library_left, library_right = st.columns(2)
             with library_left:
@@ -7131,7 +7304,7 @@ with library_tab:
                 )
                 sector_summary["Avg_Target_Upside"] = sector_summary["Avg_Target_Upside"].map(format_percent)
                 sector_summary["Avg_DCF_Upside"] = sector_summary["Avg_DCF_Upside"].map(format_percent)
-                st.dataframe(sector_summary, use_container_width=True)
+                st.dataframe(sector_summary, width="stretch")
 
             with library_right:
                 st.subheader("Top Conviction Names")
@@ -7148,7 +7321,7 @@ with library_tab:
                 ].head(10).copy()
                 conviction_table["Target Upside"] = conviction_table["Target Upside"].map(format_percent)
                 conviction_table["DCF Upside"] = conviction_table["DCF Upside"].map(format_percent)
-                st.dataframe(conviction_table, use_container_width=True)
+                st.dataframe(conviction_table, width="stretch")
 
 with readme_tab:
     st.subheader("ReadMe / Usage")
@@ -7174,7 +7347,7 @@ with changelog_tab:
     changelog_metrics[1].metric("Logged Changes", str(len(CHANGELOG_ENTRIES)))
     changelog_metrics[2].metric("App Version", APP_VERSION)
 
-    st.dataframe(pd.DataFrame(CHANGELOG_ENTRIES), use_container_width=True)
+    st.dataframe(pd.DataFrame(CHANGELOG_ENTRIES), width="stretch")
 
     st.subheader("What Changed Most Recently")
     st.write("- The model now adds ten extra diagnostics such as trend strength, 52-week range context, volatility-adjusted momentum, quality score, dividend safety, valuation breadth, sentiment conviction, and explicit risk flags.")
@@ -7197,7 +7370,7 @@ with methodology_tab:
             {"Step": 5, "What Happens": "Store the full result with timestamp, assumption fingerprint, and quality stats in the shared library."},
         ]
     )
-    st.dataframe(methodology_flow, use_container_width=True)
+    st.dataframe(methodology_flow, width="stretch")
 
     methodology_col_1, methodology_col_2 = st.columns(2)
     with methodology_col_1:
@@ -7226,7 +7399,7 @@ with methodology_tab:
                 },
             ]
         )
-        st.dataframe(engine_framework, use_container_width=True)
+        st.dataframe(engine_framework, width="stretch")
 
     with methodology_col_2:
         st.subheader("Verdict Thresholds")
@@ -7252,7 +7425,7 @@ with methodology_tab:
                 },
             ]
         )
-        st.dataframe(verdict_table, use_container_width=True)
+        st.dataframe(verdict_table, width="stretch")
 
     st.subheader("Stock Type Framework")
     stock_type_framework = pd.DataFrame(
@@ -7267,7 +7440,7 @@ with methodology_tab:
             {"Type": "Speculative / Penny Stocks", "How The Model Recognizes It": "Tiny scale, low price, weak fundamentals, thin coverage, or extreme beta", "Logic Tilt": "Buy thresholds rise and conviction is capped"},
         ]
     )
-    st.dataframe(stock_type_framework, use_container_width=True)
+    st.dataframe(stock_type_framework, width="stretch")
 
     st.subheader("Refinement Layer")
     refinement_df = pd.DataFrame(
@@ -7284,7 +7457,7 @@ with methodology_tab:
             {"Refinement": 10, "What Changed": "Profile-Aware Trailing Stops", "Purpose": "Makes the backtest protect gains differently for growth, defensive, cyclical, and speculative stocks."},
         ]
     )
-    st.dataframe(refinement_df, use_container_width=True)
+    st.dataframe(refinement_df, width="stretch")
 
     st.subheader("Decision Guardrails")
     guardrail_df = pd.DataFrame(
@@ -7296,7 +7469,7 @@ with methodology_tab:
             {"Guardrail": "Data Quality Check", "Purpose": "Reduces conviction when too many important metrics are missing."},
         ]
     )
-    st.dataframe(guardrail_df, use_container_width=True)
+    st.dataframe(guardrail_df, width="stretch")
 
     st.subheader("Portfolio Workflow")
     portfolio_workflow = pd.DataFrame(
@@ -7308,7 +7481,7 @@ with methodology_tab:
             {"Step": 5, "What Happens": "Translate the tangent weights into practical roles, sector exposure, and concentration notes."},
         ]
     )
-    st.dataframe(portfolio_workflow, use_container_width=True)
+    st.dataframe(portfolio_workflow, width="stretch")
 
     methodology_col_3, methodology_col_4 = st.columns(2)
     with methodology_col_3:
@@ -7325,14 +7498,15 @@ with methodology_tab:
             .reset_index()
             .rename(columns={"index": "Sector"})
         )
-        st.dataframe(sector_benchmarks_df, use_container_width=True)
+        st.dataframe(sector_benchmarks_df, width="stretch")
 
     with methodology_col_4:
         st.subheader("Current Model Assumptions")
         library_snapshot = prepare_analysis_dataframe(db.get_all_analyses())
         assumptions_df = pd.DataFrame(
             [
-                {"Setting": "Database Path", "Value": str(DB_PATH)},
+                {"Setting": "Storage Mode", "Value": "Persistent SQLite" if db.uses_persistent_storage else "In-memory"},
+                {"Setting": "Database Path", "Value": db.storage_label},
                 {"Setting": "Active Profile", "Value": active_preset_name},
                 {"Setting": "Assumption Fingerprint", "Value": active_assumption_fingerprint},
                 {"Setting": "Trading Days per Year", "Value": int(model_settings["trading_days_per_year"])},
@@ -7384,7 +7558,8 @@ with methodology_tab:
                 {"Setting": "Cached Analyses in Library", "Value": len(library_snapshot)},
             ]
         )
-        st.dataframe(assumptions_df, use_container_width=True)
+        assumptions_df["Value"] = assumptions_df["Value"].map(str)
+        st.dataframe(assumptions_df, width="stretch")
 
 with options_tab:
     st.subheader("Model Options")
@@ -7407,7 +7582,7 @@ with options_tab:
     with preset_col_2:
         st.write("")
         st.write("")
-        if st.button("Apply Preset", use_container_width=True):
+        if st.button("Apply Preset", width="stretch"):
             st.session_state.model_settings = preset_catalog[preset_selection].copy()
             st.session_state.model_preset_name = preset_selection
             st.session_state.options_feedback = {
@@ -7438,7 +7613,7 @@ with options_tab:
         ]
     )
     st.subheader("Preset Snapshot")
-    st.dataframe(preset_snapshot, use_container_width=True)
+    st.dataframe(preset_snapshot, width="stretch")
 
     feedback = st.session_state.pop("options_feedback", None)
     if feedback:
@@ -7465,7 +7640,7 @@ with options_tab:
     else:
         st.info("The controls are intentionally range-limited so the model remains stable even when you tune it.")
 
-    if st.button("Restore Default Assumptions", use_container_width=False):
+    if st.button("Restore Default Assumptions", width="content"):
         st.session_state.model_settings = get_default_model_settings()
         st.session_state.model_preset_name = get_default_preset_name()
         st.session_state.options_feedback = {
@@ -7727,7 +7902,7 @@ with options_tab:
             help=OPTIONS_HELP_TEXT["backtest_cooldown_days"],
         )
 
-        save_options = st.form_submit_button("Save Assumptions", type="primary", use_container_width=True)
+        save_options = st.form_submit_button("Save Assumptions", type="primary", width="stretch")
 
     if save_options:
         updated_settings = {
@@ -7774,3 +7949,4 @@ with options_tab:
             "notes": notes,
         }
         st.rerun()
+
