@@ -36,6 +36,7 @@ FETCH_CACHE = {
     "ticker_info": {},
     "ticker_news": {},
     "batch_history": {},
+    "peer_group": {},
     "sec_ticker_map": {},
     "sec_companyfacts": {},
     "sec_submissions": {},
@@ -56,6 +57,63 @@ DCF_MIN_GROWTH_RATE = -0.05
 DCF_DEFAULT_RISK_FREE_RATE = 0.043
 DCF_DEFAULT_MARKET_RISK_PREMIUM = 0.055
 DCF_DEFAULT_AFTER_TAX_COST_OF_DEBT = 0.035
+PEER_GROUP_SIZE = 5
+PEER_SEARCH_CANDIDATE_LIMIT = 140
+PEER_MIN_REQUIRED = 3
+PEER_UNIVERSE_FILENAME = "sp500_tickers.txt"
+BENCHMARK_RELATIVE_STRENGTH_WINDOWS = {
+    "Relative_Strength_3M": 63,
+    "Relative_Strength_6M": 126,
+    "Relative_Strength_1Y": 252,
+}
+FUNDAMENTAL_EVENT_KEYWORDS = {
+    "earnings",
+    "revenue",
+    "guidance",
+    "outlook",
+    "forecast",
+    "margin",
+    "dividend",
+    "buyback",
+    "acquisition",
+    "merger",
+    "filing",
+    "10-k",
+    "10-q",
+    "profit",
+    "cash flow",
+    "capex",
+    "debt",
+}
+FILING_TAKEAWAY_PATTERNS = [
+    "guidance",
+    "outlook",
+    "forecast",
+    "expect",
+    "anticipate",
+    "demand",
+    "margin",
+    "cash flow",
+    "liquidity",
+    "capital",
+    "debt",
+    "backlog",
+    "inventory",
+    "customer",
+    "pricing",
+    "supply",
+]
+DEFAULT_DCF_SETTINGS = {
+    "projection_years": DCF_PROJECTION_YEARS,
+    "terminal_growth_rate": DCF_TERMINAL_GROWTH_RATE,
+    "growth_haircut": DCF_GROWTH_HAIRCUT,
+    "max_growth_rate": DCF_MAX_GROWTH_RATE,
+    "min_growth_rate": DCF_MIN_GROWTH_RATE,
+    "market_risk_premium": DCF_DEFAULT_MARKET_RISK_PREMIUM,
+    "default_after_tax_cost_of_debt": DCF_DEFAULT_AFTER_TAX_COST_OF_DEBT,
+    "risk_free_rate_override": None,
+    "manual_growth_rate": None,
+}
 SEC_ANNUAL_FORMS = {"10-K", "10-K/A", "20-F", "20-F/A", "40-F", "40-F/A"}
 SEC_FILING_SEARCH_FORMS = ["10-K", "10-Q"]
 SEC_GUIDANCE_PATTERNS = [
@@ -116,16 +174,25 @@ ANALYSIS_COLUMNS = {
     "Score_Val": "INTEGER",
     "Score_Sentiment": "INTEGER",
     "Sector": "TEXT",
+    "Industry": "TEXT",
     "Stock_Type": "TEXT",
     "Cap_Bucket": "TEXT",
     "Style_Tags": "TEXT",
     "Type_Strategy": "TEXT",
     "Type_Confidence": "REAL",
     "Engine_Weight_Profile": "TEXT",
+    "Peer_Count": "INTEGER",
+    "Peer_Group_Label": "TEXT",
+    "Peer_Tickers": "TEXT",
+    "Peer_Summary": "TEXT",
+    "Peer_Comparison": "TEXT",
     "Market_Cap": "REAL",
     "Dividend_Yield": "REAL",
     "Payout_Ratio": "REAL",
     "Equity_Beta": "REAL",
+    "Relative_Strength_3M": "REAL",
+    "Relative_Strength_6M": "REAL",
+    "Relative_Strength_1Y": "REAL",
     "Trend_Strength": "REAL",
     "Range_Position_52W": "REAL",
     "Distance_52W_High": "REAL",
@@ -184,18 +251,25 @@ ANALYSIS_COLUMNS = {
     "Analyst_Opinions": "REAL",
     "Sentiment_Headline_Count": "INTEGER",
     "Sentiment_Summary": "TEXT",
+    "Event_Study_Count": "INTEGER",
+    "Event_Study_Avg_Abnormal_1D": "REAL",
+    "Event_Study_Avg_Abnormal_5D": "REAL",
+    "Event_Study_Summary": "TEXT",
+    "Event_Study_Events": "TEXT",
     "RSI": "REAL",
     "MACD_Value": "REAL",
     "MACD_Signal": "TEXT",
     "SMA_Status": "TEXT",
     "Momentum_1M": "REAL",
     "Momentum_1Y": "REAL",
+    "Last_Data_Update": "TEXT",
     "Last_Updated": "TEXT",
     "Overall_Score": "REAL",
     "Assumption_Profile": "TEXT",
     "Assumption_Fingerprint": "TEXT",
     "Assumption_Drift": "REAL",
     "Assumption_Snapshot": "TEXT",
+    "DCF_Assumptions": "TEXT",
     "Data_Completeness": "REAL",
     "Missing_Metric_Count": "INTEGER",
     "Data_Quality": "TEXT",
@@ -238,6 +312,7 @@ DEFAULT_MODEL_SETTINGS = {
     "decision_hold_buffer": 1.0,
     "decision_min_confidence": 55.0,
     "backtest_cooldown_days": 8.0,
+    "backtest_transaction_cost_bps": 10.0,
     "trading_days_per_year": 252.0,
 }
 MODEL_PRESETS = {
@@ -327,27 +402,35 @@ ANALYSIS_HELP_TEXT = {
     "Market Cap": "The company's total market value based on share price times shares outstanding.",
     "Technical": "A score based on price trend, momentum, RSI, MACD, and moving averages. Higher is more constructive.",
     "Fundamental": "A score based on profitability, growth, leverage, and liquidity. Higher usually means a stronger business profile.",
-    "Valuation": "A score showing whether the stock looks cheap, fair, or expensive based on sector multiples and Graham-style checks, with an optional manual five-year DCF snapshot when you create one.",
-    "Sentiment": "A score based on headline tone, analyst views, and target prices. Positive numbers mean the market tone is more supportive.",
+    "Valuation": "A score showing whether the stock looks cheap, fair, or expensive relative to a small peer set, with sector benchmarks used only as a fallback and an optional manual DCF snapshot when you create one.",
+    "Sentiment": "A context layer that surfaces analyst coverage, targets, and company-related headlines without making a separate good-or-bad call.",
     "Updated": "The last time this saved analysis was refreshed.",
+    "Last Data Update": "The freshest market or news timestamp the app could confirm for this saved snapshot.",
     "Overall Score": "The model's combined score after blending technical, fundamental, valuation, and sentiment inputs.",
     "Data Quality": "A quick read on how complete and usable the underlying data was for this analysis.",
     "Assumption Profile": "The preset or custom settings used when this analysis was generated.",
     "Missing Metrics": "How many important data fields were unavailable during the analysis.",
-    "Confidence": "How strongly the model trusts its final verdict given signal agreement, trend context, and data quality.",
+    "Confidence": "How consistently the model's inputs agree with each other after accounting for trend context, data completeness, and guardrails.",
+    "Consistency": "How consistently the model's inputs agree with each other after accounting for trend context, data completeness, and guardrails.",
     "Regime": "The current market backdrop the model sees in the stock: bullish trend, bearish trend, transition, or range-bound.",
     "Trend Strength": "A blended measure of long-term price trend quality using moving averages and one-year momentum.",
     "Quality Score": "A business-quality read based on returns, margins, balance-sheet strength, and growth consistency.",
     "Dividend Safety": "A rough check on whether the dividend looks sustainable based on payout ratio, profitability, liquidity, and debt.",
     "Valuation Confidence": "How much valuation evidence the model has available. More usable valuation inputs means higher confidence.",
-    "Sentiment Conviction": "How strong and well-supported the sentiment signal is, not just whether it is positive or negative.",
+    "Sentiment Conviction": "How much analyst and headline context was available for the company, not whether that context was positive or negative.",
+    "Peer Group": "The five closest companies the app could find using industry, sector, size, profitability, growth, and risk characteristics.",
+    "Peer Summary": "A quick description of the peer set used for relative valuation comparisons.",
+    "Relative Strength": "How the stock's return has compared with the benchmark over the selected lookback window.",
+    "Event Study": "A simple reaction table showing how the stock moved after recent company events, plus the move relative to the benchmark.",
+    "Event Study 1D": "The average one-trading-day move after recent company events after subtracting the benchmark move over the same window.",
+    "Event Study 5D": "The average five-trading-day move after recent company events after subtracting the benchmark move over the same window.",
     "Graham Fair Value": "A conservative Graham-style fair value estimate based on earnings and book value when those inputs are available. It is most useful for profitable, asset-heavy businesses and less reliable for modern growth companies.",
     "Graham Discount": "Shows how far the current price sits below or above the Graham fair value estimate. Positive is cheaper. It is most useful for profitable, asset-heavy businesses and less reliable for modern growth companies.",
     "DCF Fair Value": "An on-demand five-year discounted cash flow estimate built from SEC filing history, a selected growth assumption, and a discounted terminal value.",
     "DCF Upside": "The percentage gap between the current stock price and the manual DCF fair value estimate. Positive means the DCF points to upside.",
     "DCF WACC": "The discount rate used in the DCF. It blends the estimated cost of equity and cost of debt into a weighted average cost of capital.",
     "DCF Growth Rate": "The starting growth rate used for projected free cash flow before it fades toward the terminal growth assumption by year five.",
-    "DCF Source": "Shows whether the DCF growth assumption came from filing guidance or from the company's own historical cash-flow and revenue trend.",
+    "DCF Source": "Shows whether the DCF growth assumption came from your manual override or from the company's own historical cash-flow and revenue trend.",
     "Historical FCF Growth": "The recent compound growth rate in free cash flow based on SEC filing history.",
     "Historical Revenue Growth": "The recent compound growth rate in revenue based on SEC filing history.",
     "Terminal Growth": "The long-run growth rate used in the DCF terminal value once the explicit five-year forecast ends.",
@@ -379,10 +462,10 @@ ANALYSIS_HELP_TEXT = {
     "MACD Signal": "Tells you whether momentum currently looks bullish, bearish, or neutral based on MACD crossover behavior.",
     "1M Momentum": "The stock's recent one-month move. Strong positive momentum can confirm trend strength.",
     "1Y Momentum": "The stock's one-year move. It helps show whether the long-term trend has been strong or weak.",
-    "Headlines": "The number of recent news headlines the sentiment engine reviewed.",
-    "Analyst View": "The current analyst recommendation signal the model could retrieve, such as Buy or Sell.",
-    "Target Mean": "The average analyst target price. Higher than the current price can imply expected upside.",
-    "Highest Conviction": "The top-ranked stock in the current comparison after blending the four engines with the active settings.",
+    "Headlines": "The number of recent company-related headlines the app pulled into the context view.",
+    "Analyst View": "The current analyst recommendation label the app could retrieve, shown as context rather than a scored signal.",
+    "Target Mean": "The average analyst target price, shown as context rather than a direct verdict input.",
+    "Highest Conviction": "The top-ranked stock in the current comparison after blending the active analysis layers with the current settings.",
     "Average Composite Score": "The average blended model score across the current comparison list. Higher means the group looks stronger overall.",
     "Average Target Upside": "The average gap between current price and analyst target price across the current list.",
     "Average DCF Upside": "The average gap between current price and the DCF fair value estimate across the current list.",
@@ -409,6 +492,7 @@ ANALYSIS_HELP_TEXT = {
     "Benchmark Return": "The total return from simply holding the stock over the same window with no trading rules.",
     "Relative vs Benchmark": "How much the strategy outperformed or underperformed simple buy-and-hold.",
     "Strategy Sharpe": "The backtest strategy's annualized return per unit of volatility.",
+    "Trading Costs": "Estimated transaction costs deducted from the backtest whenever exposure changes.",
     "Average Exposure": "The average fraction of the portfolio the replay kept invested. Lower exposure can protect downside but can also create cash drag versus buy-and-hold. Values above 100% mean the replay tactically overweighted its strongest setups.",
     "Upside Capture": "When the benchmark finished positive, this shows how much of that upside the strategy captured. Around 100% means it roughly kept pace with buy-and-hold, and above 100% means it outpaced that upside.",
     "Win Rate": "The share of closed trades that ended with a positive return.",
@@ -503,7 +587,7 @@ OPTIONS_HELP_TEXT = {
     "weight_technical": "Higher values make price trend, RSI, MACD, and momentum matter more in the final score.",
     "weight_fundamental": "Higher values make profitability, growth, leverage, and liquidity matter more in the final score.",
     "weight_valuation": "Higher values make cheap-versus-expensive signals matter more in the final score.",
-    "weight_sentiment": "Higher values make headlines, analyst views, and target prices matter more in the final score.",
+    "weight_sentiment": "This control is currently parked because the sentiment view is context-only and no longer adds a directional score.",
     "tech_rsi_oversold": "Lower values wait for deeper weakness before treating RSI as oversold.",
     "tech_rsi_overbought": "Lower values start treating strong rallies as overbought sooner.",
     "tech_momentum_threshold": "Higher values require a bigger recent move before momentum adds or subtracts technical points.",
@@ -517,23 +601,24 @@ OPTIONS_HELP_TEXT = {
     "tech_trend_tolerance": "Higher values create a wider neutral zone around moving averages so small wiggles do not flip the trend score.",
     "tech_extension_limit": "Lower values make the model call a move stretched sooner when price runs away from the 50-day average.",
     "decision_hold_buffer": "Higher values make mixed or transitional setups need more evidence before becoming Buy or Sell.",
-    "decision_min_confidence": "Higher values make the final verdict stay on Hold unless engine agreement and data quality are stronger.",
-    "valuation_benchmark_scale": "Lower values make sector valuation benchmarks stricter; higher values make them more forgiving.",
+    "decision_min_confidence": "Higher values make the final verdict stay on Hold unless the model's signals remain more internally consistent.",
+    "valuation_benchmark_scale": "Adjusts the fallback sector benchmarks that are only used when the peer set is too thin to stand on its own.",
     "valuation_peg_threshold": "Lower values make the model harsher on expensive PEG ratios.",
     "valuation_graham_overpriced_multiple": "Lower values make the model call a stock overpriced sooner versus Graham value.",
     "trading_days_per_year": "Adjusts annualized portfolio and backtest metrics such as return, volatility, and Sharpe.",
     "valuation_fair_score_threshold": "Higher values require more valuation evidence before a name earns Fair Value instead of Overvalued.",
     "valuation_under_score_threshold": "Higher values require more valuation evidence before a name earns Undervalued.",
-    "sentiment_analyst_boost": "Higher values make analyst recommendations contribute more to sentiment.",
-    "sentiment_upside_mid": "Lower values let smaller analyst target upside count as a positive sentiment signal.",
-    "sentiment_upside_high": "Lower values let strong upside bonuses trigger more easily.",
+    "sentiment_analyst_boost": "Kept for future directional sentiment work. The current context-only sentiment view does not use this setting.",
+    "sentiment_upside_mid": "Kept for future directional sentiment work. The current context-only sentiment view does not use this setting.",
+    "sentiment_upside_high": "Kept for future directional sentiment work. The current context-only sentiment view does not use this setting.",
     "overall_buy_threshold": "Higher values require a larger combined score before the model upgrades from Hold to Buy.",
     "overall_strong_buy_threshold": "Higher values make Strong Buy rarer.",
     "overall_sell_threshold": "Higher values make the model wait for weaker negative evidence before switching from Hold to Sell.",
     "overall_strong_sell_threshold": "Higher values make Strong Sell rarer.",
-    "sentiment_downside_mid": "Lower values let smaller analyst target downside count as a negative sentiment signal.",
-    "sentiment_downside_high": "Lower values trigger a strong downside penalty sooner.",
+    "sentiment_downside_mid": "Kept for future directional sentiment work. The current context-only sentiment view does not use this setting.",
+    "sentiment_downside_high": "Kept for future directional sentiment work. The current context-only sentiment view does not use this setting.",
     "backtest_cooldown_days": "Higher values force the replay to wait longer before re-entering after a position change.",
+    "backtest_transaction_cost_bps": "Estimated trading cost in basis points charged whenever the backtest changes exposure.",
 }
 POSITIVE_SENTIMENT_TERMS = {
     "beat", "beats", "growth", "surge", "surges", "strong", "bullish", "buy",
@@ -698,6 +783,141 @@ def format_age(value):
 
     total_days = total_hours // 24
     return f"{total_days}d ago"
+
+
+def parse_any_datetime(value):
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    if isinstance(value, pd.Timestamp):
+        value = value.to_pydatetime()
+    if isinstance(value, datetime.datetime):
+        if value.tzinfo is not None:
+            return value.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+        return value
+    if isinstance(value, datetime.date):
+        return datetime.datetime.combine(value, datetime.time.min)
+    if isinstance(value, (int, float)):
+        raw_value = float(value)
+        if raw_value <= 0:
+            return None
+        if raw_value > 1_000_000_000_000:
+            raw_value = raw_value / 1000
+        try:
+            return datetime.datetime.fromtimestamp(raw_value)
+        except (OverflowError, OSError, ValueError):
+            return None
+
+    text = str(value).strip()
+    if not text:
+        return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    try:
+        parsed = pd.to_datetime(text, utc=False)
+        if pd.isna(parsed):
+            return None
+        if isinstance(parsed, pd.Timestamp):
+            return parse_any_datetime(parsed.to_pydatetime())
+    except Exception:
+        return None
+    return None
+
+
+def format_datetime_value(value, fallback="Unknown"):
+    stamp = parse_any_datetime(value)
+    if stamp is None:
+        return fallback
+    if stamp.hour == 0 and stamp.minute == 0 and stamp.second == 0:
+        return stamp.strftime("%Y-%m-%d")
+    return stamp.strftime("%Y-%m-%d %H:%M")
+
+
+def approximate_trading_days_for_period(period):
+    return {
+        "3mo": 63,
+        "6mo": 126,
+        "1y": 252,
+        "18mo": 378,
+        "2y": 504,
+        "3y": 756,
+        "5y": 1260,
+        "10y": 2520,
+    }.get(str(period).lower())
+
+
+def trim_history_to_period(hist, period):
+    if hist is None or hist.empty:
+        return pd.DataFrame()
+    trading_days = approximate_trading_days_for_period(period)
+    if trading_days is None or len(hist) <= trading_days:
+        return hist.copy()
+    return hist.tail(trading_days).copy()
+
+
+def extract_news_publish_time(item):
+    if not isinstance(item, dict):
+        return None
+    for key in ["providerPublishTime", "publishTime", "published", "published_at"]:
+        parsed = parse_any_datetime(item.get(key))
+        if parsed is not None:
+            return parsed
+    content = item.get("content")
+    if isinstance(content, dict):
+        return extract_news_publish_time(content)
+    return None
+
+
+def extract_news_title(item):
+    if not isinstance(item, dict):
+        return ""
+    title = str(item.get("title") or "").strip()
+    if title:
+        return title
+    content = item.get("content")
+    if isinstance(content, dict):
+        return str(content.get("title") or "").strip()
+    return ""
+
+
+def build_news_context_lines(news, max_items=5):
+    lines = []
+    for item in news or []:
+        title = extract_news_title(item)
+        if not title:
+            continue
+        published = format_datetime_value(extract_news_publish_time(item), fallback="")
+        publisher = ""
+        if isinstance(item, dict):
+            publisher = str(item.get("publisher") or item.get("source") or "").strip()
+            if not publisher and isinstance(item.get("content"), dict):
+                publisher = str(item["content"].get("publisher") or "").strip()
+        prefix_parts = [part for part in [published, publisher] if part]
+        prefix = " | ".join(prefix_parts)
+        lines.append(f"{prefix}: {title}" if prefix else title)
+        if len(lines) >= max_items:
+            break
+    return lines
+
+
+def compute_relative_strength(close, benchmark_close, window):
+    if close is None or benchmark_close is None or window <= 0:
+        return None
+    close = close.dropna()
+    benchmark_close = benchmark_close.dropna()
+    aligned = pd.concat([close.rename("stock"), benchmark_close.rename("benchmark")], axis=1, join="inner").dropna()
+    if len(aligned) <= window:
+        return None
+    stock_return = safe_divide(aligned["stock"].iloc[-1] - aligned["stock"].iloc[-window - 1], aligned["stock"].iloc[-window - 1])
+    benchmark_return = safe_divide(
+        aligned["benchmark"].iloc[-1] - aligned["benchmark"].iloc[-window - 1],
+        aligned["benchmark"].iloc[-window - 1],
+    )
+    if stock_return is None or benchmark_return is None:
+        return None
+    return float(stock_return - benchmark_return)
 
 
 def escape_html_text(value):
@@ -915,6 +1135,7 @@ def build_dcf_download_bytes(record):
         "assumption_profile": record.get("Assumption_Profile"),
         "analysis_last_updated": record.get("Last_Updated"),
         "dcf_last_updated": record.get("DCF_Last_Updated") or record.get("Last_Updated"),
+        "dcf_assumptions": safe_json_loads(record.get("DCF_Assumptions"), default={}),
         "dcf_summary": {
             "intrinsic_value_per_share": safe_num(record.get("DCF_Intrinsic_Value")),
             "upside": safe_num(record.get("DCF_Upside")),
@@ -1223,6 +1444,30 @@ def normalize_info_payload(info):
     return cleaned
 
 
+def normalize_fast_info_payload(fast_info):
+    if fast_info is None:
+        return {}
+    if hasattr(fast_info, "items"):
+        payload = dict(fast_info.items())
+    else:
+        return {}
+    field_map = {
+        "marketCap": ["marketCap", "market_cap"],
+        "beta": ["beta"],
+        "sharesOutstanding": ["shares", "sharesOutstanding"],
+        "lastPrice": ["lastPrice", "last_price"],
+    }
+    normalized = {}
+    for output_key, candidate_keys in field_map.items():
+        for candidate_key in candidate_keys:
+            value = payload.get(candidate_key)
+            if value is None or (isinstance(value, float) and pd.isna(value)):
+                continue
+            normalized[output_key] = value
+            break
+    return normalized
+
+
 def normalize_news_payload(news):
     if not isinstance(news, list):
         return []
@@ -1241,6 +1486,7 @@ def build_info_fallback_from_saved_analysis(saved_row):
 
     fallback_map = {
         "sector": row.get("Sector"),
+        "industry": row.get("Industry"),
         "marketCap": row.get("Market_Cap"),
         "dividendYield": row.get("Dividend_Yield"),
         "payoutRatio": row.get("Payout_Ratio"),
@@ -1268,6 +1514,353 @@ def build_info_fallback_from_saved_analysis(saved_row):
             continue
         cleaned[key] = value
     return cleaned
+
+
+def get_peer_universe_tickers(db=None):
+    tickers = []
+    seen = set()
+
+    def add_many(values):
+        for raw_value in values or []:
+            ticker = str(raw_value or "").strip().upper()
+            if not ticker or ticker in seen:
+                continue
+            seen.add(ticker)
+            tickers.append(ticker)
+
+    if db is not None:
+        try:
+            saved_rows = db.get_all_analyses()
+        except Exception:
+            saved_rows = pd.DataFrame()
+        if not saved_rows.empty and "Ticker" in saved_rows.columns:
+            add_many(saved_rows["Ticker"].dropna().tolist())
+
+    peer_file = APP_DIR / PEER_UNIVERSE_FILENAME
+    if peer_file.exists():
+        try:
+            add_many(peer_file.read_text(encoding="utf-8").splitlines())
+        except OSError:
+            pass
+
+    add_many(parse_ticker_list(DEFAULT_PORTFOLIO_TICKERS))
+    return tickers
+
+
+def score_peer_similarity(target_info, candidate_info):
+    if not isinstance(candidate_info, dict) or not candidate_info:
+        return None, None
+
+    target_sector = str(target_info.get("sector") or "").strip().lower()
+    candidate_sector = str(candidate_info.get("sector") or "").strip().lower()
+    target_industry = str(target_info.get("industry") or "").strip().lower()
+    candidate_industry = str(candidate_info.get("industry") or "").strip().lower()
+
+    if target_industry and candidate_industry and target_industry == candidate_industry:
+        priority = 0
+    elif target_sector and candidate_sector and target_sector == candidate_sector:
+        priority = 1
+    else:
+        priority = 2
+
+    score = 0.0
+    if priority == 0:
+        score += 6.0
+    elif priority == 1:
+        score += 3.5
+    else:
+        score -= 4.0
+
+    target_market_cap = safe_num(target_info.get("marketCap"))
+    candidate_market_cap = safe_num(candidate_info.get("marketCap"))
+    if has_numeric_value(target_market_cap) and has_numeric_value(candidate_market_cap) and target_market_cap > 0 and candidate_market_cap > 0:
+        score -= abs(np.log(candidate_market_cap / target_market_cap))
+
+    for key, weight in [
+        ("beta", 0.8),
+        ("revenueGrowth", 1.0),
+        ("profitMargins", 0.7),
+        ("returnOnEquity", 0.6),
+    ]:
+        target_value = safe_num(target_info.get(key))
+        candidate_value = safe_num(candidate_info.get(key))
+        if has_numeric_value(target_value) and has_numeric_value(candidate_value):
+            score -= min(abs(candidate_value - target_value) * weight * 4, 2.5)
+
+    return priority, float(score)
+
+
+def build_peer_candidate_info(candidate_ticker, db=None):
+    cached_info = get_cached_fetch_payload("ticker_info", str(candidate_ticker).strip().upper())
+    if cached_info:
+        return cached_info
+
+    fallback_info = {}
+    if db is not None:
+        saved_row = db.get_analysis(candidate_ticker)
+        if not saved_row.empty:
+            fallback_info = build_info_fallback_from_saved_analysis(saved_row.iloc[0])
+            if fallback_info:
+                return fallback_info
+
+    info, _ = fetch_ticker_info_with_retry(candidate_ticker, attempts=1)
+    if info:
+        return info
+    return fallback_info
+
+
+def find_closest_peer_group(ticker, info, db=None, peer_count=PEER_GROUP_SIZE):
+    cache_key = (str(ticker).strip().upper(), str(info.get("sector") or "").strip(), str(info.get("industry") or "").strip())
+    cached_group = get_cached_fetch_payload("peer_group", cache_key, max_age_seconds=FETCH_STALE_FALLBACK_TTL_SECONDS)
+    if cached_group:
+        return cached_group
+
+    target_ticker = str(ticker).strip().upper()
+    target_info = info or {}
+    universe = get_peer_universe_tickers(db)
+    target_sector = str(target_info.get("sector") or "").strip()
+    target_industry = str(target_info.get("industry") or "").strip()
+
+    candidates = []
+    scanned = 0
+    for candidate_ticker in universe:
+        candidate_ticker = str(candidate_ticker).strip().upper()
+        if not candidate_ticker or candidate_ticker == target_ticker:
+            continue
+
+        candidate_info = build_peer_candidate_info(candidate_ticker, db=db)
+        if not candidate_info:
+            continue
+
+        priority, similarity_score = score_peer_similarity(target_info, candidate_info)
+        if similarity_score is None:
+            continue
+
+        candidates.append(
+            {
+                "Ticker": candidate_ticker,
+                "Name": str(candidate_info.get("shortName") or candidate_info.get("longName") or candidate_ticker),
+                "Sector": str(candidate_info.get("sector") or ""),
+                "Industry": str(candidate_info.get("industry") or ""),
+                "Similarity": similarity_score,
+                "Priority": priority,
+                "marketCap": safe_num(candidate_info.get("marketCap")),
+                "trailingPE": safe_num(candidate_info.get("trailingPE")),
+                "forwardPE": safe_num(candidate_info.get("forwardPE")),
+                "pegRatio": safe_num(candidate_info.get("pegRatio")),
+                "priceToSalesTrailing12Months": safe_num(candidate_info.get("priceToSalesTrailing12Months")),
+                "priceToBook": safe_num(candidate_info.get("priceToBook")),
+                "enterpriseToEbitda": safe_num(candidate_info.get("enterpriseToEbitda")),
+                "returnOnEquity": safe_num(candidate_info.get("returnOnEquity")),
+                "profitMargins": safe_num(candidate_info.get("profitMargins")),
+                "debtToEquity": safe_num(candidate_info.get("debtToEquity")),
+                "revenueGrowth": safe_num(candidate_info.get("revenueGrowth")),
+                "currentRatio": safe_num(candidate_info.get("currentRatio")),
+                "beta": safe_num(candidate_info.get("beta")),
+            }
+        )
+        scanned += 1
+        if scanned >= PEER_SEARCH_CANDIDATE_LIMIT and len(candidates) >= peer_count:
+            enough_close_matches = len([row for row in candidates if row["Priority"] <= 1]) >= peer_count
+            if enough_close_matches:
+                break
+
+    candidates = sorted(
+        candidates,
+        key=lambda row: (row["Priority"], -row["Similarity"], row["Ticker"]),
+    )
+    selected = candidates[:peer_count]
+
+    metric_map = {
+        "PE": "trailingPE",
+        "Forward_PE": "forwardPE",
+        "PEG": "pegRatio",
+        "PS": "priceToSalesTrailing12Months",
+        "PB": "priceToBook",
+        "EV_EBITDA": "enterpriseToEbitda",
+        "ROE": "returnOnEquity",
+        "Profit_Margins": "profitMargins",
+        "Debt_to_Equity": "debtToEquity",
+        "Revenue_Growth": "revenueGrowth",
+        "Current_Ratio": "currentRatio",
+        "Equity_Beta": "beta",
+    }
+    averages = {}
+    for output_key, input_key in metric_map.items():
+        values = [row[input_key] for row in selected if has_numeric_value(row.get(input_key))]
+        averages[output_key] = float(np.mean(values)) if values else None
+
+    group_label = target_industry or target_sector or "Closest peers"
+    peer_names = ", ".join(row["Ticker"] for row in selected[:peer_count]) if selected else "None found"
+    summary = (
+        f"{len(selected)} closest peers from {group_label}: {peer_names}."
+        if selected
+        else "Not enough comparable peers were available in the current universe."
+    )
+    payload = {
+        "count": len(selected),
+        "group_label": group_label,
+        "tickers": [row["Ticker"] for row in selected],
+        "summary": summary,
+        "averages": averages,
+        "rows": selected,
+    }
+    set_cached_fetch_payload("peer_group", cache_key, payload)
+    return payload
+
+
+def build_relative_peer_benchmarks(ticker, info, db=None, settings=None):
+    peer_group = find_closest_peer_group(ticker, info, db=db, peer_count=PEER_GROUP_SIZE)
+    sector_fallback = get_sector_benchmarks(info.get("sector", "Unknown"), settings=settings)
+    averages = peer_group.get("averages", {})
+    benchmarks = {
+        "PE": averages.get("PE"),
+        "PS": averages.get("PS"),
+        "PB": averages.get("PB"),
+        "EV_EBITDA": averages.get("EV_EBITDA"),
+    }
+    usable_peer_metrics = sum(1 for value in benchmarks.values() if has_numeric_value(value))
+    if peer_group.get("count", 0) < PEER_MIN_REQUIRED or usable_peer_metrics < 2:
+        for metric_name, fallback_value in sector_fallback.items():
+            if not has_numeric_value(benchmarks.get(metric_name)):
+                benchmarks[metric_name] = fallback_value
+        source = "Peer group with sector fallback"
+    else:
+        source = "Closest peer group"
+    peer_group["benchmark_source"] = source
+    peer_group["benchmarks"] = benchmarks
+    return benchmarks, peer_group
+
+
+def classify_event_category(title):
+    lowered = str(title or "").lower()
+    if any(token in lowered for token in ["earnings", "eps", "quarter", "guidance"]):
+        return "Earnings / Guidance"
+    if any(token in lowered for token in ["dividend", "buyback", "repurchase"]):
+        return "Capital Return"
+    if any(token in lowered for token in ["acquisition", "merger", "deal"]):
+        return "M&A"
+    if any(token in lowered for token in ["filing", "10-k", "10-q", "sec"]):
+        return "Filing"
+    if any(token in lowered for token in ["debt", "liquidity", "cash flow", "margin"]):
+        return "Balance Sheet / Cash Flow"
+    return "Company Event"
+
+
+def compute_event_study(news, hist, benchmark_ticker=DEFAULT_BENCHMARK_TICKER):
+    close = pd.Series(dtype=float)
+    if hist is not None and not hist.empty and "Close" in hist.columns:
+        close = hist["Close"].dropna().astype(float)
+    if close.empty:
+        return {
+            "count": 0,
+            "avg_abnormal_1d": None,
+            "avg_abnormal_5d": None,
+            "summary": "No usable price history was available for an event study.",
+            "events": [],
+        }
+
+    benchmark_hist, _ = fetch_ticker_history_with_retry(benchmark_ticker, period="1y", attempts=2)
+    benchmark_close = (
+        trim_history_to_period(benchmark_hist, "1y")["Close"].dropna().astype(float)
+        if benchmark_hist is not None and not benchmark_hist.empty and "Close" in benchmark_hist.columns
+        else pd.Series(dtype=float)
+    )
+    aligned = pd.concat([close.rename("stock"), benchmark_close.rename("benchmark")], axis=1, join="left").ffill(limit=3)
+
+    fundamental_events = []
+    seen_titles = set()
+    for item in news or []:
+        title = extract_news_title(item)
+        lowered = title.lower()
+        if not title or title.lower() in seen_titles:
+            continue
+        if not any(keyword in lowered for keyword in FUNDAMENTAL_EVENT_KEYWORDS):
+            continue
+        seen_titles.add(title.lower())
+        published = extract_news_publish_time(item)
+        if published is None:
+            continue
+        normalized_published = datetime.datetime.combine(published.date(), datetime.time.min)
+        event_loc = aligned.index.searchsorted(normalized_published)
+        if event_loc >= len(aligned):
+            continue
+        stock_1d = safe_divide(aligned["stock"].iloc[min(event_loc + 1, len(aligned) - 1)] - aligned["stock"].iloc[event_loc], aligned["stock"].iloc[event_loc])
+        stock_5d = safe_divide(aligned["stock"].iloc[min(event_loc + 5, len(aligned) - 1)] - aligned["stock"].iloc[event_loc], aligned["stock"].iloc[event_loc])
+        bench_1d = None
+        bench_5d = None
+        if "benchmark" in aligned.columns and has_numeric_value(aligned["benchmark"].iloc[event_loc]):
+            bench_1d = safe_divide(
+                aligned["benchmark"].iloc[min(event_loc + 1, len(aligned) - 1)] - aligned["benchmark"].iloc[event_loc],
+                aligned["benchmark"].iloc[event_loc],
+            )
+            bench_5d = safe_divide(
+                aligned["benchmark"].iloc[min(event_loc + 5, len(aligned) - 1)] - aligned["benchmark"].iloc[event_loc],
+                aligned["benchmark"].iloc[event_loc],
+            )
+        fundamental_events.append(
+            {
+                "Date": format_datetime_value(published),
+                "Category": classify_event_category(title),
+                "Headline": title,
+                "Return_1D": stock_1d,
+                "Return_5D": stock_5d,
+                "Abnormal_1D": None if bench_1d is None or stock_1d is None else stock_1d - bench_1d,
+                "Abnormal_5D": None if bench_5d is None or stock_5d is None else stock_5d - bench_5d,
+            }
+        )
+        if len(fundamental_events) >= 5:
+            break
+
+    avg_abnormal_1d = None
+    avg_abnormal_5d = None
+    if fundamental_events:
+        abnormal_1d_values = [event["Abnormal_1D"] for event in fundamental_events if has_numeric_value(event.get("Abnormal_1D"))]
+        abnormal_5d_values = [event["Abnormal_5D"] for event in fundamental_events if has_numeric_value(event.get("Abnormal_5D"))]
+        if abnormal_1d_values:
+            avg_abnormal_1d = float(np.mean(abnormal_1d_values))
+        if abnormal_5d_values:
+            avg_abnormal_5d = float(np.mean(abnormal_5d_values))
+
+    if fundamental_events:
+        summary = f"{len(fundamental_events)} recent company events captured for reaction study."
+        if has_numeric_value(avg_abnormal_5d):
+            summary += f" Average 5D move versus {benchmark_ticker}: {avg_abnormal_5d * 100:.1f}%."
+    else:
+        summary = "No recent company events with usable dates were available for an event study."
+
+    return {
+        "count": len(fundamental_events),
+        "avg_abnormal_1d": avg_abnormal_1d,
+        "avg_abnormal_5d": avg_abnormal_5d,
+        "summary": summary,
+        "events": fundamental_events,
+    }
+
+
+def extract_filing_takeaways_from_text(filing_text, max_takeaways=5):
+    clean_text = strip_html_to_text(filing_text)
+    if not clean_text:
+        return []
+
+    sentences = [sentence.strip() for sentence in re.split(r"(?<=[.!?])\s+", clean_text) if sentence.strip()]
+    takeaways = []
+    seen = set()
+    for sentence in sentences:
+        lowered = sentence.lower()
+        if not any(pattern in lowered for pattern in FILING_TAKEAWAY_PATTERNS):
+            continue
+        cleaned_sentence = " ".join(sentence.split())
+        if len(cleaned_sentence) < 60:
+            continue
+        dedupe_key = cleaned_sentence.lower()[:260]
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        takeaways.append(cleaned_sentence)
+        if len(takeaways) >= max_takeaways:
+            break
+    return takeaways
 
 
 def fetch_batch_history_via_individual_tickers(tickers, period):
@@ -1319,6 +1912,25 @@ def fetch_ticker_history_with_retry(ticker, period, attempts=3):
             last_error = summarize_fetch_error(exc)
         if attempt < attempts - 1:
             time.sleep(0.5 * (attempt + 1))
+
+    alternate_periods = []
+    if str(period).lower() == "1y":
+        alternate_periods = ["18mo", "2y"]
+    for alternate_period in alternate_periods:
+        try:
+            hist = normalize_history_frame(yf.download(
+                ticker.upper(),
+                period=alternate_period,
+                auto_adjust=True,
+                progress=False,
+                threads=False,
+            ))
+            hist = trim_history_to_period(hist, period)
+            if not hist.empty:
+                set_cached_fetch_payload("ticker_history", cache_key, hist)
+                return hist, None
+        except Exception as exc:
+            last_error = summarize_fetch_error(exc)
 
     stale_history = get_cached_fetch_payload(
         "ticker_history",
@@ -1385,12 +1997,20 @@ def fetch_ticker_info_with_retry(ticker, attempts=3):
         try:
             info = normalize_info_payload(ticker_handle.info or {})
             if info:
+                fast_info = normalize_fast_info_payload(getattr(ticker_handle, "fast_info", None))
+                info = {**fast_info, **info}
                 set_cached_fetch_payload("ticker_info", cache_key, info)
                 return info, None
             alt_info = normalize_info_payload(getattr(ticker_handle, "get_info", lambda: {})() or {})
             if alt_info:
+                fast_info = normalize_fast_info_payload(getattr(ticker_handle, "fast_info", None))
+                alt_info = {**fast_info, **alt_info}
                 set_cached_fetch_payload("ticker_info", cache_key, alt_info)
                 return alt_info, None
+            fast_info = normalize_fast_info_payload(getattr(ticker_handle, "fast_info", None))
+            if fast_info:
+                set_cached_fetch_payload("ticker_info", cache_key, fast_info)
+                return fast_info, None
             last_error = f"Yahoo returned no company profile data for {ticker}."
         except Exception as exc:
             last_error = summarize_fetch_error(exc)
@@ -1420,7 +2040,12 @@ def fetch_ticker_news_with_retry(ticker, attempts=2):
             if news:
                 set_cached_fetch_payload("ticker_news", cache_key, news)
                 return news, None
-            last_error = f"Yahoo returned no recent news items for {ticker}."
+            info_fallback = normalize_info_payload(fetch_ticker_info_with_retry(ticker, attempts=1)[0] or {})
+            company_name = str(info_fallback.get("shortName") or info_fallback.get("longName") or ticker).strip()
+            if company_name:
+                last_error = f"Yahoo returned no recent news items for {ticker} ({company_name})."
+            else:
+                last_error = f"Yahoo returned no recent news items for {ticker}."
         except Exception as exc:
             last_error = summarize_fetch_error(exc)
         if attempt < attempts - 1:
@@ -2025,7 +2650,7 @@ def calculate_growth_rate_from_series(history_rows, field_name, lookback_years=3
     return None
 
 
-def build_growth_schedule(initial_growth_rate, terminal_growth_rate=DCF_TERMINAL_GROWTH_RATE, years=DCF_PROJECTION_YEARS):
+def build_growth_schedule(initial_growth_rate, terminal_growth_rate, years):
     if years <= 1:
         return [float(terminal_growth_rate)]
     return [float(value) for value in np.linspace(initial_growth_rate, terminal_growth_rate, years)]
@@ -2059,9 +2684,14 @@ def fetch_treasury_10y_yield():
     return DCF_DEFAULT_RISK_FREE_RATE, last_error or "Treasury yield fetch failed; used fallback."
 
 
-def compute_wacc_components(ticker, info, sec_dataset):
+def compute_wacc_components(ticker, info, sec_dataset, dcf_settings):
     latest = sec_dataset.get("latest", {})
-    risk_free_rate, rf_error = fetch_treasury_10y_yield()
+    manual_risk_free_rate = safe_num((dcf_settings or {}).get("risk_free_rate_override"))
+    if has_numeric_value(manual_risk_free_rate):
+        risk_free_rate = float(manual_risk_free_rate)
+        rf_error = None
+    else:
+        risk_free_rate, rf_error = fetch_treasury_10y_yield()
     beta = safe_num((info or {}).get("beta"))
     if not has_numeric_value(beta):
         beta = 1.0
@@ -2071,7 +2701,8 @@ def compute_wacc_components(ticker, info, sec_dataset):
     cash = safe_num(latest.get("Cash"))
     shares_outstanding = safe_num(latest.get("SharesOutstanding")) or safe_num((info or {}).get("sharesOutstanding"))
 
-    cost_of_equity = float(risk_free_rate + beta * DCF_DEFAULT_MARKET_RISK_PREMIUM)
+    market_risk_premium = float((dcf_settings or {}).get("market_risk_premium", DCF_DEFAULT_MARKET_RISK_PREMIUM))
+    cost_of_equity = float(risk_free_rate + beta * market_risk_premium)
 
     pretax_income = safe_num(latest.get("PretaxIncome"))
     tax_expense = safe_num(latest.get("TaxExpense"))
@@ -2087,7 +2718,9 @@ def compute_wacc_components(ticker, info, sec_dataset):
         else None
     )
     if not has_numeric_value(pre_tax_cost_of_debt) or pre_tax_cost_of_debt <= 0 or pre_tax_cost_of_debt > 0.20:
-        after_tax_cost_of_debt = DCF_DEFAULT_AFTER_TAX_COST_OF_DEBT
+        after_tax_cost_of_debt = float(
+            (dcf_settings or {}).get("default_after_tax_cost_of_debt", DCF_DEFAULT_AFTER_TAX_COST_OF_DEBT)
+        )
     else:
         after_tax_cost_of_debt = float(pre_tax_cost_of_debt * (1 - effective_tax_rate))
 
@@ -2110,7 +2743,7 @@ def compute_wacc_components(ticker, info, sec_dataset):
     return {
         "risk_free_rate": float(risk_free_rate),
         "beta": float(beta),
-        "market_risk_premium": DCF_DEFAULT_MARKET_RISK_PREMIUM,
+        "market_risk_premium": market_risk_premium,
         "cost_of_equity": cost_of_equity,
         "after_tax_cost_of_debt": after_tax_cost_of_debt,
         "equity_weight": equity_weight,
@@ -2125,7 +2758,8 @@ def compute_wacc_components(ticker, info, sec_dataset):
     }
 
 
-def determine_growth_assumptions(history_rows, guidance_payload=None):
+def determine_growth_assumptions(history_rows, dcf_settings=None):
+    dcf_settings = normalize_dcf_settings(dcf_settings or {})
     historical_fcf_growth = calculate_growth_rate_from_series(history_rows, "FreeCashFlow", lookback_years=3)
     historical_revenue_growth = calculate_growth_rate_from_series(history_rows, "Revenue", lookback_years=3)
     historical_candidates = [
@@ -2133,51 +2767,58 @@ def determine_growth_assumptions(history_rows, guidance_payload=None):
     ]
     historical_growth_estimate = float(np.mean(historical_candidates)) if historical_candidates else 0.04
 
-    guidance_rate = None
-    guidance_source = "Historical trend fallback"
-    guidance_confidence = "low"
-    guidance_summary = "Used recent SEC cash-flow and revenue history because no strong filing guidance was extracted."
+    manual_growth_rate = safe_num(dcf_settings.get("manual_growth_rate"))
+    selected_source_rate = manual_growth_rate if has_numeric_value(manual_growth_rate) else historical_growth_estimate
+    guidance_source = "Manual override" if has_numeric_value(manual_growth_rate) else "Historical trend fallback"
+    guidance_confidence = "manual" if has_numeric_value(manual_growth_rate) else "historical"
+    guidance_summary = (
+        "Used the manual growth override supplied in the DCF tab."
+        if has_numeric_value(manual_growth_rate)
+        else "Used recent SEC cash-flow and revenue history as the base growth assumption."
+    )
 
-    if isinstance(guidance_payload, dict):
-        confidence = str(guidance_payload.get("confidence", "")).strip().lower()
-        revenue_growth_pct = safe_num(guidance_payload.get("revenue_growth_pct"))
-        earnings_growth_pct = safe_num(guidance_payload.get("earnings_growth_pct"))
-        if confidence in {"medium", "high"}:
-            if has_numeric_value(revenue_growth_pct):
-                guidance_rate = float(revenue_growth_pct) / 100
-                guidance_source = "SEC filing guidance (revenue)"
-            elif has_numeric_value(earnings_growth_pct):
-                guidance_rate = float(earnings_growth_pct) / 100
-                guidance_source = "SEC filing guidance (earnings)"
-            guidance_confidence = confidence
-            if guidance_rate is not None:
-                guidance_summary = f"Used {guidance_source.lower()} with {confidence} confidence."
-
-    selected_pre_haircut = guidance_rate if guidance_rate is not None else historical_growth_estimate
+    selected_pre_haircut = selected_source_rate
     selected_growth_rate = float(
-        np.clip(selected_pre_haircut * DCF_GROWTH_HAIRCUT, DCF_MIN_GROWTH_RATE, DCF_MAX_GROWTH_RATE)
+        np.clip(
+            selected_pre_haircut * dcf_settings["growth_haircut"],
+            dcf_settings["min_growth_rate"],
+            dcf_settings["max_growth_rate"],
+        )
     )
 
     return {
         "historical_fcf_growth": historical_fcf_growth,
         "historical_revenue_growth": historical_revenue_growth,
         "historical_growth_estimate": historical_growth_estimate,
-        "guidance_rate": guidance_rate,
+        "guidance_rate": manual_growth_rate,
         "selected_growth_rate": selected_growth_rate,
         "source": guidance_source,
         "confidence": guidance_confidence,
         "summary": guidance_summary,
-        "growth_schedule": build_growth_schedule(selected_growth_rate),
+        "growth_schedule": build_growth_schedule(
+            selected_growth_rate,
+            dcf_settings["terminal_growth_rate"],
+            dcf_settings["projection_years"],
+        ),
     }
 
 
-def build_dcf_sensitivity_grid(projected_fcfs, wacc, cash, debt, shares_outstanding):
+def build_dcf_sensitivity_grid(projected_fcfs, wacc, cash, debt, shares_outstanding, dcf_settings):
     sensitivity_rows = []
     if not projected_fcfs or not has_numeric_value(shares_outstanding) or shares_outstanding <= 0:
         return sensitivity_rows
 
     wacc_range = [round(wacc + delta, 4) for delta in np.arange(-0.02, 0.0201, 0.005)]
-    terminal_growth_range = [0.015, 0.02, 0.025, 0.03, 0.035]
+    center_terminal_growth = float((dcf_settings or {}).get("terminal_growth_rate", DCF_TERMINAL_GROWTH_RATE))
+    terminal_growth_range = sorted(
+        {
+            round(max(0.0, center_terminal_growth - 0.01), 3),
+            round(max(0.0, center_terminal_growth - 0.005), 3),
+            round(center_terminal_growth, 3),
+            round(center_terminal_growth + 0.005, 3),
+            round(center_terminal_growth + 0.01, 3),
+        }
+    )
 
     for wacc_candidate in wacc_range:
         row = {"WACC": wacc_candidate}
@@ -2198,7 +2839,8 @@ def build_dcf_sensitivity_grid(projected_fcfs, wacc, cash, debt, shares_outstand
     return sensitivity_rows
 
 
-def build_sec_dcf_model(ticker, price, info):
+def build_sec_dcf_model(ticker, price, info, dcf_settings=None):
+    dcf_settings = normalize_dcf_settings(dcf_settings or {})
     cik_padded, company_title, cik_error = lookup_company_cik(ticker)
     if not cik_padded:
         return {"available": False, "error": cik_error or f"Could not find an SEC CIK for {ticker}."}
@@ -2229,16 +2871,10 @@ def build_sec_dcf_model(ticker, price, info):
     filing_text, filing_text_error = (
         fetch_sec_filing_text(cik_padded, filing_metadata) if filing_metadata else (None, submissions_error)
     )
-    guidance_excerpts = extract_guidance_excerpts_from_text(filing_text) if filing_text else []
-    anthropic_guidance, anthropic_error = extract_guidance_with_anthropic(guidance_excerpts)
-    regex_guidance = extract_regex_guidance(guidance_excerpts)
-    growth_inputs = determine_growth_assumptions(history_rows, guidance_payload=anthropic_guidance or {})
-    if growth_inputs["guidance_rate"] is None and regex_guidance:
-        growth_inputs["summary"] = (
-            "Filing language was detected, but the model kept the historical-growth fallback because no medium/high-confidence guidance extraction was available."
-        )
+    filing_takeaways = extract_filing_takeaways_from_text(filing_text) if filing_text else []
+    growth_inputs = determine_growth_assumptions(history_rows, dcf_settings=dcf_settings)
 
-    wacc_inputs = compute_wacc_components(ticker, info, sec_dataset)
+    wacc_inputs = compute_wacc_components(ticker, info, sec_dataset, dcf_settings=dcf_settings)
     shares_outstanding = safe_num(wacc_inputs.get("shares_outstanding")) or safe_num((info or {}).get("sharesOutstanding"))
     if not has_numeric_value(shares_outstanding) or shares_outstanding <= 0:
         return {
@@ -2266,7 +2902,7 @@ def build_sec_dcf_model(ticker, price, info):
             }
         )
 
-    if wacc_inputs["wacc"] <= DCF_TERMINAL_GROWTH_RATE + 0.0025:
+    if wacc_inputs["wacc"] <= dcf_settings["terminal_growth_rate"] + 0.0025:
         return {
             "available": False,
             "error": "The DCF could not be stabilized because the discount rate was too close to terminal growth.",
@@ -2274,10 +2910,10 @@ def build_sec_dcf_model(ticker, price, info):
             "company_name": companyfacts.get("entityName") or company_title or ticker,
         }
 
-    terminal_value = projected_fcfs[-1] * (1 + DCF_TERMINAL_GROWTH_RATE) / (
-        wacc_inputs["wacc"] - DCF_TERMINAL_GROWTH_RATE
+    terminal_value = projected_fcfs[-1] * (1 + dcf_settings["terminal_growth_rate"]) / (
+        wacc_inputs["wacc"] - dcf_settings["terminal_growth_rate"]
     )
-    present_value_of_terminal = terminal_value / ((1 + wacc_inputs["wacc"]) ** DCF_PROJECTION_YEARS)
+    present_value_of_terminal = terminal_value / ((1 + wacc_inputs["wacc"]) ** dcf_settings["projection_years"])
     sum_of_projected_pv = float(sum(row["PresentValue"] for row in projection_rows))
     enterprise_value = sum_of_projected_pv + present_value_of_terminal
     equity_value = enterprise_value - (wacc_inputs.get("long_term_debt") or 0) + (wacc_inputs.get("cash") or 0)
@@ -2293,8 +2929,6 @@ def build_sec_dcf_model(ticker, price, info):
         notes.append(submissions_error)
     if filing_text_error:
         notes.append(filing_text_error)
-    if anthropic_error:
-        notes.append(anthropic_error)
     notes.extend(wacc_inputs.get("notes", []))
 
     return {
@@ -2312,10 +2946,11 @@ def build_sec_dcf_model(ticker, price, info):
             wacc_inputs.get("cash"),
             wacc_inputs.get("long_term_debt"),
             shares_outstanding,
+            dcf_settings,
         ),
-        "guidance_excerpts": guidance_excerpts,
+        "guidance_excerpts": filing_takeaways,
         "guidance_summary": growth_inputs["summary"],
-        "guidance_payload": anthropic_guidance or regex_guidance or {},
+        "guidance_payload": {},
         "historical_fcf_growth": growth_inputs["historical_fcf_growth"],
         "historical_revenue_growth": growth_inputs["historical_revenue_growth"],
         "guidance_growth_rate": growth_inputs["guidance_rate"],
@@ -2324,7 +2959,7 @@ def build_sec_dcf_model(ticker, price, info):
         "growth_confidence": growth_inputs["confidence"],
         "growth_schedule": growth_inputs["growth_schedule"],
         "base_fcf": base_fcf,
-        "terminal_growth_rate": DCF_TERMINAL_GROWTH_RATE,
+        "terminal_growth_rate": dcf_settings["terminal_growth_rate"],
         "risk_free_rate": wacc_inputs["risk_free_rate"],
         "beta": wacc_inputs["beta"],
         "cost_of_equity": wacc_inputs["cost_of_equity"],
@@ -2344,6 +2979,7 @@ def build_sec_dcf_model(ticker, price, info):
         "upside": dcf_upside,
         "notes": [note for note in notes if note],
         "latest_sec_values": latest,
+        "dcf_settings": dcf_settings,
     }
 
 
@@ -2448,7 +3084,7 @@ def calculate_valuation_confidence(signal_count):
 
 
 def calculate_sentiment_conviction(sentiment_score, analyst_opinions, recommendation_key, target_mean_price, price, headline_count):
-    conviction = min(abs(float(sentiment_score)) * 10, 35)
+    conviction = min(abs(float(sentiment_score)) * 2, 10)
     if has_numeric_value(analyst_opinions):
         conviction += min(float(analyst_opinions) * 2.5, 25)
     if recommendation_key and recommendation_key != "N/A":
@@ -2793,7 +3429,7 @@ def extract_stock_profile_from_saved_row(saved_row):
     }
 
 
-def infer_stock_profile_from_snapshot(info, hist, settings=None):
+def infer_stock_profile_from_snapshot(info, hist, settings=None, db=None, ticker=None):
     active_settings = get_model_settings() if settings is None else settings
     info = info or {}
     if hist is None or hist.empty or "Close" not in hist.columns:
@@ -2805,7 +3441,12 @@ def infer_stock_profile_from_snapshot(info, hist, settings=None):
     price = float(close.iloc[-1])
     momentum_1y = (price / close.iloc[0] - 1) if len(close) > 1 else None
     sector = info.get("sector", "Unknown")
-    bench = get_sector_benchmarks(sector, active_settings)
+    bench, _ = build_relative_peer_benchmarks(
+        ticker or info.get("symbol") or "",
+        info,
+        db=db,
+        settings=active_settings,
+    )
 
     roe = safe_num(info.get("returnOnEquity"))
     margins = safe_num(info.get("profitMargins"))
@@ -3263,7 +3904,7 @@ def build_decision_notes(
     if data_quality == "Low":
         notes.append("Low data completeness reduced conviction")
     elif confidence < 60:
-        notes.append("Confidence is moderate, so the model stayed cautious")
+        notes.append("Consistency is moderate, so the model stayed cautious")
 
     deduped = []
     for note in notes:
@@ -3683,6 +4324,49 @@ def get_default_preset_name():
     return "Balanced"
 
 
+def get_default_dcf_settings():
+    return copy.deepcopy(DEFAULT_DCF_SETTINGS)
+
+
+def normalize_dcf_settings(settings):
+    normalized = get_default_dcf_settings()
+    normalized.update(settings or {})
+
+    normalized["projection_years"] = int(min(max(int(round(float(normalized["projection_years"]))), 3), 10))
+    normalized["terminal_growth_rate"] = float(min(max(float(normalized["terminal_growth_rate"]), 0.0), 0.05))
+    normalized["growth_haircut"] = float(min(max(float(normalized["growth_haircut"]), 0.5), 1.2))
+    normalized["max_growth_rate"] = float(min(max(float(normalized["max_growth_rate"]), 0.05), 0.50))
+    normalized["min_growth_rate"] = float(min(max(float(normalized["min_growth_rate"]), -0.20), 0.10))
+    if normalized["min_growth_rate"] >= normalized["max_growth_rate"]:
+        normalized["min_growth_rate"] = min(normalized["max_growth_rate"] - 0.01, -0.01)
+
+    normalized["market_risk_premium"] = float(min(max(float(normalized["market_risk_premium"]), 0.03), 0.09))
+    normalized["default_after_tax_cost_of_debt"] = float(
+        min(max(float(normalized["default_after_tax_cost_of_debt"]), 0.01), 0.10)
+    )
+
+    for optional_key in ["risk_free_rate_override", "manual_growth_rate"]:
+        optional_value = safe_num(normalized.get(optional_key))
+        if optional_value is None:
+            normalized[optional_key] = None
+        elif optional_key == "risk_free_rate_override":
+            normalized[optional_key] = float(min(max(optional_value, 0.0), 0.10))
+        else:
+            normalized[optional_key] = float(min(max(optional_value, -0.20), 0.50))
+
+    return normalized
+
+
+def get_dcf_settings():
+    if "dcf_settings" not in st.session_state:
+        st.session_state.dcf_settings = normalize_dcf_settings(get_default_dcf_settings())
+        return st.session_state.dcf_settings
+
+    normalized = normalize_dcf_settings(st.session_state.dcf_settings)
+    st.session_state.dcf_settings = normalized
+    return normalized
+
+
 def normalize_model_settings(settings):
     normalized = get_default_model_settings()
     normalized.update(settings or {})
@@ -3761,6 +4445,9 @@ def normalize_model_settings(settings):
     normalized["decision_hold_buffer"] = min(max(float(normalized["decision_hold_buffer"]), 0.0), 3.0)
     normalized["decision_min_confidence"] = min(max(float(normalized["decision_min_confidence"]), 35.0), 80.0)
     normalized["backtest_cooldown_days"] = float(min(max(float(normalized["backtest_cooldown_days"]), 0.0), 20.0))
+    normalized["backtest_transaction_cost_bps"] = float(
+        min(max(float(normalized["backtest_transaction_cost_bps"]), 0.0), 50.0)
+    )
 
     for key in ["weight_technical", "weight_fundamental", "weight_valuation", "weight_sentiment"]:
         normalized[key] = min(max(float(normalized[key]), 0.5), 1.5)
@@ -3774,6 +4461,17 @@ def serialize_model_settings(settings):
     rounded = {}
     for key, value in normalized.items():
         rounded[key] = round(float(value), 6) if isinstance(value, float) else value
+    return json.dumps(rounded, sort_keys=True)
+
+
+def serialize_dcf_settings(settings):
+    normalized = normalize_dcf_settings(settings)
+    rounded = {}
+    for key, value in normalized.items():
+        if isinstance(value, float):
+            rounded[key] = round(value, 6)
+        else:
+            rounded[key] = value
     return json.dumps(rounded, sort_keys=True)
 
 
@@ -3944,6 +4642,10 @@ def prepare_analysis_dataframe(df, settings=None):
         enriched["Decision_Notes"] = enriched["Decision_Notes"].fillna("")
     if "Decision_Confidence" not in enriched.columns:
         enriched["Decision_Confidence"] = np.nan
+    if "Industry" not in enriched.columns:
+        enriched["Industry"] = "Unknown"
+    else:
+        enriched["Industry"] = enriched["Industry"].fillna("Unknown")
     if "Stock_Type" not in enriched.columns:
         enriched["Stock_Type"] = "Legacy"
     else:
@@ -3966,10 +4668,31 @@ def prepare_analysis_dataframe(df, settings=None):
         enriched["Engine_Weight_Profile"] = ""
     else:
         enriched["Engine_Weight_Profile"] = enriched["Engine_Weight_Profile"].fillna("")
+    if "Peer_Count" not in enriched.columns:
+        enriched["Peer_Count"] = np.nan
+    if "Peer_Group_Label" not in enriched.columns:
+        enriched["Peer_Group_Label"] = ""
+    else:
+        enriched["Peer_Group_Label"] = enriched["Peer_Group_Label"].fillna("")
+    if "Peer_Tickers" not in enriched.columns:
+        enriched["Peer_Tickers"] = ""
+    else:
+        enriched["Peer_Tickers"] = enriched["Peer_Tickers"].fillna("")
+    if "Peer_Summary" not in enriched.columns:
+        enriched["Peer_Summary"] = ""
+    else:
+        enriched["Peer_Summary"] = enriched["Peer_Summary"].fillna("")
+    if "Peer_Comparison" not in enriched.columns:
+        enriched["Peer_Comparison"] = ""
+    else:
+        enriched["Peer_Comparison"] = enriched["Peer_Comparison"].fillna("")
     if "Risk_Flags" not in enriched.columns:
         enriched["Risk_Flags"] = ""
     else:
         enriched["Risk_Flags"] = enriched["Risk_Flags"].fillna("")
+    for metric_column in ["Relative_Strength_3M", "Relative_Strength_6M", "Relative_Strength_1Y"]:
+        if metric_column not in enriched.columns:
+            enriched[metric_column] = np.nan
     if "DCF_Source" not in enriched.columns:
         enriched["DCF_Source"] = "Unavailable"
     else:
@@ -3982,11 +4705,43 @@ def prepare_analysis_dataframe(df, settings=None):
         enriched["DCF_Last_Updated"] = ""
     else:
         enriched["DCF_Last_Updated"] = enriched["DCF_Last_Updated"].fillna("")
-    for text_column in ["DCF_History", "DCF_Projection", "DCF_Sensitivity", "DCF_Guidance_Excerpts", "DCF_Guidance_Summary"]:
+    if "DCF_Assumptions" not in enriched.columns:
+        enriched["DCF_Assumptions"] = ""
+    else:
+        enriched["DCF_Assumptions"] = enriched["DCF_Assumptions"].fillna("")
+    for text_column in [
+        "DCF_History",
+        "DCF_Projection",
+        "DCF_Sensitivity",
+        "DCF_Guidance_Excerpts",
+        "DCF_Guidance_Summary",
+    ]:
         if text_column not in enriched.columns:
             enriched[text_column] = ""
         else:
             enriched[text_column] = enriched[text_column].fillna("")
+    if "Sentiment_Summary" not in enriched.columns:
+        enriched["Sentiment_Summary"] = ""
+    else:
+        enriched["Sentiment_Summary"] = enriched["Sentiment_Summary"].fillna("")
+    if "Event_Study_Count" not in enriched.columns:
+        enriched["Event_Study_Count"] = np.nan
+    if "Event_Study_Avg_Abnormal_1D" not in enriched.columns:
+        enriched["Event_Study_Avg_Abnormal_1D"] = np.nan
+    if "Event_Study_Avg_Abnormal_5D" not in enriched.columns:
+        enriched["Event_Study_Avg_Abnormal_5D"] = np.nan
+    if "Event_Study_Summary" not in enriched.columns:
+        enriched["Event_Study_Summary"] = ""
+    else:
+        enriched["Event_Study_Summary"] = enriched["Event_Study_Summary"].fillna("")
+    if "Event_Study_Events" not in enriched.columns:
+        enriched["Event_Study_Events"] = ""
+    else:
+        enriched["Event_Study_Events"] = enriched["Event_Study_Events"].fillna("")
+    if "Last_Data_Update" not in enriched.columns:
+        enriched["Last_Data_Update"] = ""
+    else:
+        enriched["Last_Data_Update"] = enriched["Last_Data_Update"].fillna("")
 
     if (
         "Data_Completeness" not in enriched.columns
@@ -4117,7 +4872,7 @@ def run_sensitivity_analysis(analyst, ticker, settings=None):
                 "Fundamental": record["Score_Fund"],
                 "Valuation": record["Score_Val"],
                 "Sentiment": record["Score_Sentiment"],
-                "Confidence": record.get("Decision_Confidence"),
+                "Consistency": record.get("Decision_Confidence"),
                 "Regime": record.get("Market_Regime"),
                 "Assumption Drift": calculate_assumption_drift(scenario_settings),
                 "Fingerprint": record["Assumption_Fingerprint"],
@@ -4275,7 +5030,12 @@ def compute_technical_backtest(hist, settings=None, stock_profile=None):
     analysis["Signal"] = analysis["Tech Score"].apply(score_to_signal)
     analysis["Position"] = derive_backtest_positions(analysis, active_settings, stock_profile=stock_profile)
     analysis["Benchmark Return"] = analysis["Close"].pct_change().fillna(0.0)
-    analysis["Strategy Return"] = analysis["Position"].shift(1).fillna(0.0) * analysis["Benchmark Return"]
+    trade_points = analysis["Position"].diff().fillna(analysis["Position"])
+    trading_cost_rate = active_settings.get("backtest_transaction_cost_bps", 0.0) / 10000
+    analysis["Trading Cost"] = trade_points.abs() * trading_cost_rate
+    analysis["Strategy Return"] = (
+        analysis["Position"].shift(1).fillna(0.0) * analysis["Benchmark Return"] - analysis["Trading Cost"]
+    )
     analysis["Benchmark Equity"] = (1 + analysis["Benchmark Return"]).cumprod()
     analysis["Strategy Equity"] = (1 + analysis["Strategy Return"]).cumprod()
     strategy_total_return = analysis["Strategy Equity"].iloc[-1] - 1
@@ -4296,7 +5056,6 @@ def compute_technical_backtest(hist, settings=None, stock_profile=None):
     strategy_drawdown = analysis["Strategy Equity"] / analysis["Strategy Equity"].cummax() - 1
     benchmark_drawdown = analysis["Benchmark Equity"] / analysis["Benchmark Equity"].cummax() - 1
 
-    trade_points = analysis["Position"].diff().fillna(analysis["Position"])
     trade_log = pd.DataFrame(
         {
             "Date": analysis.index,
@@ -4314,6 +5073,7 @@ def compute_technical_backtest(hist, settings=None, stock_profile=None):
             "Signal": analysis["Signal"],
             "Tech Score": analysis["Tech Score"],
             "Position": analysis["Position"],
+            "Trading Cost": analysis["Trading Cost"],
         }
     ).dropna(subset=["Action"])
     closed_trades_df, trade_summary = summarize_backtest_trades(analysis)
@@ -4330,6 +5090,7 @@ def compute_technical_backtest(hist, settings=None, stock_profile=None):
         "Benchmark Sharpe": safe_divide(benchmark_ann_return, benchmark_vol),
         "Strategy Max Drawdown": strategy_drawdown.min(),
         "Benchmark Max Drawdown": benchmark_drawdown.min(),
+        "Trading Costs": analysis["Trading Cost"].sum(),
         "Average Exposure": average_exposure,
         "Upside Capture": upside_capture,
         "Position Changes": len(trade_log),
@@ -4586,88 +5347,35 @@ class StockAnalyst:
         return hist, info, news
 
     def analyze_sentiment(self, info, news, price, settings=None):
-        settings = get_model_settings() if settings is None else settings
         info = info or {}
         news = news or []
-        score = 0
-        headlines = []
-        seen_titles = set()
-        for idx, item in enumerate(news[:10]):
-            title = (item.get("title") or "").strip()
-            normalized_title = title.lower()
-            if not title or normalized_title in seen_titles:
-                continue
-            seen_titles.add(normalized_title)
-            headlines.append(title)
-            tokens = extract_sentiment_tokens(title)
-            positive_hits = len(tokens & POSITIVE_SENTIMENT_TERMS)
-            negative_hits = len(tokens & NEGATIVE_SENTIMENT_TERMS)
-            headline_score = min(positive_hits, 2) - min(negative_hits, 2)
-            if headline_score != 0 and idx < 3:
-                headline_score += 1 if headline_score > 0 else -1
-            score += headline_score
-
-        score = max(min(score, 6), -6)
-
         recommendation_key = (info.get("recommendationKey") or "").lower()
         analyst_opinions = safe_num(info.get("numberOfAnalystOpinions"))
         target_mean_price = safe_num(info.get("targetMeanPrice"))
-        recommendation_mean = safe_num(info.get("recommendationMean"))
-
-        if analyst_opinions is not None and analyst_opinions >= 15:
-            analyst_scale = 1.0
-        elif analyst_opinions is not None and analyst_opinions >= 5:
-            analyst_scale = 0.75
-        elif analyst_opinions is not None and analyst_opinions >= 1:
-            analyst_scale = 0.5
-        elif recommendation_key:
-            analyst_scale = 0.5
-        else:
-            analyst_scale = 0.0
-
-        analyst_points = 0
-        if recommendation_key == "strong_buy":
-            analyst_points = int(round((settings["sentiment_analyst_boost"] + 1) * analyst_scale))
-        elif recommendation_key in {"buy", "outperform", "overweight"}:
-            analyst_points = int(round(settings["sentiment_analyst_boost"] * analyst_scale))
-        elif recommendation_key in {"underperform", "underweight", "sell", "strong_sell"}:
-            base_penalty = settings["sentiment_analyst_boost"] + (1 if recommendation_key == "strong_sell" else 0)
-            analyst_points = -int(round(base_penalty * analyst_scale))
-        elif recommendation_mean is not None:
-            if recommendation_mean <= 1.8:
-                analyst_points = 1
-            elif recommendation_mean >= 3.2:
-                analyst_points = -1
-
-        score += analyst_points
-
-        if has_numeric_value(target_mean_price) and has_numeric_value(price) and price > 0:
-            upside = (target_mean_price - price) / price
-            strong_target_points = 2 if analyst_opinions is None or analyst_opinions >= 3 else 1
-            moderate_target_points = 1 if analyst_opinions is None or analyst_opinions >= 3 else 0
-            if upside > settings["sentiment_upside_high"]:
-                score += strong_target_points
-            elif upside > settings["sentiment_upside_mid"]:
-                score += moderate_target_points
-            elif upside < -settings["sentiment_downside_high"]:
-                score -= strong_target_points
-            elif upside < -settings["sentiment_downside_mid"]:
-                score -= moderate_target_points
-
-        score = int(max(min(round(score), 8), -8))
+        headlines = build_news_context_lines(news, max_items=6)
+        context_parts = []
+        if recommendation_key:
+            context_parts.append(f"Analyst view: {recommendation_key.upper()}")
+        if has_numeric_value(analyst_opinions):
+            context_parts.append(f"Analyst count: {int(round(analyst_opinions))}")
+        if has_numeric_value(target_mean_price):
+            context_parts.append(f"Target mean: ${target_mean_price:,.2f}")
+        context_parts.extend(headlines)
+        summary = " | ".join(context_parts[:6]) if context_parts else "No recent news or analyst context was available."
 
         return {
-            "score": score,
-            "verdict": score_to_sentiment(score),
+            "score": 0,
+            "verdict": "CONTEXT ONLY",
             "recommendation_key": recommendation_key.upper() if recommendation_key else "N/A",
             "analyst_opinions": analyst_opinions,
             "target_mean_price": target_mean_price,
             "headline_count": len(headlines),
-            "summary": " | ".join(headlines[:3]) if headlines else "No recent headlines available.",
+            "summary": summary,
         }
 
-    def build_record_from_market_data(self, ticker, hist, info, news, settings=None, compute_dcf=False):
+    def build_record_from_market_data(self, ticker, hist, info, news, settings=None, compute_dcf=False, dcf_settings=None):
         settings = get_model_settings() if settings is None else settings
+        dcf_settings = get_dcf_settings() if dcf_settings is None else normalize_dcf_settings(dcf_settings)
         ticker = ticker.strip().upper()
         info = info or {}
         news = news or []
@@ -4694,11 +5402,30 @@ class StockAnalyst:
         sma200 = safe_num(close.rolling(200, min_periods=200).mean().iloc[-1])
         momentum_1m = (price / close.iloc[-22] - 1) if len(close) > 22 else None
         momentum_1y = (price / close.iloc[0] - 1) if len(close) > 1 else None
+        benchmark_hist, _ = fetch_ticker_history_with_retry(DEFAULT_BENCHMARK_TICKER, period="1y", attempts=2)
+        benchmark_close = (
+            benchmark_hist["Close"].dropna().astype(float)
+            if benchmark_hist is not None and not benchmark_hist.empty and "Close" in benchmark_hist.columns
+            else pd.Series(dtype=float)
+        )
+        relative_strength_metrics = {
+            label: compute_relative_strength(close, benchmark_close, window)
+            for label, window in BENCHMARK_RELATIVE_STRENGTH_WINDOWS.items()
+        }
         volatility_1m = calculate_realized_volatility(close, 22)
         volatility_1y = calculate_realized_volatility(close, 252)
         momentum_1m_risk_adjusted = safe_divide(momentum_1m, (volatility_1m / np.sqrt(12)) if has_numeric_value(volatility_1m) else None)
         range_position_52w, distance_52w_high, distance_52w_low = calculate_52w_context(close)
         trend_strength = calculate_trend_strength(price, sma50, sma200, momentum_1y)
+        latest_price_timestamp = close.index[-1] if len(close.index) else None
+        latest_news_timestamp = max(
+            [extract_news_publish_time(item) for item in news if extract_news_publish_time(item) is not None],
+            default=None,
+        )
+        latest_data_timestamp = max(
+            [stamp for stamp in [latest_price_timestamp, latest_news_timestamp] if stamp is not None],
+            default=latest_price_timestamp,
+        )
         trend_tolerance = settings["tech_trend_tolerance"]
         extension_limit = settings["tech_extension_limit"]
 
@@ -4747,6 +5474,12 @@ class StockAnalyst:
             if momentum_1y > long_term_momentum_threshold:
                 tech_score += 1
             elif momentum_1y < -long_term_momentum_threshold:
+                tech_score -= 1
+        relative_strength_6m = relative_strength_metrics.get("Relative_Strength_6M")
+        if has_numeric_value(relative_strength_6m):
+            if relative_strength_6m >= 0.05:
+                tech_score += 1
+            elif relative_strength_6m <= -0.05:
                 tech_score -= 1
         bullish_trend = has_bullish_trend(price, sma50, sma200, momentum_1y)
         bearish_trend = has_bearish_trend(price, sma50, sma200, momentum_1y)
@@ -4844,7 +5577,8 @@ class StockAnalyst:
 
         v_score = 0
         sector = info.get("sector", "Unknown")
-        bench = get_sector_benchmarks(sector, settings)
+        industry = info.get("industry", "Unknown")
+        bench, peer_group = build_relative_peer_benchmarks(ticker, info, db=self.db, settings=settings)
         pe = safe_num(info.get("trailingPE"))
         forward_pe = safe_num(info.get("forwardPE"))
         peg_ratio = safe_num(info.get("pegRatio"))
@@ -4895,7 +5629,7 @@ class StockAnalyst:
         dcf_upside = None
         dcf_last_updated = None
         if compute_dcf:
-            dcf_result = build_sec_dcf_model(ticker, price, info)
+            dcf_result = build_sec_dcf_model(ticker, price, info, dcf_settings=dcf_settings)
             if dcf_result.get("available") and has_numeric_value(dcf_result.get("intrinsic_value_per_share")):
                 dcf_intrinsic_value = safe_num(dcf_result.get("intrinsic_value_per_share"))
                 dcf_upside = safe_num(dcf_result.get("upside"))
@@ -4929,6 +5663,7 @@ class StockAnalyst:
             price,
             sentiment["headline_count"],
         )
+        event_study = compute_event_study(news, hist, benchmark_ticker=DEFAULT_BENCHMARK_TICKER)
         stock_profile = classify_stock_profile(
             sector=sector,
             price=price,
@@ -4964,10 +5699,13 @@ class StockAnalyst:
             stock_profile=stock_profile,
         )
         engine_weights, engine_weight_profile = get_type_adjusted_engine_weights(stock_profile, settings)
-        effective_sentiment_score = sentiment["score"] * (0.40 + 0.60 * sentiment_conviction / 100)
+        effective_sentiment_score = 0.0
         effective_tech_score = tech_score
         if has_numeric_value(trend_strength):
             effective_tech_score += np.clip(trend_strength / 50, -1.0, 1.0)
+        relative_strength_1y = relative_strength_metrics.get("Relative_Strength_1Y")
+        if has_numeric_value(relative_strength_1y):
+            effective_tech_score += np.clip(relative_strength_1y * 4, -1.0, 1.0)
         effective_f_score = f_score
         if quality_score >= 3:
             effective_f_score += 0.5
@@ -4975,6 +5713,8 @@ class StockAnalyst:
             effective_f_score -= 0.5
         if stock_profile["primary_type"] in {"Dividend / Income Stocks", "Defensive Stocks"}:
             effective_f_score += np.clip(dividend_safety_score / 4, -0.5, 1.0)
+        if has_numeric_value(event_study.get("avg_abnormal_5d")):
+            effective_f_score += np.clip(event_study["avg_abnormal_5d"] * 10, -0.75, 0.75)
         base_overall_score = (
             effective_tech_score * engine_weights["technical"]
             + effective_f_score * engine_weights["fundamental"]
@@ -5016,16 +5756,25 @@ class StockAnalyst:
             "Score_Val": v_score,
             "Score_Sentiment": sentiment["score"],
             "Sector": sector,
+            "Industry": industry,
             "Stock_Type": stock_profile["primary_type"],
             "Cap_Bucket": stock_profile["cap_bucket"],
             "Style_Tags": stock_profile["style_tags"],
             "Type_Strategy": stock_profile["type_strategy"],
             "Type_Confidence": stock_profile["type_confidence"],
             "Engine_Weight_Profile": engine_weight_profile,
+            "Peer_Count": peer_group.get("count"),
+            "Peer_Group_Label": peer_group.get("group_label"),
+            "Peer_Tickers": ", ".join(peer_group.get("tickers", [])),
+            "Peer_Summary": peer_group.get("summary"),
+            "Peer_Comparison": json.dumps(peer_group),
             "Market_Cap": market_cap,
             "Dividend_Yield": dividend_yield,
             "Payout_Ratio": payout_ratio,
             "Equity_Beta": equity_beta,
+            "Relative_Strength_3M": relative_strength_metrics.get("Relative_Strength_3M"),
+            "Relative_Strength_6M": relative_strength_metrics.get("Relative_Strength_6M"),
+            "Relative_Strength_1Y": relative_strength_metrics.get("Relative_Strength_1Y"),
             "Trend_Strength": trend_strength,
             "Range_Position_52W": range_position_52w,
             "Distance_52W_High": distance_52w_high,
@@ -5074,6 +5823,7 @@ class StockAnalyst:
             "DCF_Filing_Form": dcf_result.get("filing_form"),
             "DCF_Filing_Date": dcf_result.get("filing_date"),
             "DCF_Last_Updated": dcf_last_updated,
+            "DCF_Assumptions": serialize_dcf_settings(dcf_settings),
             "Profit_Margins": margins,
             "ROE": roe,
             "Debt_to_Equity": debt_eq,
@@ -5084,6 +5834,11 @@ class StockAnalyst:
             "Analyst_Opinions": sentiment["analyst_opinions"],
             "Sentiment_Headline_Count": sentiment["headline_count"],
             "Sentiment_Summary": sentiment["summary"],
+            "Event_Study_Count": event_study.get("count"),
+            "Event_Study_Avg_Abnormal_1D": event_study.get("avg_abnormal_1d"),
+            "Event_Study_Avg_Abnormal_5D": event_study.get("avg_abnormal_5d"),
+            "Event_Study_Summary": event_study.get("summary"),
+            "Event_Study_Events": json.dumps(event_study.get("events", [])),
             "RSI": current_rsi,
             "MACD_Value": current_macd,
             "MACD_Signal": macd_signal,
@@ -5094,6 +5849,7 @@ class StockAnalyst:
             ),
             "Momentum_1M": momentum_1m,
             "Momentum_1Y": momentum_1y,
+            "Last_Data_Update": format_datetime_value(latest_data_timestamp),
             "Last_Updated": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
             "Overall_Score": overall_score,
             "Assumption_Profile": assumption_profile,
@@ -5167,7 +5923,7 @@ class StockAnalyst:
         record["Data_Quality"] = quality_label
         return record
 
-    def analyze(self, ticker, settings=None, persist=True, preloaded=None, compute_dcf=False):
+    def analyze(self, ticker, settings=None, persist=True, preloaded=None, compute_dcf=False, dcf_settings=None):
         active_settings = get_model_settings() if settings is None else settings
         ticker = ticker.strip().upper()
         self.last_error = None
@@ -5188,6 +5944,7 @@ class StockAnalyst:
             news,
             settings=active_settings,
             compute_dcf=compute_dcf,
+            dcf_settings=dcf_settings,
         )
         if record is None and self.last_error is None:
             self.last_error = (
@@ -5631,7 +6388,13 @@ with stock_tab:
         df = prepare_analysis_dataframe(db.get_analysis(txt_input.upper()))
         if not df.empty:
             row = df.iloc[0]
-            sector_bench = get_sector_benchmarks(row["Sector"], model_settings)
+            peer_comparison = safe_json_loads(row.get("Peer_Comparison"), default={})
+            peer_bench = peer_comparison.get("benchmarks", {}) if isinstance(peer_comparison, dict) else {}
+            if not peer_bench:
+                peer_bench = get_sector_benchmarks(row["Sector"], model_settings)
+            peer_rows = pd.DataFrame(peer_comparison.get("rows", [])) if isinstance(peer_comparison, dict) else pd.DataFrame()
+            event_study_events = pd.DataFrame(safe_json_loads(row.get("Event_Study_Events"), default=[]))
+            dcf_assumptions = safe_json_loads(row.get("DCF_Assumptions"), default={})
             dcf_feedback = st.session_state.get("dcf_action_feedback")
             if isinstance(dcf_feedback, dict) and dcf_feedback.get("ticker") == str(row["Ticker"]):
                 if dcf_feedback.get("kind") == "success":
@@ -5651,7 +6414,10 @@ with stock_tab:
                 )
                 st.markdown(f"## {verdict_text}")
             with col_main_3:
-                st.metric("Sector", str(row["Sector"]))
+                st.metric("Last Data Update", str(row.get("Last_Data_Update") or "Unknown"))
+            st.caption(
+                f"Sector: {row.get('Sector', 'Unknown')} | Industry: {row.get('Industry', 'Unknown')}"
+            )
 
             render_analysis_signal_cards(
                 [
@@ -5714,15 +6480,15 @@ with stock_tab:
                     {
                         "label": "Valuation",
                         "value": format_int(row["Score_Val"]),
-                        "note": "How cheap or expensive the stock looks.",
+                        "note": "How cheap or expensive the stock looks versus its closest peer set.",
                         "tone": tone_from_metric_threshold(row["Score_Val"], good_min=1, bad_max=-1),
                         "help": ANALYSIS_HELP_TEXT["Valuation"],
                     },
                     {
-                        "label": "Sentiment",
-                        "value": format_int(row["Score_Sentiment"]),
-                        "note": "News tone, analyst views, and target-price signals.",
-                        "tone": tone_from_metric_threshold(row["Score_Sentiment"], good_min=1, bad_max=-1),
+                        "label": "Sentiment Context",
+                        "value": format_int(row["Sentiment_Headline_Count"]),
+                        "note": "Context only: recent headlines and analyst metadata with no directional score applied.",
+                        "tone": "neutral",
                         "help": ANALYSIS_HELP_TEXT["Sentiment"],
                     },
                     {
@@ -5767,11 +6533,11 @@ with stock_tab:
                         "help": ANALYSIS_HELP_TEXT["Missing Metrics"],
                     },
                     {
-                        "label": "Confidence",
+                        "label": "Consistency",
                         "value": format_value(row.get("Decision_Confidence"), "{:,.0f}", "/100"),
-                        "note": "How strongly the model trusts its final call.",
+                        "note": "How consistently the model's signals lined up on this run.",
                         "tone": tone_from_metric_threshold(row.get("Decision_Confidence"), good_min=70, bad_max=45),
-                        "help": ANALYSIS_HELP_TEXT["Confidence"],
+                        "help": ANALYSIS_HELP_TEXT["Consistency"],
                     },
                     {
                         "label": "Regime",
@@ -5815,10 +6581,10 @@ with stock_tab:
                         "help": ANALYSIS_HELP_TEXT["Valuation Confidence"],
                     },
                     {
-                        "label": "Sentiment Conviction",
+                        "label": "Context Depth",
                         "value": format_value(row.get("Sentiment_Conviction"), "{:,.0f}", "/100"),
-                        "note": "How strong and well-supported the sentiment read looks.",
-                        "tone": tone_from_metric_threshold(row.get("Sentiment_Conviction"), good_min=65, bad_max=35),
+                        "note": "How much analyst and headline context was available for this company snapshot.",
+                        "tone": "neutral",
                         "help": ANALYSIS_HELP_TEXT["Sentiment Conviction"],
                     },
                 ],
@@ -5835,75 +6601,30 @@ with stock_tab:
                     "This saved analysis was generated under a different assumption set than the one currently active in Options."
                 )
 
-            tab_val, tab_fund, tab_tech, tab_sent = st.tabs(
-                ["Valuation Engine", "Fundamental Engine", "Technical Engine", "Sentiment Engine"]
+            tab_val, tab_fund, tab_tech, tab_sent, tab_dcf = st.tabs(
+                ["Valuation Engine", "Fundamental Engine", "Technical Engine", "Sentiment Context", "DCF Lab"]
             )
 
             with tab_val:
                 c_v1, c_v2 = st.columns([1, 2])
                 with c_v1:
                     graham_discount = row.get("Graham Discount")
-                    dcf_intrinsic_value = safe_num(row.get("DCF_Intrinsic_Value"))
-                    dcf_upside = safe_num(row.get("DCF Upside"))
-                    dcf_snapshot_exists = has_dcf_snapshot(row)
-                    dcf_download_bytes = build_dcf_download_bytes(row) if dcf_snapshot_exists else b""
-                    dcf_last_updated = str(row.get("DCF_Last_Updated") or row.get("Last_Updated") or "").strip()
                     st.markdown(f"### Verdict: **{row['Verdict_Valuation']}**")
-                    st.caption("This view blends market multiples, Graham-style value checks, and an optional manual five-year DCF built from SEC filing history when you create it.")
-                    dcf_action_col_1, dcf_action_col_2 = st.columns(2)
-                    with dcf_action_col_1:
-                        create_dcf_label = "Refresh DCF" if dcf_snapshot_exists else "Create DCF"
-                        if st.button(
-                            create_dcf_label,
-                            key=f"create_dcf_{row['Ticker']}",
-                            width="stretch",
-                        ):
-                            with st.spinner(f"Building DCF model for {row['Ticker']}..."):
-                                dcf_record = bot.analyze(
-                                    str(row["Ticker"]),
-                                    settings=model_settings,
-                                    persist=False,
-                                    compute_dcf=True,
-                                )
-                            if not dcf_record:
-                                st.error(bot.last_error or "Unable to build a DCF for this ticker right now.")
-                            elif has_dcf_snapshot(dcf_record):
-                                db.save_analysis(dcf_record)
-                                st.session_state["dcf_action_feedback"] = {
-                                    "ticker": str(row["Ticker"]),
-                                    "kind": "success",
-                                    "message": f"Saved a fresh manual DCF snapshot for {row['Ticker']}.",
-                                }
-                                st.rerun()
-                            else:
-                                st.warning(
-                                    str(
-                                        dcf_record.get("DCF_Guidance_Summary")
-                                        or "A manual DCF could not be built from the available SEC filing data."
-                                    )
-                                )
-                    with dcf_action_col_2:
-                        st.download_button(
-                            "Download DCF",
-                            data=dcf_download_bytes,
-                            file_name=f"{row['Ticker']}_dcf.json",
-                            mime="application/json",
-                            disabled=not dcf_snapshot_exists,
-                            key=f"download_dcf_{row['Ticker']}",
-                            width="stretch",
-                        )
-                    if dcf_snapshot_exists:
-                        st.caption(
-                            f"Manual DCF snapshot last created: {dcf_last_updated} ({format_age(dcf_last_updated)})."
-                        )
-                    else:
-                        st.caption("DCF is manual now. Click Create DCF to fetch SEC filing data and build the five-year cash-flow model for this ticker.")
+                    st.caption(
+                        "This view compares the stock against a small peer set first, then falls back to sector benchmarks only when the peer data is too thin."
+                    )
+                    if row.get("Peer_Summary"):
+                        st.caption(str(row.get("Peer_Summary")))
                     render_analysis_signal_cards(
                         [
                             {
                                 "label": "Graham Fair Value",
-                                "value": f"${row['Graham_Number']:,.2f}",
-                                "note": f"Compared with today's price, the gap is ${row['Price'] - row['Graham_Number']:,.2f}.",
+                                "value": f"${row['Graham_Number']:,.2f}" if has_numeric_value(row["Graham_Number"]) and row["Graham_Number"] > 0 else "N/A",
+                                "note": (
+                                    f"Compared with today's price, the gap is ${row['Price'] - row['Graham_Number']:,.2f}."
+                                    if has_numeric_value(row["Graham_Number"]) and row["Graham_Number"] > 0
+                                    else "Only available when positive EPS and book value are both present."
+                                ),
                                 "tone": tone_from_metric_threshold(graham_discount, good_min=0.0, bad_max=-0.15),
                                 "help": ANALYSIS_HELP_TEXT["Graham Fair Value"],
                             },
@@ -5915,38 +6636,31 @@ with stock_tab:
                                 "help": ANALYSIS_HELP_TEXT["Graham Discount"],
                             },
                             {
-                                "label": "DCF Fair Value",
-                                "value": f"${dcf_intrinsic_value:,.2f}" if has_numeric_value(dcf_intrinsic_value) else "N/A",
-                                "note": "A five-year cash-flow estimate using SEC filing history and a terminal value.",
-                                "tone": tone_from_metric_threshold(dcf_upside, good_min=0.10, bad_max=-0.10),
-                                "help": ANALYSIS_HELP_TEXT["DCF Fair Value"],
-                            },
-                            {
-                                "label": "DCF Upside",
-                                "value": format_percent(dcf_upside),
-                                "note": "Positive means the DCF points above the current stock price.",
-                                "tone": tone_from_metric_threshold(dcf_upside, good_min=0.10, bad_max=-0.10),
-                                "help": ANALYSIS_HELP_TEXT["DCF Upside"],
-                            },
-                            {
-                                "label": "DCF WACC",
-                                "value": format_percent(row.get("DCF_WACC")),
-                                "note": "The DCF discount rate used to value the next five fiscal years.",
+                                "label": "Peer Group",
+                                "value": str(row.get("Peer_Count") or 0),
+                                "note": str(row.get("Peer_Group_Label") or "Closest comparable companies"),
                                 "tone": "neutral",
-                                "help": ANALYSIS_HELP_TEXT["DCF WACC"],
+                                "help": ANALYSIS_HELP_TEXT["Peer Group"],
                             },
                             {
-                                "label": "DCF Source",
-                                "value": str(row.get("DCF_Source", "Unavailable")),
-                                "note": str(row.get("DCF_Guidance_Summary") or "This explains where the DCF growth assumption came from."),
+                                "label": "Peer Summary",
+                                "value": str(row.get("Peer_Group_Label") or "Fallback"),
+                                "note": str(peer_comparison.get("benchmark_source") or "Closest peer group"),
                                 "tone": "neutral",
-                                "help": ANALYSIS_HELP_TEXT["DCF Source"],
+                                "help": ANALYSIS_HELP_TEXT["Peer Summary"],
                             },
                             {
-                                "label": "Valuation Confidence",
+                                "label": "Relative Strength",
+                                "value": format_percent(row.get("Relative_Strength_6M")),
+                                "note": f"Six-month return relative to {DEFAULT_BENCHMARK_TICKER}.",
+                                "tone": tone_from_metric_threshold(row.get("Relative_Strength_6M"), good_min=0.03, bad_max=-0.03),
+                                "help": ANALYSIS_HELP_TEXT["Relative Strength"],
+                            },
+                            {
+                                "label": "Valuation Consistency",
                                 "value": format_value(row.get("Valuation_Confidence"), "{:,.0f}", "/100"),
-                                "note": "Higher means the valuation read is supported by more usable data.",
-                                "tone": tone_from_metric_threshold(row.get("Valuation_Confidence"), good_min=70, bad_max=40),
+                                "note": "Higher means the relative valuation read had more usable comparison points.",
+                                "tone": "neutral",
                                 "help": ANALYSIS_HELP_TEXT["Valuation Confidence"],
                             },
                         ],
@@ -5958,17 +6672,17 @@ with stock_tab:
                             {
                                 "metric": "P/E Ratio",
                                 "value": format_value(row["PE_Ratio"]),
-                                "reference": format_value(sector_bench["PE"]),
-                                "status": "Cheap" if tone_from_relative_multiple(row["PE_Ratio"], sector_bench["PE"]) == "good" else "Rich" if tone_from_relative_multiple(row["PE_Ratio"], sector_bench["PE"]) == "bad" else "Fair",
-                                "tone": tone_from_relative_multiple(row["PE_Ratio"], sector_bench["PE"]),
+                                "reference": format_value(peer_bench.get("PE")),
+                                "status": "Cheap" if tone_from_relative_multiple(row["PE_Ratio"], peer_bench.get("PE")) == "good" else "Rich" if tone_from_relative_multiple(row["PE_Ratio"], peer_bench.get("PE")) == "bad" else "Fair",
+                                "tone": tone_from_relative_multiple(row["PE_Ratio"], peer_bench.get("PE")),
                                 "help": ANALYSIS_HELP_TEXT["P/E Ratio"],
                             },
                             {
                                 "metric": "Forward P/E",
                                 "value": format_value(row["Forward_PE"]),
-                                "reference": format_value(sector_bench["PE"]),
-                                "status": "Cheap" if tone_from_relative_multiple(row["Forward_PE"], sector_bench["PE"]) == "good" else "Rich" if tone_from_relative_multiple(row["Forward_PE"], sector_bench["PE"]) == "bad" else "Fair",
-                                "tone": tone_from_relative_multiple(row["Forward_PE"], sector_bench["PE"]),
+                                "reference": format_value(peer_bench.get("PE")),
+                                "status": "Cheap" if tone_from_relative_multiple(row["Forward_PE"], peer_bench.get("PE")) == "good" else "Rich" if tone_from_relative_multiple(row["Forward_PE"], peer_bench.get("PE")) == "bad" else "Fair",
+                                "tone": tone_from_relative_multiple(row["Forward_PE"], peer_bench.get("PE")),
                                 "help": ANALYSIS_HELP_TEXT["Forward P/E"],
                             },
                             {
@@ -5982,172 +6696,111 @@ with stock_tab:
                             {
                                 "metric": "P/S Ratio",
                                 "value": format_value(row["PS_Ratio"]),
-                                "reference": format_value(sector_bench["PS"]),
-                                "status": "Cheap" if tone_from_relative_multiple(row["PS_Ratio"], sector_bench["PS"]) == "good" else "Rich" if tone_from_relative_multiple(row["PS_Ratio"], sector_bench["PS"]) == "bad" else "Fair",
-                                "tone": tone_from_relative_multiple(row["PS_Ratio"], sector_bench["PS"]),
+                                "reference": format_value(peer_bench.get("PS")),
+                                "status": "Cheap" if tone_from_relative_multiple(row["PS_Ratio"], peer_bench.get("PS")) == "good" else "Rich" if tone_from_relative_multiple(row["PS_Ratio"], peer_bench.get("PS")) == "bad" else "Fair",
+                                "tone": tone_from_relative_multiple(row["PS_Ratio"], peer_bench.get("PS")),
                                 "help": ANALYSIS_HELP_TEXT["P/S Ratio"],
                             },
                             {
                                 "metric": "EV/EBITDA",
                                 "value": format_value(row["EV_EBITDA"]),
-                                "reference": format_value(sector_bench["EV_EBITDA"]),
-                                "status": "Cheap" if tone_from_relative_multiple(row["EV_EBITDA"], sector_bench["EV_EBITDA"]) == "good" else "Rich" if tone_from_relative_multiple(row["EV_EBITDA"], sector_bench["EV_EBITDA"]) == "bad" else "Fair",
-                                "tone": tone_from_relative_multiple(row["EV_EBITDA"], sector_bench["EV_EBITDA"]),
+                                "reference": format_value(peer_bench.get("EV_EBITDA")),
+                                "status": "Cheap" if tone_from_relative_multiple(row["EV_EBITDA"], peer_bench.get("EV_EBITDA")) == "good" else "Rich" if tone_from_relative_multiple(row["EV_EBITDA"], peer_bench.get("EV_EBITDA")) == "bad" else "Fair",
+                                "tone": tone_from_relative_multiple(row["EV_EBITDA"], peer_bench.get("EV_EBITDA")),
                                 "help": ANALYSIS_HELP_TEXT["EV/EBITDA"],
                             },
                             {
                                 "metric": "P/B Ratio",
                                 "value": format_value(row["PB_Ratio"]),
-                                "reference": format_value(sector_bench["PB"]),
-                                "status": "Cheap" if tone_from_relative_multiple(row["PB_Ratio"], sector_bench["PB"]) == "good" else "Rich" if tone_from_relative_multiple(row["PB_Ratio"], sector_bench["PB"]) == "bad" else "Fair",
-                                "tone": tone_from_relative_multiple(row["PB_Ratio"], sector_bench["PB"]),
+                                "reference": format_value(peer_bench.get("PB")),
+                                "status": "Cheap" if tone_from_relative_multiple(row["PB_Ratio"], peer_bench.get("PB")) == "good" else "Rich" if tone_from_relative_multiple(row["PB_Ratio"], peer_bench.get("PB")) == "bad" else "Fair",
+                                "tone": tone_from_relative_multiple(row["PB_Ratio"], peer_bench.get("PB")),
                                 "help": ANALYSIS_HELP_TEXT["P/B Ratio"],
                             },
                         ],
-                        reference_label="Benchmark",
+                        reference_label="Peer Avg",
                     )
-
-                dcf_history = pd.DataFrame(safe_json_loads(row.get("DCF_History"), default=[]))
-                dcf_projection = pd.DataFrame(safe_json_loads(row.get("DCF_Projection"), default=[]))
-                dcf_sensitivity = pd.DataFrame(safe_json_loads(row.get("DCF_Sensitivity"), default=[]))
-                dcf_excerpts = safe_json_loads(row.get("DCF_Guidance_Excerpts"), default=[])
-
-                if has_numeric_value(dcf_intrinsic_value) and not dcf_projection.empty:
-                    st.markdown("#### 5-Year DCF Model")
-                    st.caption("This DCF projects only the next five fiscal years of free cash flow, then applies a terminal value. Treat it as a structured estimate, not a certainty.")
-                    render_analysis_signal_cards(
-                        [
-                            {
-                                "label": "DCF Growth Rate",
-                                "value": format_percent(row.get("DCF_Growth_Rate")),
-                                "note": "The starting growth rate fades toward the terminal rate by year five.",
-                                "tone": "neutral",
-                                "help": ANALYSIS_HELP_TEXT["DCF Growth Rate"],
-                            },
-                            {
-                                "label": "Terminal Growth",
-                                "value": format_percent(row.get("DCF_Terminal_Growth")),
-                                "note": "This long-run rate is used only after the explicit five-year forecast ends.",
-                                "tone": "neutral",
-                                "help": ANALYSIS_HELP_TEXT["Terminal Growth"],
-                            },
-                            {
-                                "label": "Base FCF",
-                                "value": format_market_cap(row.get("DCF_Base_FCF")),
-                                "note": "The most recent annual free cash flow used to start the model.",
-                                "tone": tone_from_metric_threshold(row.get("DCF_Base_FCF"), good_min=0.0, bad_max=0.0),
-                                "help": ANALYSIS_HELP_TEXT["Base FCF"],
-                            },
-                            {
-                                "label": "DCF Confidence",
-                                "value": str(row.get("DCF_Confidence", "low")).title(),
-                                "note": "This reflects how strong the filing-guidance extraction was, not whether the stock is good or bad.",
-                                "tone": "neutral",
-                                "help": ANALYSIS_HELP_TEXT["Confidence"],
-                            },
-                        ],
-                        columns=4,
-                    )
-                    render_analysis_signal_cards(
-                        [
-                            {
-                                "label": "Cost of Equity",
-                                "value": format_percent(row.get("DCF_Cost_of_Equity")),
-                                "note": "Estimated with the risk-free rate, beta, and a market risk premium.",
-                                "tone": "neutral",
-                                "help": ANALYSIS_HELP_TEXT["Cost of Equity"],
-                            },
-                            {
-                                "label": "Cost of Debt",
-                                "value": format_percent(row.get("DCF_Cost_of_Debt")),
-                                "note": "The DCF uses the company's after-tax borrowing cost when debt data is available.",
-                                "tone": "neutral",
-                                "help": ANALYSIS_HELP_TEXT["Cost of Debt"],
-                            },
-                            {
-                                "label": "Equity Weight",
-                                "value": format_percent(row.get("DCF_Equity_Weight")),
-                                "note": "This is the market-equity share of the capital structure used in WACC.",
-                                "tone": "neutral",
-                                "help": ANALYSIS_HELP_TEXT["Equity Weight"],
-                            },
-                            {
-                                "label": "Debt Weight",
-                                "value": format_percent(row.get("DCF_Debt_Weight")),
-                                "note": "This is the long-term debt share of the capital structure used in WACC.",
-                                "tone": "neutral",
-                                "help": ANALYSIS_HELP_TEXT["Debt Weight"],
-                            },
-                        ],
-                        columns=4,
-                    )
-
-                    dcf_col_1, dcf_col_2 = st.columns(2)
-                    with dcf_col_1:
-                        st.markdown("##### SEC History")
-                        history_display = dcf_history.copy()
-                        if not history_display.empty:
-                            for money_column in ["Revenue", "OperatingCF", "CapEx", "FreeCashFlow"]:
-                                if money_column in history_display.columns:
-                                    history_display[money_column] = history_display[money_column].map(format_market_cap)
-                            st.dataframe(history_display, width="stretch")
-                        else:
-                            st.caption("Historical SEC cash-flow history was not available for this run.")
-
-                    with dcf_col_2:
-                        st.markdown("##### Projection")
-                        projection_display = dcf_projection.copy()
-                        if not projection_display.empty:
-                            if "GrowthRate" in projection_display.columns:
-                                projection_display["GrowthRate"] = projection_display["GrowthRate"].map(format_percent)
-                            for money_column in ["FreeCashFlow", "PresentValue"]:
-                                if money_column in projection_display.columns:
-                                    projection_display[money_column] = projection_display[money_column].map(format_market_cap)
-                            if "DiscountFactor" in projection_display.columns:
-                                projection_display["DiscountFactor"] = projection_display["DiscountFactor"].map(
-                                    lambda value: format_value(value, "{:,.3f}")
+                    if row.get("Peer_Tickers"):
+                        st.caption(f"Peer tickers: {row.get('Peer_Tickers')}")
+                    if not peer_rows.empty:
+                        peer_display = peer_rows.copy()
+                        keep_columns = [
+                            column
+                            for column in [
+                                "Ticker",
+                                "Sector",
+                                "Industry",
+                                "Similarity",
+                                "trailingPE",
+                                "priceToSalesTrailing12Months",
+                                "priceToBook",
+                                "enterpriseToEbitda",
+                                "revenueGrowth",
+                                "beta",
+                            ]
+                            if column in peer_display.columns
+                        ]
+                        peer_display = peer_display[keep_columns]
+                        rename_map = {
+                            "trailingPE": "P/E",
+                            "priceToSalesTrailing12Months": "P/S",
+                            "priceToBook": "P/B",
+                            "enterpriseToEbitda": "EV/EBITDA",
+                            "revenueGrowth": "Revenue Growth",
+                            "beta": "Beta",
+                        }
+                        peer_display = peer_display.rename(columns=rename_map)
+                        if "Similarity" in peer_display.columns:
+                            peer_display["Similarity"] = peer_display["Similarity"].map(lambda value: format_value(value, "{:,.2f}"))
+                        for pct_column in ["Revenue Growth"]:
+                            if pct_column in peer_display.columns:
+                                peer_display[pct_column] = peer_display[pct_column].map(format_percent)
+                        for numeric_column in ["P/E", "P/S", "P/B", "EV/EBITDA", "Beta"]:
+                            if numeric_column in peer_display.columns:
+                                peer_display[numeric_column] = peer_display[numeric_column].map(
+                                    lambda value: format_value(value)
                                 )
-                            st.dataframe(projection_display, width="stretch")
-                        else:
-                            st.caption("The DCF projection table was not available for this run.")
-
-                    if not dcf_sensitivity.empty:
-                        st.markdown("##### Sensitivity Table")
-                        sensitivity_display = dcf_sensitivity.copy()
-                        if "WACC" in sensitivity_display.columns:
-                            sensitivity_display["WACC"] = sensitivity_display["WACC"].map(format_percent)
-                        sensitivity_display = sensitivity_display.rename(
-                            columns={
-                                "TG_0.015": "TG 1.5%",
-                                "TG_0.020": "TG 2.0%",
-                                "TG_0.025": "TG 2.5%",
-                                "TG_0.030": "TG 3.0%",
-                                "TG_0.035": "TG 3.5%",
-                            }
-                        )
-                        for column in sensitivity_display.columns:
-                            if column != "WACC":
-                                sensitivity_display[column] = sensitivity_display[column].map(
-                                    lambda value: f"${value:,.2f}" if has_numeric_value(value) else "N/A"
-                                )
-                        st.dataframe(sensitivity_display, width="stretch")
-
-                    if row.get("DCF_Guidance_Summary"):
-                        st.caption(str(row.get("DCF_Guidance_Summary")))
-                    if dcf_excerpts:
-                        st.markdown("##### Filing Guidance Excerpts")
-                        for excerpt in dcf_excerpts[:3]:
-                            st.write(f"- {excerpt}")
-                else:
-                    st.caption("No manual DCF snapshot is currently saved for this ticker, so this valuation view is leaning on relative multiples and Graham-style checks.")
-                    if row.get("DCF_Guidance_Summary"):
-                        st.caption(str(row.get("DCF_Guidance_Summary")))
+                        st.markdown("##### Peer Set")
+                        st.dataframe(peer_display, width="stretch")
 
             with tab_fund:
                 c_f1, c_f2 = st.columns([1, 2])
                 with c_f1:
                     st.markdown(f"### Verdict: **{row['Verdict_Fundamental']}**")
-                    st.caption("This view focuses on business strength: profitability, growth, balance-sheet pressure, and short-term financial flexibility.")
+                    st.caption("This view focuses on business strength, balance-sheet shape, and how the stock has reacted to recent company events.")
+                    render_analysis_signal_cards(
+                        [
+                            {
+                                "label": "Quality Score",
+                                "value": format_value(row.get("Quality_Score"), "{:,.1f}"),
+                                "note": "A compact read on profitability, balance-sheet quality, and growth stability.",
+                                "tone": tone_from_metric_threshold(row.get("Quality_Score"), good_min=2, bad_max=0),
+                                "help": ANALYSIS_HELP_TEXT["Quality Score"],
+                            },
+                            {
+                                "label": "Dividend Safety",
+                                "value": format_value(row.get("Dividend_Safety_Score"), "{:,.1f}"),
+                                "note": "Useful mainly for income-oriented names.",
+                                "tone": tone_from_metric_threshold(row.get("Dividend_Safety_Score"), good_min=1.5, bad_max=0),
+                                "help": ANALYSIS_HELP_TEXT["Dividend Safety"],
+                            },
+                            {
+                                "label": "Event Study",
+                                "value": format_int(row.get("Event_Study_Count")),
+                                "note": "Recent company events with usable price reactions.",
+                                "tone": "neutral",
+                                "help": ANALYSIS_HELP_TEXT["Event Study"],
+                            },
+                            {
+                                "label": "5D Abnormal Move",
+                                "value": format_percent(row.get("Event_Study_Avg_Abnormal_5D")),
+                                "note": f"Average five-day move versus {DEFAULT_BENCHMARK_TICKER} after recent events.",
+                                "tone": "neutral",
+                                "help": ANALYSIS_HELP_TEXT["Event Study 5D"],
+                            },
+                        ],
+                        columns=1,
+                    )
                 with c_f2:
                     render_analysis_signal_table(
                         [
@@ -6218,6 +6871,17 @@ with stock_tab:
                         ],
                         reference_label="Target",
                     )
+                if row.get("Event_Study_Summary"):
+                    st.caption(str(row.get("Event_Study_Summary")))
+                if not event_study_events.empty:
+                    event_display = event_study_events.copy()
+                    for column in ["Return_1D", "Return_5D", "Abnormal_1D", "Abnormal_5D"]:
+                        if column in event_display.columns:
+                            event_display[column] = event_display[column].map(format_percent)
+                    st.markdown("##### Event Study")
+                    st.dataframe(event_display, width="stretch")
+                else:
+                    st.caption("No recent dated company events were available for the event-study table.")
 
             with tab_tech:
                 c_t1, c_t2 = st.columns([1, 2])
@@ -6263,6 +6927,32 @@ with stock_tab:
                             },
                         ],
                         columns=4,
+                    )
+                    render_analysis_signal_cards(
+                        [
+                            {
+                                "label": "3M Relative Strength",
+                                "value": format_percent(row.get("Relative_Strength_3M")),
+                                "note": f"Three-month return versus {DEFAULT_BENCHMARK_TICKER}.",
+                                "tone": tone_from_metric_threshold(row.get("Relative_Strength_3M"), good_min=0.02, bad_max=-0.02),
+                                "help": ANALYSIS_HELP_TEXT["Relative Strength"],
+                            },
+                            {
+                                "label": "6M Relative Strength",
+                                "value": format_percent(row.get("Relative_Strength_6M")),
+                                "note": f"Six-month return versus {DEFAULT_BENCHMARK_TICKER}.",
+                                "tone": tone_from_metric_threshold(row.get("Relative_Strength_6M"), good_min=0.03, bad_max=-0.03),
+                                "help": ANALYSIS_HELP_TEXT["Relative Strength"],
+                            },
+                            {
+                                "label": "1Y Relative Strength",
+                                "value": format_percent(row.get("Relative_Strength_1Y")),
+                                "note": f"One-year return versus {DEFAULT_BENCHMARK_TICKER}.",
+                                "tone": tone_from_metric_threshold(row.get("Relative_Strength_1Y"), good_min=0.05, bad_max=-0.05),
+                                "help": ANALYSIS_HELP_TEXT["Relative Strength"],
+                            },
+                        ],
+                        columns=3,
                     )
 
                 render_analysis_signal_table(
@@ -6315,55 +7005,299 @@ with stock_tab:
                 c_s1, c_s2 = st.columns([1, 2])
                 with c_s1:
                     st.markdown(f"### Verdict: **{row['Verdict_Sentiment']}**")
-                    st.caption("This view looks at what the recent news and analyst community are signaling, and how strong that signal really is.")
+                    st.caption("This view is context only. It surfaces relevant analyst and headline information without classifying it as good or bad.")
                     target_price = row["Target_Mean_Price"]
-                    target_upside = safe_divide(target_price - row["Price"], row["Price"]) if has_numeric_value(target_price) and has_numeric_value(row["Price"]) else None
                     render_analysis_signal_cards(
                         [
                             {
                                 "label": "Headlines",
                                 "value": format_int(row["Sentiment_Headline_Count"]),
-                                "note": "The number of recent headlines used in the sentiment read.",
-                                "tone": tone_from_metric_threshold(row["Sentiment_Headline_Count"], good_min=1),
+                                "note": "Recent company-related headlines collected for context.",
+                                "tone": "neutral",
                                 "help": ANALYSIS_HELP_TEXT["Headlines"],
                             },
                             {
                                 "label": "Analyst View",
                                 "value": str(row["Recommendation_Key"]),
-                                "note": "The broad analyst recommendation signal the model found.",
-                                "tone": tone_from_signal_text(
-                                    row["Recommendation_Key"],
-                                    positives={"BUY", "STRONG_BUY", "OUTPERFORM", "OVERWEIGHT"},
-                                    negatives={"SELL", "STRONG_SELL", "UNDERPERFORM", "UNDERWEIGHT"},
-                                ),
+                                "note": "Raw recommendation label from the source feed, shown without interpretation.",
+                                "tone": "neutral",
                                 "help": ANALYSIS_HELP_TEXT["Analyst View"],
                             },
                             {
                                 "label": "Target Mean",
                                 "value": "N/A" if pd.isna(target_price) else f"${target_price:,.2f}",
-                                "note": "The average analyst target price, when available.",
-                                "tone": tone_from_metric_threshold(target_upside, good_min=model_settings["sentiment_upside_mid"], bad_max=-model_settings["sentiment_downside_mid"]),
+                                "note": "Average analyst target price, shown as reference only.",
+                                "tone": "neutral",
                                 "help": ANALYSIS_HELP_TEXT["Target Mean"],
                             },
                             {
-                                "label": "Sentiment Conviction",
+                                "label": "Context Depth",
                                 "value": format_value(row.get("Sentiment_Conviction"), "{:,.0f}", "/100"),
-                                "note": "How strong and well-supported the sentiment signal looks.",
-                                "tone": tone_from_metric_threshold(row.get("Sentiment_Conviction"), good_min=65, bad_max=35),
+                                "note": "How much analyst and headline context was available for this company.",
+                                "tone": "neutral",
                                 "help": ANALYSIS_HELP_TEXT["Sentiment Conviction"],
                             },
                         ],
                         columns=2,
                     )
                 with c_s2:
-                    st.write("What the model is seeing in the latest headlines")
-                    st.caption(str(row["Sentiment_Summary"]))
+                    st.write("Relevant company context")
+                    context_lines = [
+                        line.strip()
+                        for line in str(row.get("Sentiment_Summary") or "").split("|")
+                        if line.strip()
+                    ]
+                    if context_lines:
+                        for line in context_lines:
+                            st.write(f"- {line}")
+                    else:
+                        st.caption("No recent company-related context was available from the current source feed.")
+
+            with tab_dcf:
+                dcf_snapshot_exists = has_dcf_snapshot(row)
+                dcf_download_bytes = build_dcf_download_bytes(row) if dcf_snapshot_exists else b""
+                dcf_last_updated = str(row.get("DCF_Last_Updated") or row.get("Last_Updated") or "").strip()
+                dcf_intrinsic_value = safe_num(row.get("DCF_Intrinsic_Value"))
+                dcf_upside = safe_num(row.get("DCF Upside"))
+                dcf_history = pd.DataFrame(safe_json_loads(row.get("DCF_History"), default=[]))
+                dcf_projection = pd.DataFrame(safe_json_loads(row.get("DCF_Projection"), default=[]))
+                dcf_sensitivity = pd.DataFrame(safe_json_loads(row.get("DCF_Sensitivity"), default=[]))
+                dcf_excerpts = safe_json_loads(row.get("DCF_Guidance_Excerpts"), default=[])
+                live_dcf_settings = get_dcf_settings()
+
+                st.markdown("### Manual DCF Lab")
+                st.caption("DCF is fully manual and only refreshes when you build it here, so library refreshes do not recompute cash-flow models for every saved ticker.")
+
+                dcf_action_col_1, dcf_action_col_2 = st.columns([2, 1])
+                with dcf_action_col_1:
+                    with st.form(f"dcf_form_{row['Ticker']}"):
+                        dcf_col_1, dcf_col_2, dcf_col_3 = st.columns(3)
+                        projection_years = dcf_col_1.slider(
+                            "Projection Years",
+                            3,
+                            10,
+                            int(live_dcf_settings["projection_years"]),
+                            1,
+                            key=f"dcf_projection_years_{row['Ticker']}",
+                        )
+                        terminal_growth_percent = dcf_col_2.slider(
+                            "Terminal Growth (%)",
+                            0.0,
+                            5.0,
+                            float(live_dcf_settings["terminal_growth_rate"] * 100),
+                            0.1,
+                            key=f"dcf_terminal_growth_{row['Ticker']}",
+                        )
+                        growth_haircut = dcf_col_3.slider(
+                            "Growth Haircut",
+                            0.5,
+                            1.2,
+                            float(live_dcf_settings["growth_haircut"]),
+                            0.05,
+                            key=f"dcf_growth_haircut_{row['Ticker']}",
+                        )
+
+                        dcf_col_4, dcf_col_5, dcf_col_6 = st.columns(3)
+                        market_risk_premium_percent = dcf_col_4.slider(
+                            "Market Risk Premium (%)",
+                            3.0,
+                            9.0,
+                            float(live_dcf_settings["market_risk_premium"] * 100),
+                            0.1,
+                            key=f"dcf_mrp_{row['Ticker']}",
+                        )
+                        cost_of_debt_percent = dcf_col_5.slider(
+                            "Fallback Cost of Debt (%)",
+                            1.0,
+                            10.0,
+                            float(live_dcf_settings["default_after_tax_cost_of_debt"] * 100),
+                            0.1,
+                            key=f"dcf_cost_of_debt_{row['Ticker']}",
+                        )
+                        manual_growth_rate_percent = dcf_col_6.number_input(
+                            "Manual Starting Growth (%)",
+                            min_value=-20.0,
+                            max_value=50.0,
+                            value=float((live_dcf_settings.get("manual_growth_rate") or 0.0) * 100),
+                            step=0.5,
+                            key=f"dcf_manual_growth_{row['Ticker']}",
+                        )
+
+                        dcf_col_7, dcf_col_8 = st.columns(2)
+                        use_manual_growth = dcf_col_7.checkbox(
+                            "Use manual starting growth rate",
+                            value=live_dcf_settings.get("manual_growth_rate") is not None,
+                            key=f"dcf_use_manual_growth_{row['Ticker']}",
+                        )
+                        risk_free_override_percent = dcf_col_8.number_input(
+                            "Risk-Free Override (%)",
+                            min_value=0.0,
+                            max_value=10.0,
+                            value=float((live_dcf_settings.get("risk_free_rate_override") or 0.0) * 100),
+                            step=0.1,
+                            key=f"dcf_risk_free_override_{row['Ticker']}",
+                        )
+                        use_risk_free_override = dcf_col_8.checkbox(
+                            "Use risk-free override",
+                            value=live_dcf_settings.get("risk_free_rate_override") is not None,
+                            key=f"dcf_use_risk_free_override_{row['Ticker']}",
+                        )
+
+                        build_dcf_submit = st.form_submit_button(
+                            "Build / Refresh DCF Snapshot",
+                            type="primary",
+                            width="stretch",
+                        )
+
+                    if build_dcf_submit:
+                        updated_dcf_settings = normalize_dcf_settings(
+                            {
+                                "projection_years": projection_years,
+                                "terminal_growth_rate": terminal_growth_percent / 100,
+                                "growth_haircut": growth_haircut,
+                                "market_risk_premium": market_risk_premium_percent / 100,
+                                "default_after_tax_cost_of_debt": cost_of_debt_percent / 100,
+                                "manual_growth_rate": manual_growth_rate_percent / 100 if use_manual_growth else None,
+                                "risk_free_rate_override": risk_free_override_percent / 100 if use_risk_free_override else None,
+                            }
+                        )
+                        st.session_state.dcf_settings = updated_dcf_settings
+                        with st.spinner(f"Building DCF model for {row['Ticker']}..."):
+                            dcf_record = bot.analyze(
+                                str(row["Ticker"]),
+                                settings=model_settings,
+                                persist=False,
+                                compute_dcf=True,
+                                dcf_settings=updated_dcf_settings,
+                            )
+                        if not dcf_record:
+                            st.error(bot.last_error or "Unable to build a DCF for this ticker right now.")
+                        elif has_dcf_snapshot(dcf_record):
+                            db.save_analysis(dcf_record)
+                            st.session_state["dcf_action_feedback"] = {
+                                "ticker": str(row["Ticker"]),
+                                "kind": "success",
+                                "message": f"Saved a fresh manual DCF snapshot for {row['Ticker']}.",
+                            }
+                            st.rerun()
+                        else:
+                            st.warning(
+                                str(
+                                    dcf_record.get("DCF_Guidance_Summary")
+                                    or "A manual DCF could not be built from the available SEC filing data."
+                                )
+                            )
+                with dcf_action_col_2:
+                    st.download_button(
+                        "Download DCF",
+                        data=dcf_download_bytes,
+                        file_name=f"{row['Ticker']}_dcf.json",
+                        mime="application/json",
+                        disabled=not dcf_snapshot_exists,
+                        key=f"download_dcf_{row['Ticker']}",
+                        width="stretch",
+                    )
+                    if dcf_snapshot_exists:
+                        st.caption(f"Snapshot updated: {dcf_last_updated} ({format_age(dcf_last_updated)})")
+                    else:
+                        st.caption("No DCF snapshot is saved yet for this ticker.")
+
+                snapshot_assumptions = normalize_dcf_settings(dcf_assumptions or live_dcf_settings)
+                render_analysis_signal_cards(
+                    [
+                        {
+                            "label": "DCF Fair Value",
+                            "value": f"${dcf_intrinsic_value:,.2f}" if has_numeric_value(dcf_intrinsic_value) else "N/A",
+                            "note": "Per-share estimate from the most recent saved DCF snapshot.",
+                            "tone": "neutral",
+                            "help": ANALYSIS_HELP_TEXT["DCF Fair Value"],
+                        },
+                        {
+                            "label": "DCF Upside",
+                            "value": format_percent(dcf_upside),
+                            "note": "Gap between the snapshot value and the current stock price.",
+                            "tone": "neutral",
+                            "help": ANALYSIS_HELP_TEXT["DCF Upside"],
+                        },
+                        {
+                            "label": "DCF WACC",
+                            "value": format_percent(row.get("DCF_WACC")),
+                            "note": "Discount rate used in the saved snapshot.",
+                            "tone": "neutral",
+                            "help": ANALYSIS_HELP_TEXT["DCF WACC"],
+                        },
+                        {
+                            "label": "Growth Source",
+                            "value": str(row.get("DCF_Source", "Unavailable")),
+                            "note": str(row.get("DCF_Guidance_Summary") or "Source of the starting growth assumption."),
+                            "tone": "neutral",
+                            "help": ANALYSIS_HELP_TEXT["DCF Source"],
+                        },
+                        {
+                            "label": "Projection Years",
+                            "value": str(int(snapshot_assumptions.get("projection_years", DCF_PROJECTION_YEARS))),
+                            "note": "Explicit forecast length used for the saved snapshot.",
+                            "tone": "neutral",
+                            "help": ANALYSIS_HELP_TEXT["DCF Fair Value"],
+                        },
+                        {
+                            "label": "Terminal Growth",
+                            "value": format_percent(snapshot_assumptions.get("terminal_growth_rate")),
+                            "note": "Long-run rate used after the explicit projection window.",
+                            "tone": "neutral",
+                            "help": ANALYSIS_HELP_TEXT["Terminal Growth"],
+                        },
+                    ],
+                    columns=3,
+                )
+
+                if dcf_snapshot_exists and not dcf_history.empty:
+                    dcf_hist_col_1, dcf_hist_col_2 = st.columns(2)
+                    with dcf_hist_col_1:
+                        st.markdown("##### SEC History")
+                        history_display = dcf_history.copy()
+                        for money_column in ["Revenue", "OperatingCF", "CapEx", "FreeCashFlow"]:
+                            if money_column in history_display.columns:
+                                history_display[money_column] = history_display[money_column].map(format_market_cap)
+                        st.dataframe(history_display, width="stretch")
+                    with dcf_hist_col_2:
+                        st.markdown("##### Projection")
+                        projection_display = dcf_projection.copy()
+                        if not projection_display.empty:
+                            if "GrowthRate" in projection_display.columns:
+                                projection_display["GrowthRate"] = projection_display["GrowthRate"].map(format_percent)
+                            if "DiscountFactor" in projection_display.columns:
+                                projection_display["DiscountFactor"] = projection_display["DiscountFactor"].map(
+                                    lambda value: format_value(value, "{:,.3f}")
+                                )
+                            for money_column in ["FreeCashFlow", "PresentValue"]:
+                                if money_column in projection_display.columns:
+                                    projection_display[money_column] = projection_display[money_column].map(format_market_cap)
+                            st.dataframe(projection_display, width="stretch")
+                    if not dcf_sensitivity.empty:
+                        st.markdown("##### Sensitivity Table")
+                        sensitivity_display = dcf_sensitivity.copy()
+                        if "WACC" in sensitivity_display.columns:
+                            sensitivity_display["WACC"] = sensitivity_display["WACC"].map(format_percent)
+                        for column in sensitivity_display.columns:
+                            if column != "WACC":
+                                sensitivity_display[column] = sensitivity_display[column].map(
+                                    lambda value: f"${value:,.2f}" if has_numeric_value(value) else "N/A"
+                                )
+                        st.dataframe(sensitivity_display, width="stretch")
+                else:
+                    st.caption("Build a manual DCF snapshot to populate the valuation tables and sensitivity grid.")
+
+                if dcf_excerpts:
+                    st.markdown("##### Filing Takeaways")
+                    for excerpt in dcf_excerpts[:5]:
+                        st.write(f"- {excerpt}")
         else:
             st.info("Run the full analysis to save this ticker into the shared research library.")
 
 with compare_tab:
     st.subheader("Compare Stocks")
-    st.caption("Rank a watchlist with the same four-engine model before deciding what deserves portfolio weight.")
+    st.caption("Rank a watchlist with the same technical, fundamental, valuation, and context workflow before deciding what deserves portfolio weight.")
 
     with st.form("compare_form"):
         compare_col_1, compare_col_2 = st.columns([3, 1])
@@ -6486,7 +7420,7 @@ with compare_tab:
         render_help_legend(
             [
                 ("Composite Score", ANALYSIS_HELP_TEXT["Composite Score"]),
-                ("Confidence", ANALYSIS_HELP_TEXT["Confidence"]),
+                ("Consistency", ANALYSIS_HELP_TEXT["Consistency"]),
                 ("Trend Strength", ANALYSIS_HELP_TEXT["Trend Strength"]),
                 ("Quality Score", ANALYSIS_HELP_TEXT["Quality Score"]),
                 ("Target Upside", ANALYSIS_HELP_TEXT["Target Mean"]),
@@ -6524,6 +7458,7 @@ with compare_tab:
         comparison_display["Decision_Confidence"] = comparison_display["Decision_Confidence"].map(
             lambda value: format_value(value, "{:,.0f}", "/100")
         )
+        comparison_display = comparison_display.rename(columns={"Decision_Confidence": "Consistency"})
         comparison_display["Trend_Strength"] = comparison_display["Trend_Strength"].map(
             lambda value: format_value(value, "{:,.0f}")
         )
@@ -6862,7 +7797,7 @@ with sensitivity_tab:
         render_help_legend(
             [
                 ("Bias", ANALYSIS_HELP_TEXT["Bias"]),
-                ("Confidence", ANALYSIS_HELP_TEXT["Confidence"]),
+                ("Consistency", ANALYSIS_HELP_TEXT["Consistency"]),
                 ("Assumption Drift", ANALYSIS_HELP_TEXT["Assumption Drift"]),
                 ("Fingerprint", ANALYSIS_HELP_TEXT["Fingerprint"]),
             ]
@@ -6871,7 +7806,7 @@ with sensitivity_tab:
         sensitivity_display["Overall Score"] = sensitivity_display["Overall Score"].map(
             lambda value: format_value(value, "{:,.1f}")
         )
-        sensitivity_display["Confidence"] = sensitivity_display["Confidence"].map(
+        sensitivity_display["Consistency"] = sensitivity_display["Consistency"].map(
             lambda value: format_value(value, "{:,.0f}", "/100")
         )
         sensitivity_display["Assumption Drift"] = sensitivity_display["Assumption Drift"].map(
@@ -6915,7 +7850,13 @@ with backtest_tab:
                     backtest_info, _ = fetch_ticker_info_with_retry(cleaned_ticker)
                     if not backtest_info and not saved_backtest_row.empty:
                         backtest_info = build_info_fallback_from_saved_analysis(saved_backtest_row.iloc[0])
-                    backtest_profile = infer_stock_profile_from_snapshot(backtest_info, hist, model_settings)
+                    backtest_profile = infer_stock_profile_from_snapshot(
+                        backtest_info,
+                        hist,
+                        model_settings,
+                        db=db,
+                        ticker=cleaned_ticker,
+                    )
                 backtest_result = compute_technical_backtest(hist, model_settings, stock_profile=backtest_profile)
 
             if hist is None or hist.empty:
@@ -6998,6 +7939,13 @@ with backtest_tab:
                     "help": ANALYSIS_HELP_TEXT["Win Rate"],
                 },
                 {
+                    "label": "Trading Costs",
+                    "value": format_percent(backtest_metrics["Trading Costs"]),
+                    "note": "Estimated transaction costs deducted when the replay changes exposure.",
+                    "tone": "neutral",
+                    "help": ANALYSIS_HELP_TEXT["Trading Costs"],
+                },
+                {
                     "label": "Max Drawdown",
                     "value": format_percent(backtest_metrics["Strategy Max Drawdown"]),
                     "note": "This shows the worst peak-to-trough drop during the replay.",
@@ -7066,6 +8014,8 @@ with backtest_tab:
             trade_log_display["Date"] = pd.to_datetime(trade_log_display["Date"]).dt.strftime("%Y-%m-%d")
             trade_log_display["Close"] = trade_log_display["Close"].map(lambda value: f"${value:,.2f}")
             trade_log_display["Position"] = trade_log_display["Position"].map(format_percent)
+            if "Trading Cost" in trade_log_display.columns:
+                trade_log_display["Trading Cost"] = trade_log_display["Trading Cost"].map(format_percent)
             st.dataframe(trade_log_display, width="stretch")
 
         st.subheader("Closed Trades")
@@ -7232,7 +8182,7 @@ with library_tab:
             render_help_legend(
                 [
                     ("Composite Score", ANALYSIS_HELP_TEXT["Composite Score"]),
-                    ("Confidence", ANALYSIS_HELP_TEXT["Confidence"]),
+                    ("Consistency", ANALYSIS_HELP_TEXT["Consistency"]),
                     ("Trend Strength", ANALYSIS_HELP_TEXT["Trend Strength"]),
                     ("Quality Score", ANALYSIS_HELP_TEXT["Quality Score"]),
                     ("Target Upside", ANALYSIS_HELP_TEXT["Target Mean"]),
@@ -7267,6 +8217,7 @@ with library_tab:
             library_display["Decision_Confidence"] = library_display["Decision_Confidence"].map(
                 lambda value: format_value(value, "{:,.0f}", "/100")
             )
+            library_display = library_display.rename(columns={"Decision_Confidence": "Consistency"})
             library_display["Trend_Strength"] = library_display["Trend_Strength"].map(
                 lambda value: format_value(value, "{:,.0f}")
             )
@@ -7354,7 +8305,7 @@ with changelog_tab:
     st.write("- The model now assigns each stock a primary type such as Growth, Value, Dividend, Cyclical, Defensive, Blue-Chip, size-based, or Speculative and uses that profile in verdict and backtest logic.")
     st.write("- The backtest now holds a core position during durable bullish regimes, exits later on deeper breakdowns, and reports win rate plus average closed-trade return.")
     st.write("- The Options tab now includes inline ? explanations for every slider and preset selector.")
-    st.write("- Regime, confidence, and decision-note transparency remain visible across stock, compare, sensitivity, and library views.")
+    st.write("- Regime, consistency, and decision-note transparency remain visible across stock, compare, sensitivity, and library views.")
 
 with methodology_tab:
     st.subheader("Methodology and Transparency")
@@ -7364,8 +8315,8 @@ with methodology_tab:
     methodology_flow = pd.DataFrame(
         [
             {"Step": 1, "What Happens": "Download one year of price history plus company profile and news from Yahoo Finance."},
-            {"Step": 2, "What Happens": "Score four engines: technical, fundamental, valuation, and sentiment. The DCF is optional and only runs when you create it manually."},
-            {"Step": 3, "What Happens": "Classify market regime, measure engine agreement, and estimate decision confidence."},
+            {"Step": 2, "What Happens": "Score technical, fundamental, and peer-relative valuation layers. The DCF is optional and only runs when you create it manually."},
+            {"Step": 3, "What Happens": "Classify market regime, measure engine agreement, and estimate decision consistency."},
             {"Step": 4, "What Happens": "Apply hold buffers and data-quality guardrails before publishing the final verdict."},
             {"Step": 5, "What Happens": "Store the full result with timestamp, assumption fingerprint, and quality stats in the shared library."},
         ]
@@ -7389,13 +8340,13 @@ with methodology_tab:
                 },
                 {
                     "Engine": "Valuation",
-                    "Uses": "P/E, forward P/E, PEG, P/S, EV/EBITDA, P/B, Graham value, premium/discount bands, plus an optional manual SEC-based DCF snapshot",
-                    "Strong Signals": "Positive earnings, cheaper-than-sector multiples, and discounts to fair-value anchors such as Graham value or a manual DCF snapshot",
+                    "Uses": "P/E, forward P/E, PEG, P/S, EV/EBITDA, P/B, five closest peers, Graham value, plus an optional manual SEC-based DCF snapshot",
+                    "Strong Signals": "Positive earnings, cheaper-than-peer multiples, and discounts to fair-value anchors such as Graham value or a manual DCF snapshot",
                 },
                 {
                     "Engine": "Sentiment",
-                    "Uses": "Headline tone by word match, analyst recommendation, analyst depth, target mean price",
-                    "Strong Signals": "Consistently constructive headlines and analyst targets with supporting coverage",
+                    "Uses": "Company-related headlines, analyst recommendation labels, analyst depth, target mean price",
+                    "Strong Signals": "The app now surfaces context only and leaves the interpretation to the user",
                 },
             ]
         )
@@ -7406,7 +8357,7 @@ with methodology_tab:
         verdict_table = pd.DataFrame(
             [
                 {"Output": "Technical score", "Rule": ">= 4 strong buy, >= 2 buy, <= -2 sell, <= -4 strong sell"},
-                {"Output": "Sentiment score", "Rule": ">= 3 positive, <= -3 negative, otherwise mixed"},
+                {"Output": "Sentiment context", "Rule": "Displayed as reference only and not used as a directional score in the current build"},
                 {
                     "Output": "Valuation verdict",
                     "Rule": (
@@ -7420,7 +8371,7 @@ with methodology_tab:
                         f"Base score thresholds are {model_settings['overall_strong_buy_threshold']:.0f} / "
                         f"{model_settings['overall_buy_threshold']:.0f} / "
                         f"{model_settings['overall_sell_threshold']:.0f} / "
-                        f"{model_settings['overall_strong_sell_threshold']:.0f}; mixed regimes, low confidence, and low-quality data are pushed toward hold"
+                        f"{model_settings['overall_strong_sell_threshold']:.0f}; mixed regimes, low consistency, and low-quality data are pushed toward hold"
                     ),
                 },
             ]
@@ -7450,11 +8401,11 @@ with methodology_tab:
             {"Refinement": 3, "What Changed": "Volatility-Adjusted Momentum", "Purpose": "Rewards momentum that is strong relative to realized volatility instead of raw price change alone."},
             {"Refinement": 4, "What Changed": "Quality Score", "Purpose": "Combines profitability, leverage, liquidity, and growth consistency into a cleaner business-quality signal."},
             {"Refinement": 5, "What Changed": "Dividend Safety Score", "Purpose": "Checks whether income stocks appear to have a more sustainable payout profile."},
-            {"Refinement": 6, "What Changed": "Valuation Breadth", "Purpose": "Scales valuation influence based on how many usable valuation signals are actually available."},
-            {"Refinement": 7, "What Changed": "Sentiment Conviction", "Purpose": "Separates noisy sentiment from higher-conviction sentiment backed by coverage and target alignment."},
+            {"Refinement": 6, "What Changed": "Peer-Relative Valuation", "Purpose": "Anchors valuation to the five closest peers first and uses sector benchmarks only as a fallback."},
+            {"Refinement": 7, "What Changed": "Context Depth", "Purpose": "Tracks how much analyst and headline context was available without turning that context into a directional sentiment score."},
             {"Refinement": 8, "What Changed": "Risk Flags", "Purpose": "Collects visible red flags like negative EPS, high debt, weak liquidity, high volatility, and speculation."},
             {"Refinement": 9, "What Changed": "Dynamic Engine Weights", "Purpose": "Lets Growth, Value, Income, Cyclical, and Speculative names use different engine mixes."},
-            {"Refinement": 10, "What Changed": "Profile-Aware Trailing Stops", "Purpose": "Makes the backtest protect gains differently for growth, defensive, cyclical, and speculative stocks."},
+            {"Refinement": 10, "What Changed": "Event Study and Trading Friction", "Purpose": "Adds recent event-reaction context to fundamentals and deducts transaction-cost estimates from the backtest."},
         ]
     )
     st.dataframe(refinement_df, width="stretch")
@@ -7465,7 +8416,7 @@ with methodology_tab:
             {"Guardrail": "Trend Tolerance", "Purpose": "Avoids flipping trend signals on tiny moves around the moving averages."},
             {"Guardrail": "Stretch Limit", "Purpose": "Penalizes overextended rallies and recognizes washed-out rebounds before chasing price."},
             {"Guardrail": "Hold Buffer", "Purpose": "Makes mixed-engine or transition regimes require extra evidence before becoming directional."},
-            {"Guardrail": "Confidence Floor", "Purpose": "Downgrades weak-conviction Buy or Sell calls back toward Hold."},
+            {"Guardrail": "Consistency Floor", "Purpose": "Downgrades weakly aligned Buy or Sell calls back toward Hold."},
             {"Guardrail": "Data Quality Check", "Purpose": "Reduces conviction when too many important metrics are missing."},
         ]
     )
@@ -7485,20 +8436,17 @@ with methodology_tab:
 
     methodology_col_3, methodology_col_4 = st.columns(2)
     with methodology_col_3:
-        st.subheader("Sector Valuation Benchmarks")
-        scaled_benchmarks = {
-            sector: {
-                metric: value * model_settings["valuation_benchmark_scale"]
-                for metric, value in benchmarks.items()
-            }
-            for sector, benchmarks in SECTOR_BENCHMARKS.items()
-        }
-        sector_benchmarks_df = (
-            pd.DataFrame.from_dict(scaled_benchmarks, orient="index")
-            .reset_index()
-            .rename(columns={"index": "Sector"})
+        st.subheader("Peer Valuation Workflow")
+        peer_workflow_df = pd.DataFrame(
+            [
+                {"Step": 1, "What Happens": "Start with the company being analyzed and pull its sector, industry, size, growth, profitability, leverage, and beta fields."},
+                {"Step": 2, "What Happens": f"Search a cached universe for the {PEER_GROUP_SIZE} closest companies using those characteristics."},
+                {"Step": 3, "What Happens": "Average the peer valuation multiples and use those averages as the main comparison set."},
+                {"Step": 4, "What Happens": "If the peer set is too thin or missing too many usable metrics, fall back to scaled sector benchmarks."},
+                {"Step": 5, "What Happens": "Keep Graham value separate and move DCF to a manual lab so cash-flow work stays optional and adjustable."},
+            ]
         )
-        st.dataframe(sector_benchmarks_df, width="stretch")
+        st.dataframe(peer_workflow_df, width="stretch")
 
     with methodology_col_4:
         st.subheader("Current Model Assumptions")
@@ -7538,7 +8486,7 @@ with methodology_tab:
                     "Value": f"{model_settings['decision_hold_buffer']:.1f}",
                 },
                 {
-                    "Setting": "Confidence Floor",
+                    "Setting": "Consistency Floor",
                     "Value": f"{model_settings['decision_min_confidence']:.0f}/100",
                 },
                 {
@@ -7546,15 +8494,19 @@ with methodology_tab:
                     "Value": f"{int(round(model_settings['backtest_cooldown_days']))} days",
                 },
                 {
-                    "Setting": "Benchmark Scale",
+                    "Setting": "Peer Group Size",
+                    "Value": PEER_GROUP_SIZE,
+                },
+                {
+                    "Setting": "Fallback Benchmark Scale",
                     "Value": f"{model_settings['valuation_benchmark_scale']:.2f}x",
                 },
                 {
                     "Setting": "Assumption Drift vs Defaults",
                     "Value": f"{calculate_assumption_drift(model_settings):.1f}%",
                 },
-                {"Setting": "Positive Sentiment Terms", "Value": len(POSITIVE_SENTIMENT_TERMS)},
-                {"Setting": "Negative Sentiment Terms", "Value": len(NEGATIVE_SENTIMENT_TERMS)},
+                {"Setting": "Event Study Max Events", "Value": 5},
+                {"Setting": "Backtest Transaction Cost", "Value": f"{model_settings['backtest_transaction_cost_bps']:.1f} bps"},
                 {"Setting": "Cached Analyses in Library", "Value": len(library_snapshot)},
             ]
         )
@@ -7606,7 +8558,7 @@ with options_tab:
                 "Trend Tol": f"{values['tech_trend_tolerance'] * 100:.0f}%",
                 "Stretch": f"{values['tech_extension_limit'] * 100:.0f}%",
                 "Hold Buffer": f"{values['decision_hold_buffer']:.1f}",
-                "Confidence Floor": f"{values['decision_min_confidence']:.0f}/100",
+                "Consistency Floor": f"{values['decision_min_confidence']:.0f}/100",
                 "Cooldown": f"{int(round(values['backtest_cooldown_days']))}d",
             }
             for name, values in preset_catalog.items()
@@ -7631,9 +8583,9 @@ with options_tab:
     options_metrics = st.columns(5)
     options_metrics[0].metric("Assumption Drift", format_value(assumption_drift, "{:,.1f}", "%"))
     options_metrics[1].metric("Trading Days", str(int(model_settings["trading_days_per_year"])))
-    options_metrics[2].metric("Benchmark Scale", format_value(model_settings["valuation_benchmark_scale"], "{:,.2f}", "x"))
+    options_metrics[2].metric("Fallback Scale", format_value(model_settings["valuation_benchmark_scale"], "{:,.2f}", "x"))
     options_metrics[3].metric("Weight Spread", format_value(max(weight_values) - min(weight_values), "{:,.1f}"))
-    options_metrics[4].metric("Confidence Floor", format_value(model_settings["decision_min_confidence"], "{:,.0f}", "/100"))
+    options_metrics[4].metric("Consistency Floor", format_value(model_settings["decision_min_confidence"], "{:,.0f}", "/100"))
 
     if assumption_drift > 35:
         st.warning("Your active assumptions are materially different from the default model. Expect results to diverge more from the baseline.")
@@ -7655,7 +8607,7 @@ with options_tab:
         weight_technical = weight_col_1.slider("Technical", 0.5, 1.5, float(model_settings["weight_technical"]), 0.1, help=OPTIONS_HELP_TEXT["weight_technical"])
         weight_fundamental = weight_col_2.slider("Fundamental", 0.5, 1.5, float(model_settings["weight_fundamental"]), 0.1, help=OPTIONS_HELP_TEXT["weight_fundamental"])
         weight_valuation = weight_col_3.slider("Valuation", 0.5, 1.5, float(model_settings["weight_valuation"]), 0.1, help=OPTIONS_HELP_TEXT["weight_valuation"])
-        weight_sentiment = weight_col_4.slider("Sentiment", 0.5, 1.5, float(model_settings["weight_sentiment"]), 0.1, help=OPTIONS_HELP_TEXT["weight_sentiment"])
+        weight_sentiment = weight_col_4.slider("Sentiment", 0.5, 1.5, float(model_settings["weight_sentiment"]), 0.1, help=OPTIONS_HELP_TEXT["weight_sentiment"], disabled=True)
 
         st.subheader("Technical and Fundamental Thresholds")
         tf_col_1, tf_col_2, tf_col_3, tf_col_4 = st.columns(4)
@@ -7747,7 +8699,7 @@ with options_tab:
             help=OPTIONS_HELP_TEXT["decision_hold_buffer"],
         )
         decision_min_confidence = ds_col_4.slider(
-            "Confidence Floor",
+            "Consistency Floor",
             35,
             80,
             int(round(model_settings["decision_min_confidence"])),
@@ -7755,10 +8707,10 @@ with options_tab:
             help=OPTIONS_HELP_TEXT["decision_min_confidence"],
         )
 
-        st.subheader("Valuation, Sentiment, and Portfolio")
+        st.subheader("Valuation Fallbacks and Portfolio")
         vs_col_1, vs_col_2, vs_col_3, vs_col_4 = st.columns(4)
         valuation_benchmark_scale = vs_col_1.slider(
-            "Benchmark Scale",
+            "Fallback Benchmark Scale",
             0.8,
             1.2,
             float(model_settings["valuation_benchmark_scale"]),
@@ -7814,6 +8766,7 @@ with options_tab:
             float(model_settings["sentiment_analyst_boost"]),
             0.5,
             help=OPTIONS_HELP_TEXT["sentiment_analyst_boost"],
+            disabled=True,
         )
         sentiment_upside_mid = vs_col_8.slider(
             "Moderate Upside (%)",
@@ -7822,6 +8775,7 @@ with options_tab:
             int(round(model_settings["sentiment_upside_mid"] * 100)),
             1,
             help=OPTIONS_HELP_TEXT["sentiment_upside_mid"],
+            disabled=True,
         )
         sentiment_upside_high = vs_col_9.slider(
             "Strong Upside (%)",
@@ -7830,6 +8784,7 @@ with options_tab:
             int(round(model_settings["sentiment_upside_high"] * 100)),
             1,
             help=OPTIONS_HELP_TEXT["sentiment_upside_high"],
+            disabled=True,
         )
 
         st.subheader("Overall Verdict Thresholds")
@@ -7875,6 +8830,7 @@ with options_tab:
             int(round(model_settings["sentiment_downside_mid"] * 100)),
             1,
             help=OPTIONS_HELP_TEXT["sentiment_downside_mid"],
+            disabled=True,
         )
         sentiment_downside_high = downside_col_2.slider(
             "Deep Downside (%)",
@@ -7883,6 +8839,7 @@ with options_tab:
             int(round(model_settings["sentiment_downside_high"] * 100)),
             1,
             help=OPTIONS_HELP_TEXT["sentiment_downside_high"],
+            disabled=True,
         )
         fund_current_ratio_bad = current_ratio_bad_col.slider(
             "Weak Current Ratio",
@@ -7900,6 +8857,14 @@ with options_tab:
             int(round(model_settings["backtest_cooldown_days"])),
             1,
             help=OPTIONS_HELP_TEXT["backtest_cooldown_days"],
+        )
+        backtest_transaction_cost_bps = st.slider(
+            "Backtest Trading Cost (bps)",
+            0.0,
+            50.0,
+            float(model_settings["backtest_transaction_cost_bps"]),
+            1.0,
+            help=OPTIONS_HELP_TEXT["backtest_transaction_cost_bps"],
         )
 
         save_options = st.form_submit_button("Save Assumptions", type="primary", width="stretch")
@@ -7939,6 +8904,7 @@ with options_tab:
             "decision_hold_buffer": decision_hold_buffer,
             "decision_min_confidence": decision_min_confidence,
             "backtest_cooldown_days": backtest_cooldown_days,
+            "backtest_transaction_cost_bps": backtest_transaction_cost_bps,
             "trading_days_per_year": trading_days_per_year,
         }
         normalized_settings, notes = normalize_model_settings(updated_settings)
