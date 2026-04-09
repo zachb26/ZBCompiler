@@ -1,0 +1,229 @@
+File "/mount/src/zbcompiler/streamlit_app.py", line 6383, in <module>
+    res = bot.analyze(txt_input)
+File "/mount/src/zbcompiler/streamlit_app.py", line 5940, in analyze
+    record = self.build_record_from_market_data(
+        ticker,
+    ...<5 lines>...
+        dcf_settings=dcf_settings,
+    )
+File "/mount/src/zbcompiler/streamlit_app.py", line 5666, in build_record_from_market_data
+    event_study = compute_event_study(news, hist, benchmark_ticker=DEFAULT_BENCHMARK_TICKER)
+File "/mount/src/zbcompiler/streamlit_app.py", line 1769, in compute_event_study
+    aligned = pd.concat([close.rename("stock"), benchmark_close.rename("benchmark")], axis=1, join="left").ffill(limit=3)
+              ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+File "/home/adminuser/venv/lib/python3.14/site-packages/pandas/core/reshape/concat.py", line 403, in concat
+    raise ValueError(
+        "Only can inner (intersect) or outer (union) join the other axis"
+    )
+
+    
+[     UTC     ] Logs for zbcompiler.streamlit.app/
+────────────────────────────────────────────────────────────────────────────────────────
+[16:22:06] 🖥 Provisioning machine...
+[16:22:44] 🎛 Preparing system...
+[16:22:44] ⛓ Spinning up manager process...
+[16:22:12] 🚀 Starting up repository: 'zbcompiler', branch: 'main', main module: 'streamlit_app.py'
+[16:22:12] 🐙 Cloning repository...
+[16:22:14] 🐙 Cloning into '/mount/src/zbcompiler'...
+
+[16:22:14] 🐙 Cloned repository!
+[16:22:14] 🐙 Pulling code changes from Github...
+[16:22:16] 📦 Processing dependencies...
+
+──────────────────────────────────────── uv ───────────────────────────────────────────
+
+Using uv pip install.
+Using Python 3.14.3 environment at /home/adminuser/venv
+Resolved 56 packages in 523ms
+Prepared 56 packages in 2.53s
+Installed 56 packages in 246ms
+ + altair==4.2.2
+ + attrs==26.1.0
+ + beautifulsoup4==4.14.3
+ + blinker==1.9.0
+ + cachetools==7.0.5
+ + certifi==2026.2.25
+ + cffi==2.0.0
+ + charset-normalizer==3.4.7
+ + click==8.3.2
+ + curl-cffi==0.15.0
+ + entrypoints==0.4
+ + frozendict==2.4.7
+ + gitdb==4.0.12
+ + gitpython==3.1.46
+ [2026-04-09 16:22:19.509265] + idna==3.11
+ + jinja2==3.1.6
+ + jsonschema==4.26.0
+ + jsonschema-specifications==2025.9.1
+ + markdown-it-py==4.0.0
+ + markupsafe[2026-04-09 16:22:19.509499] ==3.0.3
+ + mdurl==0.1.2
+ + multitasking==0.0.12
+ + narwhals==2.19.0
+ + numpy==2.4.4
+ + packaging==26.0
+ + [2026-04-09 16:22:19.509752] pandas==3.0.2
+ + peewee==4.0.4
+ + pillow==12.2.0
+ + platformdirs==4.9.6
+ + plotly==6.6.0
+ + protobuf==7.34.1
+ + pyarrow==23.0.1
+ +[2026-04-09 16:22:19.509968]  pycparser==3.0
+ + pydeck==0.9.1
+ + pygments==2.20.0
+ + python-dateutil==2.9.0.post0
+ + [2026-04-09 16:22:19.510154] pytz==2026.1.post1
+ + referencing==0.37.0
+ + requests==2.33.1
+ + rich==14.3.3
+ + rpds-py==0.30.0
+ + scipy==1.17.1
+ +[2026-04-09 16:22:19.510321]  six==1.17.0
+ + smmap==5.0.3
+ + soupsieve==2.8.3
+ + streamlit==1.56.0
+ + tenacity[2026-04-09 16:22:19.510465] ==9.1.4
+ + toml==0.10.2
+ + toolz==1.1.0
+ + tornado==6.5.5
+ + typing-extensions==4.15.0
+ + urllib3==2.6.3
+ + watchdog==6.0.0
+ + websockets==16.0
+ + xlsxwriter==3.2.9
+ + yfinance==1.2.1
+Checking if Streamlit is installed
+Found Streamlit version 1.56.0 in the environment
+Installing rich for an improved exception logging
+Using uv pip install.
+Using Python 3.14.3 environment at /home/adminuser/venv
+Audited 1 package in 3ms
+
+────────────────────────────────────────────────────────────────────────────────────────
+
+[16:22:21] 🐍 Python dependencies were installed from /mount/src/zbcompiler/requirements.txt using uv.
+Check if streamlit is installed
+Streamlit is already installed
+[16:22:23] 📦 Processed dependencies!
+
+
+
+────────────────────── Traceback (most recent call last) ───────────────────────
+  /home/adminuser/venv/lib/python3.14/site-packages/streamlit/runtime/scriptru  
+  nner/exec_code.py:129 in exec_func_with_error_handling                        
+                                                                                
+  /home/adminuser/venv/lib/python3.14/site-packages/streamlit/runtime/scriptru  
+  nner/script_runner.py:689 in code_to_exec                                     
+                                                                                
+  /mount/src/zbcompiler/streamlit_app.py:6383 in <module>                       
+                                                                                
+    6380 │   │   if st.button("Run Full Analysis", type="primary", width="stre  
+    6381 │   │   │   if txt_input:                                              
+    6382 │   │   │   │   with st.spinner(f"Running multiple engines on {txt_in  
+  ❱ 6383 │   │   │   │   │   res = bot.analyze(txt_input)                       
+    6384 │   │   │   │   │   if not res:                                        
+    6385 │   │   │   │   │   │   st.error(bot.last_error or "Unable to fetch e  
+    6386                                                                        
+                                                                                
+  /mount/src/zbcompiler/streamlit_app.py:5940 in analyze                        
+                                                                                
+    5937 │   │   else:                                                          
+    5938 │   │   │   hist, info, news = preloaded                               
+    5939 │   │                                                                  
+  ❱ 5940 │   │   record = self.build_record_from_market_data(                   
+    5941 │   │   │   ticker,                                                    
+    5942 │   │   │   hist,                                                      
+    5943 │   │   │   info,                                                      
+                                                                                
+  /mount/src/zbcompiler/streamlit_app.py:5666 in build_record_from_market_data  
+                                                                                
+    5663 │   │   │   price,                                                     
+    5664 │   │   │   sentiment["headline_count"],                               
+    5665 │   │   )                                                              
+  ❱ 5666 │   │   event_study = compute_event_study(news, hist, benchmark_ticke  
+    5667 │   │   stock_profile = classify_stock_profile(                        
+    5668 │   │   │   sector=sector,                                             
+    5669 │   │   │   price=price,                                               
+                                                                                
+  /mount/src/zbcompiler/streamlit_app.py:1769 in compute_event_study            
+                                                                                
+    1766 │   │   if benchmark_hist is not None and not benchmark_hist.empty an  
+    1767 │   │   else pd.Series(dtype=float)                                    
+    1768 │   )                                                                  
+  ❱ 1769 │   aligned = pd.concat([close.rename("stock"), benchmark_close.renam  
+    1770 │                                                                      
+    1771 │   fundamental_events = []                                            
+    1772 │   seen_titles = set()                                                
+                                                                                
+  /home/adminuser/venv/lib/python3.14/site-packages/pandas/core/reshape/concat  
+  .py:403 in concat                                                             
+                                                                                
+    400 │   elif join == "inner":                                               
+    401 │   │   intersect = True                                                
+    402 │   else:  # pragma: no cover                                           
+  ❱ 403 │   │   raise ValueError(                                               
+    404 │   │   │   "Only can inner (intersect) or outer (union) join the othe  
+    405 │   │   )                                                               
+    406                                                                         
+────────────────────────────────────────────────────────────────────────────────
+ValueError: Only can inner (intersect) or outer (union) join the other axis
+────────────────────── Traceback (most recent call last) ───────────────────────
+  /home/adminuser/venv/lib/python3.14/site-packages/streamlit/runtime/scriptru  
+  nner/exec_code.py:129 in exec_func_with_error_handling                        
+                                                                                
+  /home/adminuser/venv/lib/python3.14/site-packages/streamlit/runtime/scriptru  
+  nner/script_runner.py:689 in code_to_exec                                     
+                                                                                
+  /mount/src/zbcompiler/streamlit_app.py:6383 in <module>                       
+                                                                                
+    6380 │   │   if st.button("Run Full Analysis", type="primary", width="stre  
+    6381 │   │   │   if txt_input:                                              
+    6382 │   │   │   │   with st.spinner(f"Running multiple engines on {txt_in  
+  ❱ 6383 │   │   │   │   │   res = bot.analyze(txt_input)                       
+    6384 │   │   │   │   │   if not res:                                        
+    6385 │   │   │   │   │   │   st.error(bot.last_error or "Unable to fetch e  
+    6386                                                                        
+                                                                                
+  /mount/src/zbcompiler/streamlit_app.py:5940 in analyze                        
+                                                                                
+    5937 │   │   else:                                                          
+    5938 │   │   │   hist, info, news = preloaded                               
+    5939 │   │                                                                  
+  ❱ 5940 │   │   record = self.build_record_from_market_data(                   
+    5941 │   │   │   ticker,                                                    
+    5942 │   │   │   hist,                                                      
+    5943 │   │   │   info,                                                      
+                                                                                
+  /mount/src/zbcompiler/streamlit_app.py:5666 in build_record_from_market_data  
+                                                                                
+    5663 │   │   │   price,                                                     
+    5664 │   │   │   sentiment["headline_count"],                               
+    5665 │   │   )                                                              
+  ❱ 5666 │   │   event_study = compute_event_study(news, hist, benchmark_ticke  
+    5667 │   │   stock_profile = classify_stock_profile(                        
+    5668 │   │   │   sector=sector,                                             
+    5669 │   │   │   price=price,                                               
+                                                                                
+  /mount/src/zbcompiler/streamlit_app.py:1769 in compute_event_study            
+                                                                                
+    1766 │   │   if benchmark_hist is not None and not benchmark_hist.empty an  
+    1767 │   │   else pd.Series(dtype=float)                                    
+    1768 │   )                                                                  
+  ❱ 1769 │   aligned = pd.concat([close.rename("stock"), benchmark_close.renam  
+    1770 │                                                                      
+    1771 │   fundamental_events = []                                            
+    1772 │   seen_titles = set()                                                
+                                                                                
+  /home/adminuser/venv/lib/python3.14/site-packages/pandas/core/reshape/concat  
+  .py:403 in concat                                                             
+                                                                                
+    400 │   elif join == "inner":                                               
+    401 │   │   intersect = True                                                
+    402 │   else:  # pragma: no cover                                           
+  ❱ 403 │   │   raise ValueError(                                               
+    404 │   │   │   "Only can inner (intersect) or outer (union) join the othe  
+    405 │   │   )                                                               
+    406                                                                         
+────────────────────────────────────────────────────────────────────────────────
+ValueError: Only can inner (intersect) or outer (union) join the other axis
