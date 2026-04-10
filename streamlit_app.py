@@ -33,6 +33,9 @@ README_USAGE_TEXT = """
 TRADING_DAYS = 252
 DEFAULT_BENCHMARK_TICKER = "SPY"
 DEFAULT_PORTFOLIO_TICKERS = "AAPL, MSFT, NVDA, JNJ, XOM"
+PORTFOLIO_OPTIONS = ["Large-Cap", "Global", "DADCO"]
+SENIOR_ANALYST_PASSWORD_SECRET = "SENIOR_ANALYST_PASSWORD"
+PORTFOLIO_MANAGER_PASSWORD_SECRET = "PORTFOLIO_MANAGER_PASSWORD"
 FETCH_CACHE_TTL_SECONDS = 300
 FETCH_STALE_FALLBACK_TTL_SECONDS = 1800
 FETCH_CACHE = {
@@ -5583,6 +5586,27 @@ class DatabaseManager:
                             conn.execute(
                                 f'ALTER TABLE analysis ADD COLUMN "{name}" {self._postgres_column_definition(definition)}'
                             )
+                    conn.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS portfolio_memberships (
+                            ticker TEXT NOT NULL,
+                            portfolio TEXT NOT NULL,
+                            PRIMARY KEY (ticker, portfolio)
+                        )
+                        """
+                    )
+                    conn.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS decision_log (
+                            id BIGSERIAL PRIMARY KEY,
+                            timestamp TEXT NOT NULL,
+                            portfolio TEXT NOT NULL,
+                            ticker TEXT NOT NULL,
+                            recommendation TEXT NOT NULL,
+                            rationale TEXT NOT NULL
+                        )
+                        """
+                    )
                 return
             try:
                 with self._connection() as conn:
@@ -5602,6 +5626,27 @@ class DatabaseManager:
                     for name, definition in ANALYSIS_COLUMNS.items():
                         if name not in existing_columns:
                             conn.execute(f"ALTER TABLE analysis ADD COLUMN {name} {definition}")
+                    conn.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS portfolio_memberships (
+                            ticker TEXT NOT NULL,
+                            portfolio TEXT NOT NULL,
+                            PRIMARY KEY (ticker, portfolio)
+                        )
+                        """
+                    )
+                    conn.execute(
+                        """
+                        CREATE TABLE IF NOT EXISTS decision_log (
+                            id INTEGER PRIMARY KEY AUTOINCREMENT,
+                            timestamp TEXT NOT NULL,
+                            portfolio TEXT NOT NULL,
+                            ticker TEXT NOT NULL,
+                            recommendation TEXT NOT NULL,
+                            rationale TEXT NOT NULL
+                        )
+                        """
+                    )
             except sqlite3.DatabaseError as exc:
                 if self._storage_mode == "disk" and self._enable_in_memory_fallback(exc):
                     self.create_tables()
@@ -5713,6 +5758,131 @@ class DatabaseManager:
             self.create_tables()
             with self._connection() as conn:
                 return self._read_dataframe(conn, "SELECT * FROM analysis")
+
+    def get_portfolio_memberships(self, portfolio=None):
+        normalized_portfolio = str(portfolio or "").strip()
+        if self._backend == "postgres":
+            query = "SELECT ticker, portfolio FROM portfolio_memberships"
+            params = []
+            if normalized_portfolio:
+                query += " WHERE portfolio=%s"
+                params.append(normalized_portfolio)
+            query += " ORDER BY portfolio, ticker"
+        else:
+            query = "SELECT ticker, portfolio FROM portfolio_memberships"
+            params = []
+            if normalized_portfolio:
+                query += " WHERE portfolio=?"
+                params.append(normalized_portfolio)
+            query += " ORDER BY portfolio, ticker"
+
+        try:
+            with self._connection() as conn:
+                return self._read_dataframe(conn, query, params=tuple(params))
+        except (pd.errors.DatabaseError, sqlite3.DatabaseError, psycopg.Error):
+            self.create_tables()
+            with self._connection() as conn:
+                return self._read_dataframe(conn, query, params=tuple(params))
+
+    def get_portfolio_tickers(self, portfolio):
+        memberships = self.get_portfolio_memberships(portfolio=portfolio)
+        if memberships.empty or "ticker" not in memberships.columns:
+            return []
+        return (
+            memberships["ticker"]
+            .dropna()
+            .astype(str)
+            .str.strip()
+            .str.upper()
+            .drop_duplicates()
+            .tolist()
+        )
+
+    def save_portfolio_memberships(self, ticker, portfolios):
+        normalized_ticker = str(ticker or "").strip().upper()
+        normalized_portfolios = []
+        seen = set()
+        for portfolio_name in portfolios or []:
+            cleaned = str(portfolio_name or "").strip()
+            if cleaned and cleaned not in seen:
+                normalized_portfolios.append(cleaned)
+                seen.add(cleaned)
+        if not normalized_ticker:
+            return
+
+        if self._backend == "postgres":
+            delete_sql = "DELETE FROM portfolio_memberships WHERE ticker=%s"
+            insert_sql = (
+                "INSERT INTO portfolio_memberships (ticker, portfolio) VALUES (%s, %s) "
+                "ON CONFLICT (ticker, portfolio) DO NOTHING"
+            )
+        else:
+            delete_sql = "DELETE FROM portfolio_memberships WHERE ticker=?"
+            insert_sql = (
+                "INSERT OR IGNORE INTO portfolio_memberships (ticker, portfolio) VALUES (?, ?)"
+            )
+
+        with self._write_lock:
+            with self._connection() as conn:
+                conn.execute(delete_sql, (normalized_ticker,))
+                for portfolio_name in normalized_portfolios:
+                    conn.execute(insert_sql, (normalized_ticker, portfolio_name))
+
+    def add_decision_log_entry(self, portfolio, ticker, recommendation, rationale, timestamp=None):
+        normalized_portfolio = str(portfolio or "").strip()
+        normalized_ticker = str(ticker or "").strip().upper()
+        normalized_recommendation = str(recommendation or "").strip().title()
+        normalized_rationale = str(rationale or "").strip()
+        timestamp_text = str(timestamp or datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        if not normalized_portfolio or not normalized_ticker or not normalized_recommendation or not normalized_rationale:
+            return
+
+        if self._backend == "postgres":
+            insert_sql = (
+                "INSERT INTO decision_log (timestamp, portfolio, ticker, recommendation, rationale) "
+                "VALUES (%s, %s, %s, %s, %s)"
+            )
+        else:
+            insert_sql = (
+                "INSERT INTO decision_log (timestamp, portfolio, ticker, recommendation, rationale) "
+                "VALUES (?, ?, ?, ?, ?)"
+            )
+
+        with self._write_lock:
+            with self._connection() as conn:
+                conn.execute(
+                    insert_sql,
+                    (
+                        timestamp_text,
+                        normalized_portfolio,
+                        normalized_ticker,
+                        normalized_recommendation,
+                        normalized_rationale,
+                    ),
+                )
+
+    def get_decision_log(self, portfolio=None, ticker=None):
+        filters = []
+        params = []
+        if str(portfolio or "").strip():
+            filters.append("portfolio=%s" if self._backend == "postgres" else "portfolio=?")
+            params.append(str(portfolio).strip())
+        if str(ticker or "").strip():
+            filters.append("ticker=%s" if self._backend == "postgres" else "ticker=?")
+            params.append(str(ticker).strip().upper())
+
+        query = "SELECT id, timestamp, portfolio, ticker, recommendation, rationale FROM decision_log"
+        if filters:
+            query += " WHERE " + " AND ".join(filters)
+        query += " ORDER BY timestamp DESC, id DESC"
+
+        try:
+            with self._connection() as conn:
+                return self._read_dataframe(conn, query, params=tuple(params))
+        except (pd.errors.DatabaseError, sqlite3.DatabaseError, psycopg.Error):
+            self.create_tables()
+            with self._connection() as conn:
+                return self._read_dataframe(conn, query, params=tuple(params))
 
 
 @st.cache_resource
@@ -6648,6 +6818,8 @@ class PortfolioAnalyst:
             notes, effective_names = self.build_portfolio_notes(recommendations, sector_exposure, tangent, max_weight)
 
             return {
+                "asset_prices": asset_prices,
+                "benchmark_prices": benchmark_prices,
                 "asset_metrics": asset_metrics,
                 "portfolio_cloud": portfolio_df,
                 "frontier": frontier,
@@ -6744,6 +6916,1009 @@ def render_frontier_chart(portfolio_cloud, frontier, cal, tangent, minimum_volat
     st.vega_lite_chart(chart_data, spec, width="stretch")
 
 
+def get_secret_value(secret_name):
+    try:
+        value = st.secrets[secret_name]
+    except Exception:
+        return None
+    text = str(value or "").strip()
+    return text or None
+
+
+def render_password_gate(session_key, secret_name, heading, description, button_label):
+    if st.session_state.get(session_key):
+        return True
+
+    st.markdown(f"#### {heading}")
+    st.caption(description)
+    expected_password = get_secret_value(secret_name)
+    if not expected_password:
+        st.error(
+            f"Configuration missing. Add `{secret_name}` in Streamlit Secrets before using this section."
+        )
+        return False
+
+    password_key = f"{session_key}_password"
+    error_key = f"{session_key}_error"
+    entered_password = st.text_input("Password", type="password", key=password_key)
+    if st.button(button_label, key=f"{session_key}_submit", width="stretch"):
+        if entered_password == expected_password:
+            st.session_state[session_key] = True
+            st.session_state.pop(error_key, None)
+            st.session_state[password_key] = ""
+            st.rerun()
+        else:
+            st.session_state[error_key] = "Incorrect password."
+
+    if st.session_state.get(error_key):
+        st.error(st.session_state[error_key])
+    return False
+
+
+def normalize_recommendation_label(value):
+    normalized = str(value or "").strip().upper()
+    if "BUY" in normalized:
+        return "Buy"
+    if "SELL" in normalized:
+        return "Sell"
+    return "Hold"
+
+
+def build_sector_news_dataframe(tickers, max_tickers=12, max_items=18):
+    news_rows = []
+    seen_titles = set()
+    for ticker in list(tickers or [])[:max_tickers]:
+        ticker_news, _ = fetch_ticker_news_with_retry(str(ticker).strip().upper(), attempts=1)
+        for item in ticker_news or []:
+            title = extract_news_title(item)
+            if not title:
+                continue
+            lowered_title = title.lower()
+            if not any(keyword in lowered_title for keyword in FUNDAMENTAL_EVENT_KEYWORDS):
+                continue
+            dedupe_key = lowered_title.strip()
+            if dedupe_key in seen_titles:
+                continue
+            seen_titles.add(dedupe_key)
+            published = extract_news_publish_time(item)
+            publisher = ""
+            if isinstance(item, dict):
+                publisher = str(item.get("publisher") or item.get("source") or "").strip()
+                if not publisher and isinstance(item.get("content"), dict):
+                    publisher = str(item["content"].get("publisher") or "").strip()
+            news_rows.append(
+                {
+                    "Published": format_datetime_value(published, fallback="Unknown"),
+                    "Ticker": str(ticker).strip().upper(),
+                    "Publisher": publisher or "Unknown",
+                    "Headline": title,
+                    "_published_sort": published or datetime.datetime.min,
+                }
+            )
+
+    if not news_rows:
+        return pd.DataFrame(columns=["Published", "Ticker", "Publisher", "Headline"])
+
+    news_df = pd.DataFrame(news_rows)
+    news_df = news_df.sort_values(["_published_sort", "Ticker"], ascending=[False, True]).head(max_items)
+    return news_df.drop(columns=["_published_sort"]).reset_index(drop=True)
+
+
+def build_sector_weekly_briefing(sector_name, sector_df, sector_news_df):
+    if sector_df is None or sector_df.empty:
+        return f"Weekly Briefing: {sector_name}\n\nNo tracked names are currently saved for this sector."
+
+    sector_name = str(sector_name or "Selected Sector")
+    bullish_count = int(sector_df["Verdict_Overall"].isin(["BUY", "STRONG BUY"]).sum())
+    bearish_count = int(sector_df["Verdict_Overall"].isin(["SELL", "STRONG SELL"]).sum())
+    avg_rs_3m = sector_df["Relative_Strength_3M"].dropna().mean() if "Relative_Strength_3M" in sector_df.columns else None
+    avg_rs_6m = sector_df["Relative_Strength_6M"].dropna().mean() if "Relative_Strength_6M" in sector_df.columns else None
+
+    movers_df = sector_df.sort_values(
+        ["Relative_Strength_3M", "Composite Score", "Ticker"],
+        ascending=[False, False, True],
+        na_position="last",
+    )
+    top_movers = movers_df.head(3)["Ticker"].tolist()
+    laggards = movers_df.tail(3)["Ticker"].tolist()
+
+    risk_rows = sector_df[
+        sector_df["Risk_Flags"].fillna("").astype(str).str.strip() != ""
+    ][["Ticker", "Risk_Flags"]].head(3)
+
+    lines = [
+        f"Weekly Briefing: {sector_name}",
+        "",
+        f"Tracked names: {len(sector_df)}",
+        f"Bullish verdicts: {bullish_count}",
+        f"Bearish verdicts: {bearish_count}",
+        f"Average 3M relative strength: {format_percent(avg_rs_3m)}",
+        f"Average 6M relative strength: {format_percent(avg_rs_6m)}",
+        "",
+        "Top movers:",
+    ]
+    if top_movers:
+        for ticker in top_movers:
+            lines.append(f"- {ticker}")
+    else:
+        lines.append("- No standout movers were available.")
+
+    lines.append("")
+    lines.append("Watch list / laggards:")
+    if laggards:
+        for ticker in laggards:
+            lines.append(f"- {ticker}")
+    else:
+        lines.append("- No laggards were available.")
+
+    lines.append("")
+    lines.append("Risk flags:")
+    if risk_rows.empty:
+        lines.append("- No major saved risk flags were surfaced in the current sector slice.")
+    else:
+        for _, risk_row in risk_rows.iterrows():
+            lines.append(f"- {risk_row['Ticker']}: {risk_row['Risk_Flags']}")
+
+    lines.append("")
+    lines.append("Relevant headlines:")
+    if sector_news_df is None or sector_news_df.empty:
+        lines.append("- No recent fundamental-event headlines were available from the current feed.")
+    else:
+        for _, news_row in sector_news_df.head(5).iterrows():
+            lines.append(f"- {news_row['Ticker']}: {news_row['Headline']}")
+
+    return "\n".join(lines)
+
+
+def build_portfolio_composition_snapshot(library_df, portfolio_tickers):
+    normalized_tickers = [str(ticker).strip().upper() for ticker in portfolio_tickers or [] if str(ticker).strip()]
+    unique_tickers = list(dict.fromkeys(normalized_tickers))
+    if not unique_tickers:
+        return {
+            "holdings_count": 0,
+            "analyzed_count": 0,
+            "weighted_pe": None,
+            "weighted_beta": None,
+            "weighted_dividend_yield": None,
+            "sector_breakdown": pd.DataFrame(columns=["Sector", "Holdings", "Weight"]),
+            "holdings_frame": pd.DataFrame(),
+        }
+
+    holdings_frame = pd.DataFrame()
+    if library_df is not None and not library_df.empty:
+        holdings_frame = library_df[library_df["Ticker"].isin(unique_tickers)].copy()
+        holdings_frame = holdings_frame.drop_duplicates(subset=["Ticker"], keep="first")
+
+    analyzed_count = holdings_frame["Ticker"].nunique() if not holdings_frame.empty else 0
+    if holdings_frame.empty:
+        return {
+            "holdings_count": len(unique_tickers),
+            "analyzed_count": 0,
+            "weighted_pe": None,
+            "weighted_beta": None,
+            "weighted_dividend_yield": None,
+            "sector_breakdown": pd.DataFrame(columns=["Sector", "Holdings", "Weight"]),
+            "holdings_frame": holdings_frame,
+        }
+
+    equal_weights = np.repeat(1 / len(holdings_frame), len(holdings_frame))
+
+    def weighted_average(column_name):
+        values = pd.to_numeric(holdings_frame.get(column_name), errors="coerce")
+        mask = values.notna()
+        if not mask.any():
+            return None
+        local_weights = equal_weights[mask.to_numpy()]
+        return float(np.average(values[mask], weights=local_weights))
+
+    sector_breakdown = (
+        holdings_frame.groupby("Sector", dropna=False)["Ticker"]
+        .count()
+        .reset_index(name="Holdings")
+        .sort_values(["Holdings", "Sector"], ascending=[False, True])
+    )
+    sector_breakdown["Weight"] = sector_breakdown["Holdings"] / sector_breakdown["Holdings"].sum()
+
+    return {
+        "holdings_count": len(unique_tickers),
+        "analyzed_count": int(analyzed_count),
+        "weighted_pe": weighted_average("PE_Ratio"),
+        "weighted_beta": weighted_average("Equity_Beta"),
+        "weighted_dividend_yield": weighted_average("Dividend_Yield"),
+        "sector_breakdown": sector_breakdown,
+        "holdings_frame": holdings_frame,
+    }
+
+
+def build_trade_flags_dataframe(db, library_df, selected_portfolio, view_all_portfolios=False):
+    memberships = db.get_portfolio_memberships()
+    if memberships.empty:
+        return pd.DataFrame()
+
+    if not view_all_portfolios:
+        memberships = memberships[memberships["portfolio"] == selected_portfolio]
+    if memberships.empty:
+        return pd.DataFrame()
+
+    decision_log = db.get_decision_log()
+    if decision_log.empty:
+        return pd.DataFrame()
+
+    latest_decisions = (
+        decision_log.sort_values(["timestamp", "id"], ascending=[False, False])
+        .drop_duplicates(subset=["portfolio", "ticker"], keep="first")
+    )
+
+    current_rows = pd.DataFrame()
+    if library_df is not None and not library_df.empty:
+        current_rows = (
+            library_df.sort_values("Last_Updated_Parsed", ascending=False, na_position="last")
+            .drop_duplicates(subset=["Ticker"], keep="first")
+            .set_index("Ticker", drop=False)
+        )
+
+    flag_rows = []
+    for _, membership in memberships.iterrows():
+        portfolio_name = str(membership.get("portfolio") or "").strip()
+        ticker = str(membership.get("ticker") or "").strip().upper()
+        if not portfolio_name or not ticker:
+            continue
+        matching_decision = latest_decisions[
+            (latest_decisions["portfolio"] == portfolio_name) & (latest_decisions["ticker"] == ticker)
+        ]
+        if matching_decision.empty or ticker not in current_rows.index:
+            continue
+        decision_row = matching_decision.iloc[0]
+        current_row = current_rows.loc[ticker]
+        current_recommendation = normalize_recommendation_label(current_row.get("Verdict_Overall"))
+        last_recommendation = normalize_recommendation_label(decision_row.get("recommendation"))
+        if current_recommendation == last_recommendation:
+            continue
+        flag_rows.append(
+            {
+                "Portfolio": portfolio_name,
+                "Ticker": ticker,
+                "Last Logged Decision": last_recommendation,
+                "Current Model Verdict": str(current_row.get("Verdict_Overall") or "Unknown"),
+                "Current Recommendation": current_recommendation,
+                "Freshness": str(current_row.get("Freshness") or "Unknown"),
+                "Risk Flags": str(current_row.get("Risk_Flags") or ""),
+                "Latest Decision Timestamp": str(decision_row.get("timestamp") or ""),
+            }
+        )
+
+    if not flag_rows:
+        return pd.DataFrame()
+    return pd.DataFrame(flag_rows).sort_values(["Portfolio", "Ticker"]).reset_index(drop=True)
+
+
+def render_portfolio_result(result, config, active_preset_name, active_assumption_fingerprint):
+    tangent = result["tangent"]
+    minimum_volatility = result["minimum_volatility"]
+    recommendations = result["recommendations"].copy()
+    sector_exposure = result["sector_exposure"].copy()
+
+    st.caption(
+        f"Benchmark: {config.get('benchmark', result['benchmark'])} | Lookback: {config.get('period', result['period'])} | "
+        f"Risk-free rate: {config.get('risk_free_percent', 0):.2f}% | Max position: {config.get('max_weight_percent', 0)}%"
+    )
+    st.caption(f"Assumption profile: {active_preset_name} | Fingerprint: {active_assumption_fingerprint}")
+
+    render_analysis_signal_cards(
+        [
+            {
+                "label": "Expected Return",
+                "value": format_percent(tangent["Return"]),
+                "note": "The annualized return estimate for the max-Sharpe portfolio.",
+                "tone": tone_from_metric_threshold(tangent["Return"], good_min=0.10, bad_max=0.03),
+                "help": ANALYSIS_HELP_TEXT["Expected Return"],
+            },
+            {
+                "label": "Volatility",
+                "value": format_percent(tangent["Volatility"]),
+                "note": "This is the expected bumpiness of returns over a full year.",
+                "tone": tone_from_metric_threshold(tangent["Volatility"], good_max=0.22, bad_min=0.35),
+                "help": ANALYSIS_HELP_TEXT["Volatility"],
+            },
+            {
+                "label": "Sharpe",
+                "value": format_value(tangent["Sharpe"]),
+                "note": "Higher Sharpe usually means a better return-to-risk tradeoff.",
+                "tone": tone_from_metric_threshold(tangent["Sharpe"], good_min=1.0, bad_max=0.3),
+                "help": ANALYSIS_HELP_TEXT["Sharpe"],
+            },
+            {
+                "label": "Sortino",
+                "value": format_value(tangent["Sortino"]),
+                "note": "This focuses on downside risk instead of all volatility.",
+                "tone": tone_from_metric_threshold(tangent["Sortino"], good_min=1.2, bad_max=0.4),
+                "help": ANALYSIS_HELP_TEXT["Sortino"],
+            },
+            {
+                "label": "Treynor",
+                "value": format_value(tangent["Treynor"]),
+                "note": "This compares excess return with market sensitivity, not total volatility.",
+                "tone": tone_from_metric_threshold(tangent["Treynor"], good_min=0.08, bad_max=0.0),
+                "help": ANALYSIS_HELP_TEXT["Treynor"],
+            },
+        ],
+        columns=5,
+    )
+
+    render_analysis_signal_cards(
+        [
+            {
+                "label": "Portfolio Beta",
+                "value": format_value(tangent["Beta"]),
+                "note": "Around 1 means the portfolio has moved roughly in line with the benchmark.",
+                "tone": tone_from_balanced_band(tangent["Beta"], 0.8, 1.1, 0.6, 1.4),
+                "help": ANALYSIS_HELP_TEXT["Portfolio Beta"],
+            },
+            {
+                "label": "Downside Vol",
+                "value": format_percent(tangent["Downside Volatility"]),
+                "note": "This isolates the roughness coming from negative return swings.",
+                "tone": tone_from_metric_threshold(tangent["Downside Volatility"], good_max=0.15, bad_min=0.28),
+                "help": ANALYSIS_HELP_TEXT["Downside Vol"],
+            },
+            {
+                "label": "Min-Vol Return",
+                "value": format_percent(minimum_volatility["Return"]),
+                "note": "The return estimate for the lowest-volatility portfolio the simulation found.",
+                "tone": tone_from_metric_threshold(minimum_volatility["Return"], good_min=0.07, bad_max=0.02),
+                "help": ANALYSIS_HELP_TEXT["Min-Vol Return"],
+            },
+            {
+                "label": "Effective Names",
+                "value": format_value(result["effective_names"], "{:,.1f}"),
+                "note": "This shows how diversified the weights really are after concentration is considered.",
+                "tone": tone_from_metric_threshold(result["effective_names"], good_min=5, bad_max=3),
+                "help": ANALYSIS_HELP_TEXT["Effective Names"],
+            },
+        ],
+        columns=4,
+    )
+
+    st.markdown("##### Efficient Frontier and CAL")
+    st.caption("The green diamond is the tangent portfolio with the highest Sharpe ratio. The red dashed line is the Capital Allocation Line.")
+    render_frontier_chart(result["portfolio_cloud"], result["frontier"], result["cal"], tangent, minimum_volatility)
+
+    st.markdown("##### Recommended Allocation")
+    recommendations_display = recommendations[
+        ["Ticker", "Name", "Sector", "Recommended Weight", "Role", "Sharpe Ratio", "Sortino Ratio", "Treynor Ratio", "Beta", "Rationale"]
+    ].copy()
+    recommendations_display["Recommended Weight"] = recommendations_display["Recommended Weight"].map(format_percent)
+    recommendations_display["Sharpe Ratio"] = recommendations_display["Sharpe Ratio"].map(format_value)
+    recommendations_display["Sortino Ratio"] = recommendations_display["Sortino Ratio"].map(format_value)
+    recommendations_display["Treynor Ratio"] = recommendations_display["Treynor Ratio"].map(format_value)
+    recommendations_display["Beta"] = recommendations_display["Beta"].map(format_value)
+    st.dataframe(recommendations_display, width="stretch")
+
+    exposure_col, metrics_col = st.columns([1, 2])
+    with exposure_col:
+        st.markdown("##### Sector Exposure")
+        sector_display = sector_exposure.copy()
+        sector_display["Recommended Weight"] = sector_display["Recommended Weight"].map(format_percent)
+        st.dataframe(sector_display, width="stretch")
+
+    with metrics_col:
+        st.markdown("##### Per-Stock Metrics")
+        asset_display = result["asset_metrics"].copy()
+        for column in ["Annual Return", "Volatility", "Downside Volatility"]:
+            asset_display[column] = asset_display[column].map(format_percent)
+        for column in ["Beta", "Sharpe Ratio", "Sortino Ratio", "Treynor Ratio"]:
+            asset_display[column] = asset_display[column].map(format_value)
+        st.dataframe(asset_display, width="stretch")
+
+    st.markdown("##### Portfolio Building Notes")
+    for note in result["notes"]:
+        st.write(f"- {note}")
+
+
+def render_new_analyst_view(db, analyst):
+    st.subheader("New Analyst")
+    st.caption("This starter view focuses on the three beginner-friendly lenses: fundamentals, technicals, and sentiment context.")
+    st.caption("Advanced valuation labs, peer comparisons, SEC filing automation, backtests, and model controls are reserved for Senior Analysts.")
+
+    with st.form("new_analyst_form"):
+        input_col, action_col = st.columns([3, 1])
+        with input_col:
+            new_analyst_ticker = st.text_input(
+                "Ticker",
+                value=st.session_state.get("new_analyst_ticker", ""),
+                help="Enter one stock symbol to pull the latest saved or refreshed research snapshot.",
+            )
+        with action_col:
+            st.write("")
+            st.write("")
+            run_new_analyst = st.form_submit_button("Analyze Stock", type="primary", width="stretch")
+
+    if run_new_analyst:
+        cleaned_ticker = str(new_analyst_ticker or "").strip().upper()
+        st.session_state.new_analyst_ticker = cleaned_ticker
+        if not cleaned_ticker:
+            st.error("Enter a ticker to analyze.")
+        else:
+            with st.spinner(f"Running the starter workflow on {cleaned_ticker}..."):
+                record = analyst.analyze(cleaned_ticker)
+            if not record:
+                st.error(analyst.last_error or "Unable to build a starter analysis for this ticker right now.")
+
+    starter_ticker = str(st.session_state.get("new_analyst_ticker", "") or "").strip().upper()
+    if not starter_ticker:
+        st.info("Enter a ticker above to open the beginner-friendly analyst view.")
+        return
+
+    starter_df = prepare_analysis_dataframe(db.get_analysis(starter_ticker))
+    if starter_df.empty:
+        st.warning("No saved analysis is available yet for that ticker. Run the analysis first.")
+        return
+
+    row = starter_df.iloc[0]
+    render_analysis_signal_cards(
+        [
+            {
+                "label": "Current Price",
+                "value": format_value(row.get("Price"), "${:,.2f}"),
+                "note": "The latest saved price in the shared research store.",
+                "tone": "neutral",
+                "help": ANALYSIS_HELP_TEXT["Market Cap"],
+            },
+            {
+                "label": "Overall Verdict",
+                "value": str(row.get("Verdict_Overall") or "Unknown"),
+                "note": "A combined read built from the app's research layers.",
+                "tone": tone_from_signal_text(
+                    row.get("Verdict_Overall"),
+                    positives={"BUY", "STRONG BUY"},
+                    negatives={"SELL", "STRONG SELL"},
+                ),
+                "help": ANALYSIS_HELP_TEXT["Overall Score"],
+            },
+            {
+                "label": "Sector",
+                "value": str(row.get("Sector") or "Unknown"),
+                "note": "Useful for framing how the company fits into the broader market.",
+                "tone": "neutral",
+                "help": ANALYSIS_HELP_TEXT["Tracked Sectors"],
+            },
+            {
+                "label": "Updated",
+                "value": str(row.get("Freshness") or "Unknown"),
+                "note": "How recently this saved analysis was refreshed.",
+                "tone": "neutral",
+                "help": ANALYSIS_HELP_TEXT["Freshness"],
+            },
+        ],
+        columns=4,
+    )
+
+    fund_tab, tech_tab, sent_tab = st.tabs(["Fundamental Analysis", "Technical Analysis", "Sentiment Analysis"])
+
+    with fund_tab:
+        st.caption("Fundamentals describe business quality: profitability, growth, leverage, and liquidity.")
+        render_analysis_signal_cards(
+            [
+                {
+                    "label": "Fundamental Verdict",
+                    "value": str(row.get("Verdict_Fundamental") or "Unknown"),
+                    "note": "A quick summary of the business-quality read.",
+                    "tone": tone_from_signal_text(row.get("Verdict_Fundamental"), positives={"STRONG"}, negatives={"WEAK"}),
+                    "help": ANALYSIS_HELP_TEXT["Fundamental"],
+                },
+                {
+                    "label": "Quality Score",
+                    "value": format_value(row.get("Quality_Score"), "{:,.1f}"),
+                    "note": "Higher scores usually mean the business looks healthier and more durable.",
+                    "tone": tone_from_metric_threshold(row.get("Quality_Score"), good_min=2, bad_max=0),
+                    "help": ANALYSIS_HELP_TEXT["Quality Score"],
+                },
+                {
+                    "label": "ROE",
+                    "value": format_percent(row.get("ROE")),
+                    "note": "Return on equity shows how efficiently profit is generated from shareholder capital.",
+                    "tone": tone_from_metric_threshold(row.get("ROE"), good_min=0.15, bad_max=0.05),
+                    "help": ANALYSIS_HELP_TEXT["ROE"],
+                },
+                {
+                    "label": "Profit Margin",
+                    "value": format_percent(row.get("Profit_Margins")),
+                    "note": "Positive and improving margins can point to a sturdier business model.",
+                    "tone": tone_from_metric_threshold(row.get("Profit_Margins"), good_min=0.12, bad_max=0.0),
+                    "help": ANALYSIS_HELP_TEXT["Profit Margin"],
+                },
+            ],
+            columns=4,
+        )
+        render_analysis_signal_table(
+            [
+                {
+                    "metric": "Revenue Growth",
+                    "value": format_percent(row.get("Revenue_Growth")),
+                    "reference": "Higher is usually better",
+                    "status": "Strong" if tone_from_metric_threshold(row.get("Revenue_Growth"), good_min=0.08, bad_max=-0.02) == "good" else "Weak" if tone_from_metric_threshold(row.get("Revenue_Growth"), good_min=0.08, bad_max=-0.02) == "bad" else "Mixed",
+                    "tone": tone_from_metric_threshold(row.get("Revenue_Growth"), good_min=0.08, bad_max=-0.02),
+                    "help": ANALYSIS_HELP_TEXT["Revenue Growth"],
+                },
+                {
+                    "metric": "Current Ratio",
+                    "value": format_value(row.get("Current_Ratio")),
+                    "reference": "Above 1 is usually healthier",
+                    "status": "Healthy" if tone_from_metric_threshold(row.get("Current_Ratio"), good_min=1.2, bad_max=1.0) == "good" else "Tight" if tone_from_metric_threshold(row.get("Current_Ratio"), good_min=1.2, bad_max=1.0) == "bad" else "Mixed",
+                    "tone": tone_from_metric_threshold(row.get("Current_Ratio"), good_min=1.2, bad_max=1.0),
+                    "help": ANALYSIS_HELP_TEXT["Current Ratio"],
+                },
+                {
+                    "metric": "Debt / Equity",
+                    "value": format_value(row.get("Debt_to_Equity")),
+                    "reference": "Lower is usually safer",
+                    "status": "Low" if tone_from_metric_threshold(row.get("Debt_to_Equity"), good_max=100, bad_min=200) == "good" else "High" if tone_from_metric_threshold(row.get("Debt_to_Equity"), good_max=100, bad_min=200) == "bad" else "Moderate",
+                    "tone": tone_from_metric_threshold(row.get("Debt_to_Equity"), good_max=100, bad_min=200),
+                    "help": ANALYSIS_HELP_TEXT["Debt/Equity"],
+                },
+                {
+                    "metric": "Dividend Yield",
+                    "value": format_percent(row.get("Dividend_Yield")),
+                    "reference": "Income context",
+                    "status": "Income",
+                    "tone": "neutral",
+                    "help": ANALYSIS_HELP_TEXT["Dividend Yield"],
+                },
+            ],
+            reference_label="Guide",
+        )
+
+    with tech_tab:
+        st.caption("Technicals focus on the chart: momentum, trend direction, and whether price looks stretched or healthy.")
+        render_analysis_signal_cards(
+            [
+                {
+                    "label": "Technical Verdict",
+                    "value": str(row.get("Verdict_Technical") or "Unknown"),
+                    "note": "A shorthand read on the chart backdrop.",
+                    "tone": tone_from_signal_text(row.get("Verdict_Technical"), positives={"BUY", "STRONG BUY"}, negatives={"SELL", "STRONG SELL"}),
+                    "help": ANALYSIS_HELP_TEXT["Technical"],
+                },
+                {
+                    "label": "RSI",
+                    "value": format_value(row.get("RSI"), "{:,.1f}"),
+                    "note": "Very high or very low values can signal stretched price action.",
+                    "tone": tone_from_balanced_band(row.get("RSI"), 35, 65, 30, 70),
+                    "help": ANALYSIS_HELP_TEXT["RSI"],
+                },
+                {
+                    "label": "Trend",
+                    "value": str(row.get("SMA_Status") or "Unknown"),
+                    "note": "This compares price and moving averages to judge the broader trend.",
+                    "tone": tone_from_signal_text(row.get("SMA_Status"), positives={"BULLISH"}, negatives={"BEARISH"}),
+                    "help": ANALYSIS_HELP_TEXT["200-Day Trend"],
+                },
+                {
+                    "label": "MACD Signal",
+                    "value": str(row.get("MACD_Signal") or "Unknown"),
+                    "note": "This helps show whether momentum is improving or fading.",
+                    "tone": tone_from_signal_text(row.get("MACD_Signal"), positives={"BULLISH CROSSOVER"}, negatives={"BEARISH CROSSOVER"}),
+                    "help": ANALYSIS_HELP_TEXT["MACD Signal"],
+                },
+            ],
+            columns=4,
+        )
+        render_analysis_signal_table(
+            [
+                {
+                    "metric": "1M Momentum",
+                    "value": format_percent(row.get("Momentum_1M")),
+                    "reference": "Recent move",
+                    "status": "Strong" if tone_from_metric_threshold(row.get("Momentum_1M"), good_min=0.04, bad_max=-0.04) == "good" else "Weak" if tone_from_metric_threshold(row.get("Momentum_1M"), good_min=0.04, bad_max=-0.04) == "bad" else "Mixed",
+                    "tone": tone_from_metric_threshold(row.get("Momentum_1M"), good_min=0.04, bad_max=-0.04),
+                    "help": ANALYSIS_HELP_TEXT["1M Momentum"],
+                },
+                {
+                    "metric": "1Y Momentum",
+                    "value": format_percent(row.get("Momentum_1Y")),
+                    "reference": "Longer trend",
+                    "status": "Strong" if tone_from_metric_threshold(row.get("Momentum_1Y"), good_min=0.10, bad_max=-0.10) == "good" else "Weak" if tone_from_metric_threshold(row.get("Momentum_1Y"), good_min=0.10, bad_max=-0.10) == "bad" else "Mixed",
+                    "tone": tone_from_metric_threshold(row.get("Momentum_1Y"), good_min=0.10, bad_max=-0.10),
+                    "help": ANALYSIS_HELP_TEXT["1Y Momentum"],
+                },
+                {
+                    "metric": "Trend Strength",
+                    "value": format_value(row.get("Trend_Strength"), "{:,.0f}"),
+                    "reference": "Above 20 is constructive",
+                    "status": "Strong" if tone_from_metric_threshold(row.get("Trend_Strength"), good_min=20, bad_max=-20) == "good" else "Weak" if tone_from_metric_threshold(row.get("Trend_Strength"), good_min=20, bad_max=-20) == "bad" else "Mixed",
+                    "tone": tone_from_metric_threshold(row.get("Trend_Strength"), good_min=20, bad_max=-20),
+                    "help": ANALYSIS_HELP_TEXT["Trend Strength"],
+                },
+                {
+                    "metric": "6M Relative Strength",
+                    "value": format_percent(row.get("Relative_Strength_6M")),
+                    "reference": f"Versus {DEFAULT_BENCHMARK_TICKER}",
+                    "status": "Leader" if tone_from_metric_threshold(row.get("Relative_Strength_6M"), good_min=0.03, bad_max=-0.03) == "good" else "Laggard" if tone_from_metric_threshold(row.get("Relative_Strength_6M"), good_min=0.03, bad_max=-0.03) == "bad" else "Mixed",
+                    "tone": tone_from_metric_threshold(row.get("Relative_Strength_6M"), good_min=0.03, bad_max=-0.03),
+                    "help": ANALYSIS_HELP_TEXT["Relative Strength"],
+                },
+            ],
+            reference_label="Guide",
+        )
+
+    with sent_tab:
+        st.caption("Sentiment here is context only: headlines, analyst labels, and market chatter that can help frame the story.")
+        render_analysis_signal_cards(
+            [
+                {
+                    "label": "Headline Count",
+                    "value": format_int(row.get("Sentiment_Headline_Count")),
+                    "note": "How many recent company-related headlines were available.",
+                    "tone": "neutral",
+                    "help": ANALYSIS_HELP_TEXT["Headlines"],
+                },
+                {
+                    "label": "Analyst View",
+                    "value": str(row.get("Recommendation_Key") or "N/A"),
+                    "note": "A raw analyst label from the feed, shown without interpretation.",
+                    "tone": "neutral",
+                    "help": ANALYSIS_HELP_TEXT["Analyst View"],
+                },
+                {
+                    "label": "Target Mean",
+                    "value": format_value(row.get("Target_Mean_Price"), "${:,.2f}"),
+                    "note": "The average analyst target price, shown as context rather than a prediction.",
+                    "tone": "neutral",
+                    "help": ANALYSIS_HELP_TEXT["Target Mean"],
+                },
+                {
+                    "label": "Context Depth",
+                    "value": format_value(row.get("Sentiment_Conviction"), "{:,.0f}", "/100"),
+                    "note": "Higher means the app had more analyst and headline context to work with.",
+                    "tone": "neutral",
+                    "help": ANALYSIS_HELP_TEXT["Sentiment Conviction"],
+                },
+            ],
+            columns=4,
+        )
+        context_lines = [
+            line.strip()
+            for line in str(row.get("Sentiment_Summary") or "").split("|")
+            if line.strip()
+        ]
+        if context_lines:
+            st.markdown("##### Recent Context")
+            for line in context_lines:
+                st.write(f"- {line}")
+        else:
+            st.info("No recent company-context lines were available in the current saved snapshot.")
+
+
+def render_sector_leader_view(db):
+    st.subheader("Sector Leader")
+    st.caption("Compare all tracked names inside one sector, review relative strength and valuation side-by-side, and prepare a meeting-ready weekly briefing.")
+
+    library_df = prepare_analysis_dataframe(db.get_all_analyses())
+    if library_df.empty:
+        st.info("The research library is empty right now. Save some analyses first to unlock the sector dashboard.")
+        return
+
+    sector_options = sorted(sector for sector in library_df["Sector"].dropna().unique() if str(sector).strip())
+    if not sector_options:
+        st.info("No sectors are available in the current saved library.")
+        return
+
+    default_sector = st.session_state.get("sector_leader_sector")
+    default_index = sector_options.index(default_sector) if default_sector in sector_options else 0
+    selected_sector = st.selectbox("Sector", sector_options, index=default_index, key="sector_leader_sector")
+    sector_df = library_df[library_df["Sector"] == selected_sector].copy().reset_index(drop=True)
+    sector_tickers = sector_df["Ticker"].dropna().astype(str).str.upper().tolist()
+
+    render_analysis_signal_cards(
+        [
+            {
+                "label": "Tracked Names",
+                "value": str(len(sector_df)),
+                "note": "Saved research rows currently available for this sector.",
+                "tone": "neutral",
+                "help": ANALYSIS_HELP_TEXT["Records"],
+            },
+            {
+                "label": "Bullish Verdicts",
+                "value": str(int(sector_df["Verdict_Overall"].isin(["BUY", "STRONG BUY"]).sum())),
+                "note": "Names with a current Buy or Strong Buy verdict.",
+                "tone": "good",
+                "help": ANALYSIS_HELP_TEXT["Buy / Strong Buy"],
+            },
+            {
+                "label": "Average 6M Relative Strength",
+                "value": format_percent(sector_df["Relative_Strength_6M"].dropna().mean()),
+                "note": f"Average six-month return relative to {DEFAULT_BENCHMARK_TICKER}.",
+                "tone": tone_from_metric_threshold(sector_df["Relative_Strength_6M"].dropna().mean(), good_min=0.03, bad_max=-0.03),
+                "help": ANALYSIS_HELP_TEXT["Relative Strength"],
+            },
+            {
+                "label": "Average Composite Score",
+                "value": format_value(sector_df["Composite Score"].dropna().mean(), "{:,.1f}"),
+                "note": "A quick read on whether the sector list looks broadly constructive or mixed.",
+                "tone": tone_from_metric_threshold(sector_df["Composite Score"].dropna().mean(), good_min=1, bad_max=-1),
+                "help": ANALYSIS_HELP_TEXT["Average Composite Score"],
+            },
+        ],
+        columns=4,
+    )
+
+    st.markdown("##### Sector Scoreboard")
+    sector_table = sector_df[
+        [
+            "Ticker",
+            "Industry",
+            "Verdict_Overall",
+            "PE_Ratio",
+            "EV_EBITDA",
+            "PS_Ratio",
+            "Relative_Strength_3M",
+            "Relative_Strength_6M",
+            "Relative_Strength_1Y",
+            "Risk_Flags",
+            "Freshness",
+        ]
+    ].copy()
+    for column_name in ["PE_Ratio", "EV_EBITDA", "PS_Ratio"]:
+        sector_table[column_name] = sector_table[column_name].map(format_value)
+    for column_name in ["Relative_Strength_3M", "Relative_Strength_6M", "Relative_Strength_1Y"]:
+        sector_table[column_name] = sector_table[column_name].map(format_percent)
+    st.dataframe(sector_table, width="stretch")
+
+    st.markdown("##### Sector News")
+    sector_news_df = build_sector_news_dataframe(sector_tickers)
+    if sector_news_df.empty:
+        st.info("No recent fundamental-event-tagged headlines were available for the saved names in this sector.")
+    else:
+        st.dataframe(sector_news_df, width="stretch")
+
+    briefing_text = build_sector_weekly_briefing(selected_sector, sector_df, sector_news_df)
+    st.markdown("##### Weekly Briefing")
+    st.download_button(
+        "Download Weekly Briefing",
+        data=briefing_text.encode("utf-8"),
+        file_name=f"{selected_sector.lower().replace(' ', '_')}_weekly_briefing.txt",
+        mime="text/plain",
+        width="stretch",
+    )
+    st.text_area("Briefing Preview", value=briefing_text, height=260)
+
+
+def render_portfolio_manager_view(db, portfolio_bot, active_preset_name, active_assumption_fingerprint):
+    st.subheader("Portfolio Manager")
+    st.caption("View portfolio dashboards without a password. Authentication is only required for portfolio changes and decision logging.")
+
+    selected_portfolio = st.selectbox("Portfolio", PORTFOLIO_OPTIONS, key="pm_selected_portfolio")
+    memberships_df = db.get_portfolio_memberships()
+    selected_tickers = db.get_portfolio_tickers(selected_portfolio)
+    library_df = prepare_analysis_dataframe(db.get_all_analyses())
+    composition = build_portfolio_composition_snapshot(library_df, selected_tickers)
+
+    render_analysis_signal_cards(
+        [
+            {
+                "label": "Holdings",
+                "value": str(composition["holdings_count"]),
+                "note": "Total tickers currently assigned to the selected portfolio.",
+                "tone": "neutral",
+                "help": ANALYSIS_HELP_TEXT["Records"],
+            },
+            {
+                "label": "Analyzed Holdings",
+                "value": str(composition["analyzed_count"]),
+                "note": "How many assigned names already have a saved research row in the library.",
+                "tone": tone_from_metric_threshold(composition["analyzed_count"], good_min=max(1, composition["holdings_count"] - 1), bad_max=0),
+                "help": ANALYSIS_HELP_TEXT["Freshness"],
+            },
+            {
+                "label": "Weighted Avg P/E",
+                "value": format_value(composition["weighted_pe"]),
+                "note": "An equal-weight snapshot of the selected portfolio's earnings multiple.",
+                "tone": "neutral",
+                "help": ANALYSIS_HELP_TEXT["P/E Ratio"],
+            },
+            {
+                "label": "Weighted Avg Beta",
+                "value": format_value(composition["weighted_beta"]),
+                "note": "An equal-weight snapshot of overall market sensitivity.",
+                "tone": "neutral",
+                "help": ANALYSIS_HELP_TEXT["Portfolio Beta"],
+            },
+            {
+                "label": "Weighted Avg Dividend Yield",
+                "value": format_percent(composition["weighted_dividend_yield"]),
+                "note": "An equal-weight snapshot of income exposure across the selected portfolio.",
+                "tone": "neutral",
+                "help": ANALYSIS_HELP_TEXT["Dividend Yield"],
+            },
+        ],
+        columns=5,
+    )
+
+    sector_breakdown = composition["sector_breakdown"].copy()
+    if not sector_breakdown.empty:
+        sector_breakdown["Weight"] = sector_breakdown["Weight"].map(format_percent)
+    sector_col, holdings_col = st.columns([1, 2])
+    with sector_col:
+        st.markdown("##### Sector Breakdown")
+        if sector_breakdown.empty:
+            st.info("No analyzed holdings are available yet for a sector breakdown.")
+        else:
+            st.dataframe(sector_breakdown, width="stretch")
+    with holdings_col:
+        st.markdown("##### Portfolio Memberships")
+        if memberships_df.empty:
+            st.info("No portfolio memberships have been saved yet.")
+        else:
+            membership_view = memberships_df.copy()
+            membership_view.columns = ["Ticker", "Portfolio"]
+            st.dataframe(membership_view, width="stretch")
+
+    st.markdown("##### Change Controls")
+    manager_authenticated = render_password_gate(
+        "portfolio_manager_authenticated",
+        PORTFOLIO_MANAGER_PASSWORD_SECRET,
+        "Portfolio Manager Access",
+        "Unlock this section to manage portfolio memberships and write new entries to the decision log.",
+        "Unlock Portfolio Manager",
+    )
+    if manager_authenticated:
+        manage_col, decision_col = st.columns(2)
+        with manage_col:
+            st.markdown("###### Manage Tickers")
+            manage_ticker = st.text_input(
+                "Ticker to Assign",
+                value=st.session_state.get("pm_manage_ticker", ""),
+                key="pm_manage_ticker",
+            )
+            selected_assignments = st.multiselect(
+                "Assign to Portfolios",
+                PORTFOLIO_OPTIONS,
+                key="pm_manage_portfolios",
+                help="Select one or more portfolios. Leaving this blank removes the ticker from all portfolios.",
+            )
+            if st.button("Save Memberships", key="pm_save_memberships", width="stretch"):
+                cleaned_ticker = str(manage_ticker or "").strip().upper()
+                if not cleaned_ticker:
+                    st.error("Enter a ticker before saving portfolio memberships.")
+                else:
+                    db.save_portfolio_memberships(cleaned_ticker, selected_assignments)
+                    st.session_state.pm_membership_feedback = f"Updated portfolio assignments for {cleaned_ticker}."
+                    st.rerun()
+            if st.session_state.get("pm_membership_feedback"):
+                st.success(st.session_state.pop("pm_membership_feedback"))
+
+        with decision_col:
+            st.markdown("###### Decision Log Entry")
+            default_portfolio_index = PORTFOLIO_OPTIONS.index(selected_portfolio) if selected_portfolio in PORTFOLIO_OPTIONS else 0
+            with st.form("pm_decision_log_form"):
+                log_portfolio = st.selectbox("Portfolio", PORTFOLIO_OPTIONS, index=default_portfolio_index)
+                log_ticker = st.text_input("Ticker")
+                log_recommendation = st.selectbox("Recommendation", ["Buy", "Sell", "Hold"])
+                log_rationale = st.text_area("Rationale", height=140)
+                save_log_entry = st.form_submit_button("Save Decision", type="primary", width="stretch")
+            if save_log_entry:
+                cleaned_ticker = str(log_ticker or "").strip().upper()
+                cleaned_rationale = str(log_rationale or "").strip()
+                if not cleaned_ticker or not cleaned_rationale:
+                    st.error("Portfolio, ticker, recommendation, and rationale are all required.")
+                else:
+                    db.add_decision_log_entry(log_portfolio, cleaned_ticker, log_recommendation, cleaned_rationale)
+                    st.session_state.pm_log_feedback = f"Saved {log_recommendation} decision for {cleaned_ticker}."
+                    st.rerun()
+            if st.session_state.get("pm_log_feedback"):
+                st.success(st.session_state.pop("pm_log_feedback"))
+
+    st.markdown("##### Performance Dashboard")
+    with st.form("pm_dashboard_form"):
+        pm_col_1, pm_col_2, pm_col_3 = st.columns([2, 1, 1])
+        with pm_col_1:
+            benchmark_ticker = st.text_input("Benchmark", value=DEFAULT_BENCHMARK_TICKER, key="pm_benchmark")
+        with pm_col_2:
+            lookback_period = st.selectbox("Lookback Period", ["1y", "3y", "5y"], index=1, key="pm_lookback_period")
+        with pm_col_3:
+            risk_free_percent = st.number_input("Risk-Free Rate (%)", min_value=0.0, max_value=15.0, value=4.0, step=0.25, key="pm_risk_free")
+        pm_col_4, pm_col_5 = st.columns([2, 1])
+        with pm_col_4:
+            max_weight_percent = st.slider("Max Single-Stock Weight (%)", min_value=15, max_value=50, value=30, step=5, key="pm_max_weight")
+        with pm_col_5:
+            simulations = st.select_slider("Frontier Simulations", options=[1000, 2000, 3000, 4000, 5000], value=3000, key="pm_simulations")
+        refresh_dashboard = st.form_submit_button("Build / Refresh Selected Portfolio Dashboard", type="primary", width="stretch")
+
+    if refresh_dashboard:
+        if len(selected_tickers) < 2:
+            st.error("Assign at least two tickers to the selected portfolio before building its dashboard.")
+        elif len(selected_tickers) * (max_weight_percent / 100) < 1:
+            st.error("The max single-stock weight is too low for the number of assigned holdings.")
+        else:
+            with st.spinner(f"Building the {selected_portfolio} dashboard..."):
+                portfolio_result = portfolio_bot.analyze_portfolio(
+                    tickers=selected_tickers,
+                    benchmark_ticker=benchmark_ticker.strip().upper() or DEFAULT_BENCHMARK_TICKER,
+                    period=lookback_period,
+                    risk_free_rate=risk_free_percent / 100,
+                    max_weight=max_weight_percent / 100,
+                    simulations=simulations,
+                )
+            if not portfolio_result:
+                st.session_state.pop("pm_portfolio_result", None)
+                st.session_state.pop("pm_portfolio_config", None)
+                st.error(portfolio_bot.last_error or "Unable to build the selected portfolio dashboard right now.")
+            else:
+                portfolio_result["selected_portfolio"] = selected_portfolio
+                st.session_state.pm_portfolio_result = portfolio_result
+                st.session_state.pm_portfolio_config = {
+                    "selected_portfolio": selected_portfolio,
+                    "benchmark": benchmark_ticker.strip().upper() or DEFAULT_BENCHMARK_TICKER,
+                    "period": lookback_period,
+                    "risk_free_percent": risk_free_percent,
+                    "max_weight_percent": max_weight_percent,
+                    "simulations": simulations,
+                }
+
+    pm_result = st.session_state.get("pm_portfolio_result")
+    pm_config = st.session_state.get("pm_portfolio_config", {})
+    if pm_result and pm_config.get("selected_portfolio") == selected_portfolio:
+        render_portfolio_result(pm_result, pm_config, active_preset_name, active_assumption_fingerprint)
+        asset_prices = pm_result.get("asset_prices")
+        recommendations = pm_result.get("recommendations", pd.DataFrame()).copy()
+        if isinstance(asset_prices, pd.DataFrame) and not asset_prices.empty and not recommendations.empty:
+            total_returns = (asset_prices.iloc[-1] / asset_prices.iloc[0] - 1).rename("Period Return")
+            pnl_table = recommendations.merge(
+                total_returns.reset_index().rename(columns={"index": "Ticker"}),
+                on="Ticker",
+                how="left",
+            )
+            pnl_table = pnl_table[["Ticker", "Name", "Sector", "Recommended Weight", "Period Return", "Role"]].copy()
+            pnl_table["Recommended Weight"] = pnl_table["Recommended Weight"].map(format_percent)
+            pnl_table["Period Return"] = pnl_table["Period Return"].map(format_percent)
+            st.markdown("##### Position-Level P&L Snapshot")
+            st.caption("This uses the selected lookback window's total return as a clean position-level performance proxy.")
+            st.dataframe(pnl_table, width="stretch")
+
+    st.markdown("##### Decision Log")
+    decision_filter_col_1, decision_filter_col_2 = st.columns([1, 1])
+    with decision_filter_col_1:
+        log_portfolio_filter = st.selectbox(
+            "Portfolio Filter",
+            ["All Portfolios"] + PORTFOLIO_OPTIONS,
+            index=(["All Portfolios"] + PORTFOLIO_OPTIONS).index(selected_portfolio),
+            key="pm_log_portfolio_filter",
+        )
+    with decision_filter_col_2:
+        log_ticker_filter = st.text_input("Ticker Filter", key="pm_log_ticker_filter")
+
+    filtered_log = db.get_decision_log(
+        portfolio=None if log_portfolio_filter == "All Portfolios" else log_portfolio_filter,
+        ticker=log_ticker_filter,
+    )
+    if filtered_log.empty:
+        st.info("No decision log entries match the current filters.")
+    else:
+        log_display = filtered_log.copy()
+        log_display.columns = ["ID", "Timestamp", "Portfolio", "Ticker", "Recommendation", "Rationale"]
+        st.dataframe(log_display, width="stretch")
+
+    st.markdown("##### Trade Flags")
+    view_all_portfolios = st.toggle(
+        "View All Portfolios",
+        value=False,
+        help="Turn this on to scan every portfolio for decision flips instead of only the selected one.",
+    )
+    flag_mode = "All Portfolios" if view_all_portfolios else selected_portfolio
+    st.caption(f"Current scope: {flag_mode}")
+    trade_flags = build_trade_flags_dataframe(
+        db,
+        library_df,
+        selected_portfolio=selected_portfolio,
+        view_all_portfolios=view_all_portfolios,
+    )
+    if trade_flags.empty:
+        st.success("No trade flags were found between the latest logged decisions and the current saved model verdicts.")
+    else:
+        st.dataframe(trade_flags, width="stretch")
+
+
 st.set_page_config(page_title="ZB Compiler", layout="wide", page_icon="SE")
 
 db = get_database_manager()
@@ -6754,7 +7929,8 @@ active_preset_name = detect_matching_preset(model_settings)
 active_assumption_fingerprint = get_assumption_fingerprint(model_settings)
 
 st.title("ZB Compiler")
-st.caption(f"Version: {APP_VERSION}")
+storage_status = "Connected to Postgres" if db.storage_backend == "postgres" else "Using SQLite"
+st.caption(f"Version: {APP_VERSION} | {storage_status}")
 if db.storage_notice:
     st.warning(db.storage_notice)
 
@@ -6778,9 +7954,72 @@ if RUN_STARTUP_REFRESH and os.environ.get("STOCK_ENGINE_SKIP_STARTUP_REFRESH") !
 sensitivity_default_ticker = st.session_state.get("sensitivity_last_ticker") or st.session_state.get("single_ticker", "")
 backtest_default_ticker = st.session_state.get("backtest_last_ticker") or st.session_state.get("single_ticker", "")
 
-stock_tab, compare_tab, portfolio_tab, sensitivity_tab, backtest_tab, library_tab, readme_tab, changelog_tab, methodology_tab, options_tab = st.tabs(
-    ["Stock Analysis", "Compare", "Portfolio", "Sensitivity", "Backtest", "Library", "ReadMe / Usage", "Changelog", "Methodology", "Options"]
+senior_analyst_tools_enabled = False
+hidden_senior_placeholders = []
+stock_tab = None
+compare_tab = None
+portfolio_tab = None
+sensitivity_tab = None
+backtest_tab = None
+library_tab = None
+readme_tab = None
+changelog_tab = None
+methodology_tab = None
+options_tab = None
+
+analyst_tab, sector_leader_tab, portfolio_manager_tab = st.tabs(
+    ["Analyst", "Sector Leader", "Portfolio Manager"]
 )
+
+with analyst_tab:
+    analyst_new_tab, analyst_senior_tab = st.tabs(["New Analyst", "Senior Analyst"])
+    with analyst_new_tab:
+        render_new_analyst_view(db, bot)
+    with analyst_senior_tab:
+        senior_analyst_tools_enabled = render_password_gate(
+            "senior_analyst_authenticated",
+            SENIOR_ANALYST_PASSWORD_SECRET,
+            "Senior Analyst Access",
+            "Unlock the full analyst toolkit, including valuation labs, peer analysis, SEC filing automation, backtesting, and model controls.",
+            "Unlock Senior Analyst",
+        )
+        if senior_analyst_tools_enabled:
+            stock_tab, compare_tab, sensitivity_tab, backtest_tab, library_tab, senior_reference_tab = st.tabs(
+                ["Single Stock", "Compare", "Sensitivity", "Backtest", "Library", "Settings & Reference"]
+            )
+            readme_tab = senior_reference_tab.container()
+            changelog_tab = senior_reference_tab.container()
+            methodology_tab = senior_reference_tab.container()
+            options_tab = senior_reference_tab.container()
+        else:
+            stock_tab = st.empty()
+            compare_tab = st.empty()
+            sensitivity_tab = st.empty()
+            backtest_tab = st.empty()
+            library_tab = st.empty()
+            readme_tab = st.empty()
+            changelog_tab = st.empty()
+            methodology_tab = st.empty()
+            options_tab = st.empty()
+            hidden_senior_placeholders = [
+                stock_tab,
+                compare_tab,
+                sensitivity_tab,
+                backtest_tab,
+                library_tab,
+                readme_tab,
+                changelog_tab,
+                methodology_tab,
+                options_tab,
+            ]
+
+with sector_leader_tab:
+    render_sector_leader_view(db)
+
+with portfolio_manager_tab:
+    render_portfolio_manager_view(db, portfolio_bot, active_preset_name, active_assumption_fingerprint)
+
+portfolio_tab = st.empty()
 
 with stock_tab:
     c1, c2 = st.columns([3, 1])
@@ -9337,4 +10576,15 @@ with options_tab:
             "notes": notes,
         }
         st.rerun()
+
+for hidden_placeholder in hidden_senior_placeholders:
+    try:
+        hidden_placeholder.empty()
+    except Exception:
+        pass
+
+try:
+    portfolio_tab.empty()
+except Exception:
+    pass
 
