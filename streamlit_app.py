@@ -12,9 +12,11 @@ import tempfile
 import shutil
 from contextlib import contextmanager
 from pathlib import Path
+from urllib.parse import urlparse
 
 import numpy as np
 import pandas as pd
+import psycopg
 import streamlit as st
 import yfinance as yf
 
@@ -22,6 +24,8 @@ DB_FILENAME = "stocks_data.db"
 APP_DIR = Path(__file__).resolve().parent
 CONFIGURED_DB_PATH = Path(os.environ.get("STOCKS_DB_PATH", DB_FILENAME)).expanduser()
 DB_PATH = CONFIGURED_DB_PATH if CONFIGURED_DB_PATH.is_absolute() else (APP_DIR / CONFIGURED_DB_PATH).resolve()
+DATABASE_URL = os.environ.get("STOCKS_DATABASE_URL", os.environ.get("DATABASE_URL", "")).strip()
+RUN_STARTUP_REFRESH = os.environ.get("STOCK_ENGINE_RUN_STARTUP_REFRESH", "").strip() == "1"
 # Increase by 0.0.1 after each major update pass that includes 10+ meaningful changes.
 APP_VERSION = "1.0.1"
 README_USAGE_TEXT = """
@@ -434,7 +438,7 @@ ANALYSIS_HELP_TEXT = {
     "Historical FCF Growth": "The recent compound growth rate in free cash flow based on SEC filing history.",
     "Historical Revenue Growth": "The recent compound growth rate in revenue based on SEC filing history.",
     "Terminal Growth": "The long-run growth rate used in the DCF terminal value once the explicit five-year forecast ends.",
-    "Base FCF": "The most recent annual free cash flow used as the starting point for the DCF projection.",
+    "Base FCF": "A normalized free cash flow starting point built from recent SEC operating cash flow, capex history, and maintenance-capex smoothing when the latest year looks distorted.",
     "Cost of Equity": "The return shareholders are assumed to require, estimated with a CAPM-style approach.",
     "Cost of Debt": "The company's after-tax borrowing cost used inside the DCF discount rate.",
     "Equity Weight": "The share of the company's capital structure represented by market equity.",
@@ -1094,6 +1098,13 @@ def build_database_download_bytes(db_path):
             temp_path.unlink()
 
 
+def is_postgres_database_url(value):
+    if not value:
+        return False
+    parsed = urlparse(str(value))
+    return parsed.scheme in {"postgres", "postgresql"}
+
+
 def extract_dcf_fields(record):
     if record is None:
         return {}
@@ -1220,6 +1231,32 @@ def format_startup_refresh_message(state):
     return message
 
 
+def collect_stale_analysis_tickers(db, stale_after_hours=AUTO_REFRESH_STALE_AFTER_HOURS):
+    saved_rows = db.get_all_analyses()
+    if saved_rows.empty or "Ticker" not in saved_rows.columns:
+        return []
+
+    refresh_candidates = saved_rows.copy()
+    if "Last_Updated" in refresh_candidates.columns:
+        refresh_candidates["Last_Updated_Parsed"] = refresh_candidates["Last_Updated"].map(parse_last_updated)
+        stale_cutoff = datetime.datetime.now() - datetime.timedelta(hours=stale_after_hours)
+        refresh_candidates = refresh_candidates[
+            refresh_candidates["Last_Updated_Parsed"].isna()
+            | (refresh_candidates["Last_Updated_Parsed"] < stale_cutoff)
+        ]
+        refresh_candidates = refresh_candidates.sort_values("Last_Updated_Parsed", ascending=True, na_position="first")
+
+    return (
+        refresh_candidates["Ticker"]
+        .dropna()
+        .astype(str)
+        .str.strip()
+        .str.upper()
+        .drop_duplicates()
+        .tolist()
+    )
+
+
 def refresh_saved_analyses_on_launch(db, settings, badge_placeholder=None):
     while True:
         with STARTUP_REFRESH_LOCK:
@@ -1246,8 +1283,8 @@ def refresh_saved_analyses_on_launch(db, settings, badge_placeholder=None):
 
         if is_leader:
             try:
-                saved_rows = db.get_all_analyses()
-                if saved_rows.empty or "Ticker" not in saved_rows.columns:
+                tickers = collect_stale_analysis_tickers(db, stale_after_hours=AUTO_REFRESH_STALE_AFTER_HOURS)
+                if not tickers:
                     with STARTUP_REFRESH_LOCK:
                         STARTUP_REFRESH_STATE.update(
                             {
@@ -1261,26 +1298,6 @@ def refresh_saved_analyses_on_launch(db, settings, badge_placeholder=None):
                             }
                         )
                     return get_startup_refresh_snapshot()
-
-                refresh_candidates = saved_rows.copy()
-                if "Last_Updated" in refresh_candidates.columns:
-                    refresh_candidates["Last_Updated_Parsed"] = refresh_candidates["Last_Updated"].map(parse_last_updated)
-                    stale_cutoff = datetime.datetime.now() - datetime.timedelta(hours=AUTO_REFRESH_STALE_AFTER_HOURS)
-                    refresh_candidates = refresh_candidates[
-                        refresh_candidates["Last_Updated_Parsed"].isna()
-                        | (refresh_candidates["Last_Updated_Parsed"] < stale_cutoff)
-                    ]
-                    refresh_candidates = refresh_candidates.sort_values("Last_Updated_Parsed", ascending=True, na_position="first")
-
-                tickers = (
-                    refresh_candidates["Ticker"]
-                    .dropna()
-                    .astype(str)
-                    .str.strip()
-                    .str.upper()
-                    .drop_duplicates()
-                    .tolist()
-                )
                 analyst = StockAnalyst(db)
                 total = len(tickers)
 
@@ -1332,7 +1349,7 @@ def refresh_saved_analyses_on_launch(db, settings, badge_placeholder=None):
                         {
                             "running": False,
                             "complete": True,
-                            "processed": total,
+                            "processed": updated_count + failed_count,
                             "updated": updated_count,
                             "failed": failed_count,
                             "finished_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
@@ -2487,6 +2504,8 @@ def extract_company_fact_entries(companyfacts, concepts, *, preferred_units=None
     facts = companyfacts.get("facts", {}).get("us-gaap", {})
     preferred_units = preferred_units or ["USD"]
     allowed_forms = set(forms or SEC_ANNUAL_FORMS)
+    best_entries = []
+    best_score = None
 
     for concept in concepts:
         concept_payload = facts.get(concept)
@@ -2538,8 +2557,24 @@ def extract_company_fact_entries(companyfacts, concepts, *, preferred_units=None
             current = deduped.get(entry["year"])
             if current is None or sec_entry_priority(entry) > sec_entry_priority(current):
                 deduped[entry["year"]] = entry
-        return [deduped[year] for year in sorted(deduped)]
-    return []
+
+        selected_entries = [deduped[year] for year in sorted(deduped)]
+        latest_year = max(entry["year"] for entry in selected_entries)
+        nonzero_count = sum(abs(entry["value"]) > 1e-9 for entry in selected_entries)
+        fy_count = sum(str(entry.get("fp", "")).upper() == "FY" for entry in selected_entries)
+        latest_value = safe_num(selected_entries[-1].get("value"))
+        concept_score = (
+            latest_year,
+            len(selected_entries),
+            nonzero_count,
+            fy_count,
+            1 if has_numeric_value(latest_value) and abs(latest_value) > 1e-9 else 0,
+        )
+        if best_score is None or concept_score > best_score:
+            best_entries = selected_entries
+            best_score = concept_score
+
+    return best_entries
 
 
 def latest_sec_metric_value(entries):
@@ -2572,8 +2607,13 @@ def build_sec_financial_dataset(companyfacts):
         },
         "NetIncome": {"concepts": ["NetIncomeLoss"], "preferred_units": ["USD"]},
         "OperatingIncome": {"concepts": ["OperatingIncomeLoss"], "preferred_units": ["USD"]},
-        "LongTermDebt": {
-            "concepts": ["LongTermDebtAndCapitalLeaseObligations", "LongTermDebtNoncurrent", "LongTermDebt"],
+        "DebtBalance": {
+            "concepts": [
+                "DebtLongtermAndShorttermCombinedAmount",
+                "LongTermDebtAndCapitalLeaseObligations",
+                "LongTermDebtNoncurrent",
+                "LongTermDebt",
+            ],
             "preferred_units": ["USD"],
         },
         "Cash": {"concepts": ["CashAndCashEquivalentsAtCarryingValue"], "preferred_units": ["USD"]},
@@ -2581,10 +2621,31 @@ def build_sec_financial_dataset(companyfacts):
             "concepts": ["CommonStockSharesOutstanding", "WeightedAverageNumberOfDilutedSharesOutstanding"],
             "preferred_units": ["shares"],
         },
-        "Depreciation": {"concepts": ["DepreciationDepletionAndAmortization"], "preferred_units": ["USD"]},
+        "Depreciation": {
+            "concepts": [
+                "DepreciationDepletionAndAmortization",
+                "DepreciationAndAmortization",
+                "Depreciation",
+            ],
+            "preferred_units": ["USD"],
+        },
+        "Amortization": {
+            "concepts": [
+                "AmortizationOfIntangibleAssets",
+                "FiniteLivedIntangibleAssetsAmortizationExpense",
+            ],
+            "preferred_units": ["USD"],
+        },
         "TaxExpense": {"concepts": ["IncomeTaxExpenseBenefit"], "preferred_units": ["USD"]},
         "InterestExpense": {"concepts": ["InterestExpenseAndDebtExpense", "InterestExpense"], "preferred_units": ["USD"]},
-        "PretaxIncome": {"concepts": ["IncomeBeforeTaxExpenseBenefit", "PretaxIncome"], "preferred_units": ["USD"]},
+        "PretaxIncome": {
+            "concepts": [
+                "IncomeBeforeTaxExpenseBenefit",
+                "PretaxIncome",
+                "IncomeLossFromContinuingOperationsBeforeIncomeTaxesMinorityInterestAndIncomeLossFromEquityMethodInvestments",
+            ],
+            "preferred_units": ["USD"],
+        },
     }
 
     metric_entries = {}
@@ -2704,7 +2765,9 @@ def compute_wacc_components(ticker, info, sec_dataset, dcf_settings):
         beta = 1.0
 
     market_cap = safe_num((info or {}).get("marketCap"))
-    long_term_debt = safe_num(latest.get("LongTermDebt"))
+    debt_balance = safe_num(latest.get("DebtBalance"))
+    if not has_numeric_value(debt_balance):
+        debt_balance = safe_num((info or {}).get("totalDebt"))
     cash = safe_num(latest.get("Cash"))
     shares_outstanding = safe_num(latest.get("SharesOutstanding")) or safe_num((info or {}).get("sharesOutstanding"))
 
@@ -2720,8 +2783,8 @@ def compute_wacc_components(ticker, info, sec_dataset, dcf_settings):
 
     interest_expense = safe_num(latest.get("InterestExpense"))
     pre_tax_cost_of_debt = (
-        safe_divide(abs(interest_expense), abs(long_term_debt))
-        if has_numeric_value(interest_expense) and has_numeric_value(long_term_debt)
+        safe_divide(abs(interest_expense), abs(debt_balance))
+        if has_numeric_value(interest_expense) and has_numeric_value(debt_balance)
         else None
     )
     if not has_numeric_value(pre_tax_cost_of_debt) or pre_tax_cost_of_debt <= 0 or pre_tax_cost_of_debt > 0.20:
@@ -2731,13 +2794,13 @@ def compute_wacc_components(ticker, info, sec_dataset, dcf_settings):
     else:
         after_tax_cost_of_debt = float(pre_tax_cost_of_debt * (1 - effective_tax_rate))
 
-    if has_numeric_value(market_cap) and has_numeric_value(long_term_debt) and (market_cap + long_term_debt) > 0:
-        equity_weight = float(market_cap / (market_cap + long_term_debt))
-        debt_weight = float(long_term_debt / (market_cap + long_term_debt))
+    if has_numeric_value(market_cap) and has_numeric_value(debt_balance) and (market_cap + debt_balance) > 0:
+        equity_weight = float(market_cap / (market_cap + debt_balance))
+        debt_weight = float(debt_balance / (market_cap + debt_balance))
     elif has_numeric_value(market_cap) and market_cap > 0:
         equity_weight = 1.0
         debt_weight = 0.0
-    elif has_numeric_value(long_term_debt) and long_term_debt > 0:
+    elif has_numeric_value(debt_balance) and debt_balance > 0:
         equity_weight = 0.0
         debt_weight = 1.0
     else:
@@ -2757,7 +2820,7 @@ def compute_wacc_components(ticker, info, sec_dataset, dcf_settings):
         "debt_weight": debt_weight,
         "wacc": wacc,
         "cash": cash,
-        "long_term_debt": long_term_debt,
+        "debt_balance": debt_balance,
         "shares_outstanding": shares_outstanding,
         "market_cap": market_cap,
         "tax_rate": effective_tax_rate,
@@ -2769,10 +2832,20 @@ def determine_growth_assumptions(history_rows, dcf_settings=None):
     dcf_settings = normalize_dcf_settings(dcf_settings or {})
     historical_fcf_growth = calculate_growth_rate_from_series(history_rows, "FreeCashFlow", lookback_years=3)
     historical_revenue_growth = calculate_growth_rate_from_series(history_rows, "Revenue", lookback_years=3)
-    historical_candidates = [
-        value for value in [historical_fcf_growth, historical_revenue_growth] if has_numeric_value(value)
-    ]
-    historical_growth_estimate = float(np.mean(historical_candidates)) if historical_candidates else 0.04
+    if has_numeric_value(historical_fcf_growth) and has_numeric_value(historical_revenue_growth):
+        growth_gap = abs(float(historical_fcf_growth) - float(historical_revenue_growth))
+        if growth_gap >= 0.12:
+            historical_growth_estimate = float(
+                historical_fcf_growth * 0.35 + historical_revenue_growth * 0.65
+            )
+        else:
+            historical_growth_estimate = float(np.mean([historical_fcf_growth, historical_revenue_growth]))
+    elif has_numeric_value(historical_revenue_growth):
+        historical_growth_estimate = float(historical_revenue_growth)
+    elif has_numeric_value(historical_fcf_growth):
+        historical_growth_estimate = float(historical_fcf_growth)
+    else:
+        historical_growth_estimate = 0.04
 
     manual_growth_rate = safe_num(dcf_settings.get("manual_growth_rate"))
     selected_source_rate = manual_growth_rate if has_numeric_value(manual_growth_rate) else historical_growth_estimate
@@ -2807,6 +2880,178 @@ def determine_growth_assumptions(history_rows, dcf_settings=None):
             dcf_settings["terminal_growth_rate"],
             dcf_settings["projection_years"],
         ),
+    }
+
+
+def extract_recent_metric_values(history_rows, field_name, limit=5):
+    values = []
+    for row in history_rows or []:
+        value = safe_num(row.get(field_name))
+        if has_numeric_value(value):
+            values.append(float(value))
+    return values[-limit:]
+
+
+def calculate_normalized_base_fcf(history_rows, latest_metrics=None):
+    latest_metrics = latest_metrics or {}
+    valid_rows = [
+        row for row in history_rows or []
+        if has_numeric_value(row.get("OperatingCF")) or has_numeric_value(row.get("FreeCashFlow"))
+    ]
+    if not valid_rows:
+        return {
+            "base_fcf": None,
+            "latest_fcf": None,
+            "normalized_fcf": None,
+            "maintenance_capex": None,
+            "used_normalized_capex": False,
+            "capex_source": "Unavailable",
+        }
+
+    latest_row = valid_rows[-1]
+    latest_operating_cf = safe_num(latest_row.get("OperatingCF"))
+    latest_capex = safe_num(latest_row.get("CapEx"))
+    latest_fcf = safe_num(latest_row.get("FreeCashFlow"))
+    depreciation = safe_num(latest_metrics.get("Depreciation"))
+
+    recent_capex_values = extract_recent_metric_values(valid_rows, "CapEx", limit=5)
+    recent_fcf_values = extract_recent_metric_values(valid_rows, "FreeCashFlow", limit=5)
+    recent_capex_window = recent_capex_values[-3:] if recent_capex_values else []
+    recent_fcf_window = recent_fcf_values[-3:] if recent_fcf_values else []
+    median_recent_capex = float(np.median(recent_capex_window)) if recent_capex_window else None
+    median_recent_fcf = float(np.median(recent_fcf_window)) if recent_fcf_window else None
+
+    maintenance_floor = depreciation if has_numeric_value(depreciation) else median_recent_capex
+    maintenance_capex = latest_capex
+    capex_source = "Latest reported capex"
+    used_normalized_capex = False
+
+    if has_numeric_value(median_recent_capex):
+        spike_threshold = max(
+            median_recent_capex * 1.35,
+            (maintenance_floor if has_numeric_value(maintenance_floor) else median_recent_capex) * 1.75,
+        )
+        if not has_numeric_value(maintenance_capex):
+            maintenance_capex = max(
+                median_recent_capex,
+                maintenance_floor if has_numeric_value(maintenance_floor) else 0.0,
+            )
+            capex_source = "Recent median capex"
+            used_normalized_capex = True
+        elif maintenance_capex > spike_threshold:
+            maintenance_capex = max(
+                median_recent_capex,
+                maintenance_floor if has_numeric_value(maintenance_floor) else 0.0,
+            )
+            capex_source = "Normalized capex from recent median"
+            used_normalized_capex = True
+    elif not has_numeric_value(maintenance_capex) and has_numeric_value(maintenance_floor):
+        maintenance_capex = float(maintenance_floor)
+        capex_source = "Depreciation proxy"
+        used_normalized_capex = True
+
+    normalized_fcf = (
+        latest_operating_cf - maintenance_capex
+        if has_numeric_value(latest_operating_cf) and has_numeric_value(maintenance_capex)
+        else latest_fcf
+    )
+
+    candidate_fcfs = []
+    if has_numeric_value(normalized_fcf):
+        candidate_fcfs.append(float(normalized_fcf))
+    if has_numeric_value(median_recent_fcf):
+        candidate_fcfs.append(float(median_recent_fcf))
+    if len(recent_fcf_window) >= 2:
+        weights = np.arange(1, len(recent_fcf_window) + 1)
+        candidate_fcfs.append(float(np.average(recent_fcf_window, weights=weights)))
+
+    positive_recent_count = sum(value > 0 for value in recent_fcf_window)
+    if (
+        has_numeric_value(latest_fcf)
+        and latest_fcf > 0
+        and positive_recent_count >= 2
+        and not used_normalized_capex
+    ):
+        candidate_fcfs.append(float(latest_fcf))
+
+    if not candidate_fcfs:
+        base_fcf = latest_fcf
+    elif positive_recent_count == 0 and (not has_numeric_value(normalized_fcf) or normalized_fcf <= 0):
+        base_fcf = max(candidate_fcfs)
+    else:
+        positive_candidates = [value for value in candidate_fcfs if value > 0]
+        base_fcf = float(np.mean(positive_candidates or candidate_fcfs))
+
+    return {
+        "base_fcf": base_fcf,
+        "latest_fcf": latest_fcf,
+        "normalized_fcf": normalized_fcf,
+        "maintenance_capex": maintenance_capex,
+        "used_normalized_capex": used_normalized_capex,
+        "capex_source": capex_source,
+    }
+
+
+def estimate_terminal_exit_value(info, sec_dataset, growth_schedule, wacc, projection_years, peer_benchmarks=None):
+    latest = sec_dataset.get("latest", {})
+    latest_revenue = safe_num(latest.get("Revenue"))
+    if not has_numeric_value(latest_revenue) or latest_revenue <= 0:
+        return {}
+
+    projected_revenue = float(latest_revenue)
+    for growth_rate in growth_schedule or []:
+        projected_revenue *= (1 + growth_rate)
+
+    current_ebitda = safe_num((info or {}).get("ebitda"))
+    if not has_numeric_value(current_ebitda):
+        operating_income = safe_num(latest.get("OperatingIncome"))
+        depreciation = safe_num(latest.get("Depreciation"))
+        amortization = safe_num(latest.get("Amortization"))
+        if has_numeric_value(operating_income):
+            current_ebitda = float(operating_income + (depreciation or 0.0) + (amortization or 0.0))
+
+    exit_candidates = []
+    year5_ebitda = None
+    current_ev_ebitda = safe_num((info or {}).get("enterpriseToEbitda"))
+    peer_ev_ebitda = safe_num((peer_benchmarks or {}).get("EV_EBITDA"))
+    ebitda_multiple_candidates = []
+    if has_numeric_value(current_ev_ebitda) and current_ev_ebitda > 0:
+        ebitda_multiple_candidates.append(float(np.clip(current_ev_ebitda * 0.90, 6.0, 20.0)))
+    if has_numeric_value(peer_ev_ebitda) and peer_ev_ebitda > 0:
+        ebitda_multiple_candidates.append(float(np.clip(peer_ev_ebitda, 6.0, 18.0)))
+
+    if has_numeric_value(current_ebitda) and current_ebitda > 0 and has_numeric_value(latest_revenue):
+        ebitda_margin = float(current_ebitda / latest_revenue)
+        if 0.02 <= ebitda_margin <= 0.65 and ebitda_multiple_candidates:
+            year5_ebitda = float(projected_revenue * ebitda_margin)
+            exit_candidates.append(
+                {
+                    "method": "EV/EBITDA",
+                    "terminal_value": year5_ebitda * float(np.mean(ebitda_multiple_candidates)),
+                }
+            )
+
+    current_ev_revenue = safe_num((info or {}).get("enterpriseToRevenue"))
+    if has_numeric_value(current_ev_revenue) and current_ev_revenue > 0:
+        revenue_multiple = float(np.clip(current_ev_revenue * 0.85, 1.0, 12.0))
+        exit_candidates.append(
+            {
+                "method": "EV/Sales",
+                "terminal_value": projected_revenue * revenue_multiple,
+            }
+        )
+
+    if not exit_candidates:
+        return {}
+
+    terminal_value = float(np.mean([candidate["terminal_value"] for candidate in exit_candidates]))
+    present_value = terminal_value / ((1 + wacc) ** projection_years)
+    return {
+        "terminal_value": terminal_value,
+        "present_value": present_value,
+        "methods": [candidate["method"] for candidate in exit_candidates],
+        "projected_revenue": projected_revenue,
+        "projected_ebitda": year5_ebitda,
     }
 
 
@@ -2846,7 +3091,7 @@ def build_dcf_sensitivity_grid(projected_fcfs, wacc, cash, debt, shares_outstand
     return sensitivity_rows
 
 
-def build_sec_dcf_model(ticker, price, info, dcf_settings=None):
+def build_sec_dcf_model(ticker, price, info, dcf_settings=None, peer_benchmarks=None):
     dcf_settings = normalize_dcf_settings(dcf_settings or {})
     cik_padded, company_title, cik_error = lookup_company_cik(ticker)
     if not cik_padded:
@@ -2865,7 +3110,8 @@ def build_sec_dcf_model(ticker, price, info, dcf_settings=None):
     history_rows = sec_dataset.get("history", [])
     latest = sec_dataset.get("latest", {})
 
-    base_fcf = safe_num(history_rows[-1].get("FreeCashFlow")) if history_rows else None
+    base_fcf_inputs = calculate_normalized_base_fcf(history_rows, latest_metrics=latest)
+    base_fcf = safe_num(base_fcf_inputs.get("base_fcf"))
     if not has_numeric_value(base_fcf):
         return {
             "available": False,
@@ -2880,6 +3126,10 @@ def build_sec_dcf_model(ticker, price, info, dcf_settings=None):
     )
     filing_takeaways = extract_filing_takeaways_from_text(filing_text) if filing_text else []
     growth_inputs = determine_growth_assumptions(history_rows, dcf_settings=dcf_settings)
+    if base_fcf_inputs.get("used_normalized_capex"):
+        growth_inputs["summary"] += (
+            f" Base FCF was normalized using {base_fcf_inputs.get('capex_source', 'recent capex history')}."
+        )
 
     wacc_inputs = compute_wacc_components(ticker, info, sec_dataset, dcf_settings=dcf_settings)
     shares_outstanding = safe_num(wacc_inputs.get("shares_outstanding")) or safe_num((info or {}).get("sharesOutstanding"))
@@ -2921,9 +3171,30 @@ def build_sec_dcf_model(ticker, price, info, dcf_settings=None):
         wacc_inputs["wacc"] - dcf_settings["terminal_growth_rate"]
     )
     present_value_of_terminal = terminal_value / ((1 + wacc_inputs["wacc"]) ** dcf_settings["projection_years"])
+    exit_terminal = estimate_terminal_exit_value(
+        info,
+        sec_dataset,
+        growth_inputs["growth_schedule"],
+        wacc_inputs["wacc"],
+        dcf_settings["projection_years"],
+        peer_benchmarks=peer_benchmarks,
+    )
+    if has_numeric_value(exit_terminal.get("present_value")):
+        exit_weight = 0.35
+        if (
+            base_fcf_inputs.get("used_normalized_capex")
+            and has_numeric_value(base_fcf_inputs.get("latest_fcf"))
+            and base_fcf_inputs["latest_fcf"] <= 0
+        ):
+            exit_weight = 0.50
+        present_value_of_terminal = (
+            present_value_of_terminal * (1 - exit_weight)
+            + exit_terminal["present_value"] * exit_weight
+        )
+        terminal_value = terminal_value * (1 - exit_weight) + exit_terminal["terminal_value"] * exit_weight
     sum_of_projected_pv = float(sum(row["PresentValue"] for row in projection_rows))
     enterprise_value = sum_of_projected_pv + present_value_of_terminal
-    equity_value = enterprise_value - (wacc_inputs.get("long_term_debt") or 0) + (wacc_inputs.get("cash") or 0)
+    equity_value = enterprise_value - (wacc_inputs.get("debt_balance") or 0) + (wacc_inputs.get("cash") or 0)
     intrinsic_value_per_share = safe_divide(equity_value, shares_outstanding)
     dcf_upside = safe_divide(intrinsic_value_per_share - price, price) if has_numeric_value(price) else None
 
@@ -2937,6 +3208,14 @@ def build_sec_dcf_model(ticker, price, info, dcf_settings=None):
     if filing_text_error:
         notes.append(filing_text_error)
     notes.extend(wacc_inputs.get("notes", []))
+    if base_fcf_inputs.get("used_normalized_capex"):
+        notes.append(
+            f"Base FCF normalized from recent operating cash flow and {base_fcf_inputs.get('capex_source', 'capex history')}."
+        )
+    if has_numeric_value(exit_terminal.get("present_value")):
+        notes.append(
+            f"Terminal value blended with {', '.join(exit_terminal.get('methods', []))} cross-check."
+        )
 
     return {
         "available": True,
@@ -2951,7 +3230,7 @@ def build_sec_dcf_model(ticker, price, info, dcf_settings=None):
             projected_fcfs,
             wacc_inputs["wacc"],
             wacc_inputs.get("cash"),
-            wacc_inputs.get("long_term_debt"),
+            wacc_inputs.get("debt_balance"),
             shares_outstanding,
             dcf_settings,
         ),
@@ -2975,7 +3254,7 @@ def build_sec_dcf_model(ticker, price, info, dcf_settings=None):
         "debt_weight": wacc_inputs["debt_weight"],
         "wacc": wacc_inputs["wacc"],
         "cash": wacc_inputs.get("cash"),
-        "long_term_debt": wacc_inputs.get("long_term_debt"),
+        "long_term_debt": wacc_inputs.get("debt_balance"),
         "shares_outstanding": shares_outstanding,
         "enterprise_value": enterprise_value,
         "equity_value": equity_value,
@@ -5120,15 +5399,24 @@ class DatabaseManager:
         self._raw_db_name = str(db_name).strip()
         self.db_path = None
         self._write_lock = threading.RLock()
+        self._backend = "sqlite"
         self._sqlite_target = None
         self._sqlite_uri = False
         self._anchor_connection = None
         self._fallback_notice = None
         self._storage_mode = "disk"
+        self._postgres_dsn = None
         self._initialize_storage_target()
         self.create_tables()
 
     def _initialize_storage_target(self):
+        if is_postgres_database_url(self._raw_db_name):
+            self._backend = "postgres"
+            self._postgres_dsn = self._raw_db_name
+            self.db_path = None
+            self._storage_mode = "server"
+            return
+
         if self._raw_db_name.lower() == ":memory:":
             self._activate_in_memory_mode(
                 "Research storage is running in memory only. Library changes will reset when the app stops."
@@ -5143,6 +5431,7 @@ class DatabaseManager:
 
     def _activate_in_memory_mode(self, notice):
         self.db_path = None
+        self._backend = "sqlite"
         self._sqlite_target = "file:zb_compiler_shared_memory?mode=memory&cache=shared"
         self._sqlite_uri = True
         self._storage_mode = "memory"
@@ -5157,6 +5446,8 @@ class DatabaseManager:
             self._configure_connection(self._anchor_connection)
 
     def _configure_connection(self, conn):
+        if self._backend != "sqlite":
+            return
         conn.execute("PRAGMA busy_timeout = 30000")
         try:
             conn.execute("PRAGMA synchronous = NORMAL")
@@ -5172,6 +5463,11 @@ class DatabaseManager:
                 continue
 
     def _connect(self, allow_recover=True):
+        if self._backend == "postgres":
+            conn = psycopg.connect(self._postgres_dsn)
+            conn.autocommit = False
+            return conn
+
         # Open a fresh connection per operation so each session sees other users' commits.
         conn = None
         try:
@@ -5194,7 +5490,7 @@ class DatabaseManager:
             raise
 
     def _enable_in_memory_fallback(self, exc):
-        if self._storage_mode == "memory":
+        if self._backend != "sqlite" or self._storage_mode == "memory":
             return False
         message = summarize_fetch_error(exc)
         self._activate_in_memory_mode(
@@ -5204,6 +5500,8 @@ class DatabaseManager:
         return True
 
     def _recover_database_file(self, exc):
+        if self._backend != "sqlite":
+            return False
         if self.db_path is None or not self.db_path.exists():
             return False
 
@@ -5229,6 +5527,34 @@ class DatabaseManager:
 
     def create_tables(self):
         with self._write_lock:
+            if self._backend == "postgres":
+                with self._connection() as conn:
+                    column_sql = ",\n                ".join(
+                        f'"{name}" {self._postgres_column_definition(definition)}'
+                        for name, definition in ANALYSIS_COLUMNS.items()
+                    )
+                    conn.execute(
+                        f"""
+                        CREATE TABLE IF NOT EXISTS analysis (
+                            {column_sql}
+                        )
+                        """
+                    )
+                    existing_columns = {
+                        row[0] for row in conn.execute(
+                            """
+                            SELECT column_name
+                            FROM information_schema.columns
+                            WHERE table_schema = 'public' AND table_name = 'analysis'
+                            """
+                        ).fetchall()
+                    }
+                    for name, definition in ANALYSIS_COLUMNS.items():
+                        if name not in existing_columns:
+                            conn.execute(
+                                f'ALTER TABLE analysis ADD COLUMN "{name}" {self._postgres_column_definition(definition)}'
+                            )
+                return
             try:
                 with self._connection() as conn:
                     column_sql = ",\n                ".join(
@@ -5259,25 +5585,65 @@ class DatabaseManager:
 
     @property
     def uses_persistent_storage(self):
+        if self._backend == "postgres":
+            return True
         return self._storage_mode == "disk" and self.db_path is not None
 
     @property
     def storage_label(self):
+        if self._backend == "postgres":
+            return self._redacted_postgres_label()
         if self.uses_persistent_storage:
             return str(self.db_path)
         return "In-memory session store"
 
+    @property
+    def storage_backend(self):
+        return self._backend
+
+    @property
+    def supports_database_download(self):
+        return self._backend == "sqlite" and self.uses_persistent_storage and self.db_path is not None
+
+    def _postgres_column_definition(self, definition):
+        mapping = {
+            "TEXT PRIMARY KEY": "TEXT PRIMARY KEY",
+            "TEXT": "TEXT",
+            "REAL": "DOUBLE PRECISION",
+            "INTEGER": "INTEGER",
+        }
+        return mapping[definition]
+
+    def _redacted_postgres_label(self):
+        parsed = urlparse(self._postgres_dsn or "")
+        host = parsed.hostname or "unknown-host"
+        port = parsed.port or 5432
+        database = parsed.path.lstrip("/") or "unknown-db"
+        user = parsed.username or "unknown-user"
+        return f"postgresql://{user}@{host}:{port}/{database}"
+
     def save_analysis(self, data):
         keys = list(data.keys())
-        placeholders = ", ".join(["?"] * len(keys))
-        columns = ", ".join(keys)
-        update_clause = ", ".join(
-            f"{key}=excluded.{key}" for key in keys if key != "Ticker"
-        )
-        sql = (
-            f"INSERT INTO analysis ({columns}) VALUES ({placeholders}) "
-            f"ON CONFLICT(Ticker) DO UPDATE SET {update_clause}"
-        )
+        if self._backend == "postgres":
+            placeholders = ", ".join(["%s"] * len(keys))
+            columns = ", ".join(f'"{key}"' for key in keys)
+            update_clause = ", ".join(
+                f'"{key}"=EXCLUDED."{key}"' for key in keys if key != "Ticker"
+            )
+            sql = (
+                f'INSERT INTO analysis ({columns}) VALUES ({placeholders}) '
+                f'ON CONFLICT("Ticker") DO UPDATE SET {update_clause}'
+            )
+        else:
+            placeholders = ", ".join(["?"] * len(keys))
+            columns = ", ".join(keys)
+            update_clause = ", ".join(
+                f"{key}=excluded.{key}" for key in keys if key != "Ticker"
+            )
+            sql = (
+                f"INSERT INTO analysis ({columns}) VALUES ({placeholders}) "
+                f"ON CONFLICT(Ticker) DO UPDATE SET {update_clause}"
+            )
         with self._write_lock:
             try:
                 with self._connection() as conn:
@@ -5290,18 +5656,19 @@ class DatabaseManager:
                 raise
 
     def get_analysis(self, ticker):
+        query = 'SELECT * FROM analysis WHERE "Ticker"=%s' if self._backend == "postgres" else "SELECT * FROM analysis WHERE Ticker=?"
         try:
             with self._connection() as conn:
                 return pd.read_sql_query(
-                    "SELECT * FROM analysis WHERE Ticker=?",
+                    query,
                     conn,
                     params=(ticker,),
                 )
-        except (pd.errors.DatabaseError, sqlite3.DatabaseError):
+        except (pd.errors.DatabaseError, sqlite3.DatabaseError, psycopg.Error):
             self.create_tables()
             with self._connection() as conn:
                 return pd.read_sql_query(
-                    "SELECT * FROM analysis WHERE Ticker=?",
+                    query,
                     conn,
                     params=(ticker,),
                 )
@@ -5310,7 +5677,7 @@ class DatabaseManager:
         try:
             with self._connection() as conn:
                 return pd.read_sql_query("SELECT * FROM analysis", conn)
-        except (pd.errors.DatabaseError, sqlite3.DatabaseError):
+        except (pd.errors.DatabaseError, sqlite3.DatabaseError, psycopg.Error):
             self.create_tables()
             with self._connection() as conn:
                 return pd.read_sql_query("SELECT * FROM analysis", conn)
@@ -5318,7 +5685,7 @@ class DatabaseManager:
 
 @st.cache_resource
 def get_database_manager():
-    return DatabaseManager(DB_PATH)
+    return DatabaseManager(DATABASE_URL or DB_PATH)
 
 
 class StockAnalyst:
@@ -5636,7 +6003,13 @@ class StockAnalyst:
         dcf_upside = None
         dcf_last_updated = None
         if compute_dcf:
-            dcf_result = build_sec_dcf_model(ticker, price, info, dcf_settings=dcf_settings)
+            dcf_result = build_sec_dcf_model(
+                ticker,
+                price,
+                info,
+                dcf_settings=dcf_settings,
+                peer_benchmarks=bench,
+            )
             if dcf_result.get("available") and has_numeric_value(dcf_result.get("intrinsic_value_per_share")):
                 dcf_intrinsic_value = safe_num(dcf_result.get("intrinsic_value_per_share"))
                 dcf_upside = safe_num(dcf_result.get("upside"))
@@ -6365,7 +6738,7 @@ startup_refresh_summary = {
     "started_at": None,
     "finished_at": None,
 }
-if os.environ.get("STOCK_ENGINE_SKIP_STARTUP_REFRESH") != "1":
+if RUN_STARTUP_REFRESH and os.environ.get("STOCK_ENGINE_SKIP_STARTUP_REFRESH") != "1":
     startup_badge = st.empty()
     startup_refresh_summary = refresh_saved_analyses_on_launch(db, model_settings, badge_placeholder=startup_badge)
     startup_badge.empty()
@@ -8046,8 +8419,11 @@ with backtest_tab:
 with library_tab:
     st.subheader("Research Library")
     st.caption("Browse everything saved in the shared database so the research process stays visible across users and sessions.")
-    if not db.uses_persistent_storage:
-        st.info("Database export is unavailable in the current in-memory storage mode.")
+    if not db.supports_database_download:
+        if db.storage_backend == "postgres":
+            st.info("Database file export is unavailable when the app is connected to Postgres. Use the CSV export for library data.")
+        else:
+            st.info("Database export is unavailable in the current in-memory storage mode.")
     if startup_refresh_summary.get("error"):
         st.warning(f"Launch refresh hit an issue: {startup_refresh_summary['error']}")
     elif startup_refresh_summary.get("total", 0) > 0:
@@ -8063,13 +8439,13 @@ with library_tab:
 
     library_df = prepare_analysis_dataframe(db.get_all_analyses())
     if library_df.empty:
-        database_bytes = build_database_download_bytes(db.db_path if db.uses_persistent_storage else None)
+        database_bytes = build_database_download_bytes(db.db_path if db.supports_database_download else None)
         export_col_1, export_col_2 = st.columns(2)
         with export_col_1:
             st.download_button(
                 "Download Database",
                 data=database_bytes,
-                file_name=(db.db_path.name if db.uses_persistent_storage else DB_FILENAME),
+                file_name=(db.db_path.name if db.supports_database_download else DB_FILENAME),
                 mime="application/x-sqlite3",
                 disabled=not bool(database_bytes),
                 width="stretch",
@@ -8119,14 +8495,14 @@ with library_tab:
             ]
 
         export_frame = filtered_library if not filtered_library.empty else library_df
-        database_bytes = build_database_download_bytes(db.db_path if db.uses_persistent_storage else None)
+        database_bytes = build_database_download_bytes(db.db_path if db.supports_database_download else None)
         library_csv_bytes = build_library_csv_bytes(export_frame)
         export_col_1, export_col_2 = st.columns(2)
         with export_col_1:
             st.download_button(
                 "Download Database",
                 data=database_bytes,
-                file_name=(db.db_path.name if db.uses_persistent_storage else DB_FILENAME),
+                file_name=(db.db_path.name if db.supports_database_download else DB_FILENAME),
                 mime="application/x-sqlite3",
                 disabled=not bool(database_bytes),
                 width="stretch",
@@ -8184,7 +8560,7 @@ with library_tab:
                 columns=4,
             )
 
-            st.caption(f"Shared database path: {DB_PATH}")
+            st.caption(f"Shared database: {db.storage_label}")
 
             render_help_legend(
                 [
@@ -8460,7 +8836,14 @@ with methodology_tab:
         library_snapshot = prepare_analysis_dataframe(db.get_all_analyses())
         assumptions_df = pd.DataFrame(
             [
-                {"Setting": "Storage Mode", "Value": "Persistent SQLite" if db.uses_persistent_storage else "In-memory"},
+                {
+                    "Setting": "Storage Mode",
+                    "Value": (
+                        "Postgres"
+                        if db.storage_backend == "postgres"
+                        else ("Persistent SQLite" if db.uses_persistent_storage else "In-memory")
+                    ),
+                },
                 {"Setting": "Database Path", "Value": db.storage_label},
                 {"Setting": "Active Profile", "Value": active_preset_name},
                 {"Setting": "Assumption Fingerprint", "Value": active_assumption_fingerprint},
