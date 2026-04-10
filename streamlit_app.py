@@ -1766,7 +1766,14 @@ def compute_event_study(news, hist, benchmark_ticker=DEFAULT_BENCHMARK_TICKER):
         if benchmark_hist is not None and not benchmark_hist.empty and "Close" in benchmark_hist.columns
         else pd.Series(dtype=float)
     )
-    aligned = pd.concat([close.rename("stock"), benchmark_close.rename("benchmark")], axis=1, join="left").ffill(limit=3)
+    aligned = pd.concat(
+        [close.rename("stock"), benchmark_close.rename("benchmark")],
+        axis=1,
+        join="outer",
+    ).sort_index()
+    aligned = aligned.reindex(close.index)
+    if "benchmark" in aligned.columns:
+        aligned["benchmark"] = aligned["benchmark"].ffill(limit=3)
 
     fundamental_events = []
     seen_titles = set()
