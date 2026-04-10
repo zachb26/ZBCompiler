@@ -1,5 +1,12 @@
 yfinance
 pandas
 numpy
-scipy
 streamlit
+scipy
+plotly
+xlsxwriter
+altair<5
+requests
+beautifulsoup4
+anthropic
+psycopg[binary]
