@@ -1099,7 +1099,6 @@ def build_database_download_bytes(db_path):
 
 
 def is_postgres_database_url(value):
-<<<<<<< HEAD
     text = str(value or "").strip().lower()
     return text.startswith("postgresql://") or text.startswith("postgres://")
 
@@ -1128,12 +1127,6 @@ def build_postgres_connection_error_message(dsn, exc):
     if not hints:
         return message
     return f"{message} {' '.join(hints)}"
-=======
-    if not value:
-        return False
-    parsed = urlparse(str(value))
-    return parsed.scheme in {"postgres", "postgresql"}
->>>>>>> 6a03d8a2cb7a24f0bf6e27153e7c6357c58a8560
 
 
 def extract_dcf_fields(record):
@@ -5495,16 +5488,12 @@ class DatabaseManager:
 
     def _connect(self, allow_recover=True):
         if self._backend == "postgres":
-<<<<<<< HEAD
             try:
                 conn = psycopg.connect(self._postgres_dsn)
             except psycopg.OperationalError as exc:
                 raise psycopg.OperationalError(
                     build_postgres_connection_error_message(self._postgres_dsn, exc)
                 ) from None
-=======
-            conn = psycopg.connect(self._postgres_dsn)
->>>>>>> 6a03d8a2cb7a24f0bf6e27153e7c6357c58a8560
             conn.autocommit = False
             return conn
 
@@ -5655,21 +5644,16 @@ class DatabaseManager:
         return mapping[definition]
 
     def _redacted_postgres_label(self):
-<<<<<<< HEAD
         try:
             parsed = urlparse(self._postgres_dsn or "")
         except ValueError:
             return "postgresql://configured"
-=======
-        parsed = urlparse(self._postgres_dsn or "")
->>>>>>> 6a03d8a2cb7a24f0bf6e27153e7c6357c58a8560
         host = parsed.hostname or "unknown-host"
         port = parsed.port or 5432
         database = parsed.path.lstrip("/") or "unknown-db"
         user = parsed.username or "unknown-user"
         return f"postgresql://{user}@{host}:{port}/{database}"
 
-<<<<<<< HEAD
     def _read_dataframe(self, conn, query, params=None):
         if self._backend == "postgres":
             with conn.cursor() as cursor:
@@ -5678,9 +5662,6 @@ class DatabaseManager:
                 columns = [desc.name for desc in cursor.description] if cursor.description else []
             return pd.DataFrame(rows, columns=columns)
         return pd.read_sql_query(query, conn, params=params)
-
-=======
->>>>>>> 6a03d8a2cb7a24f0bf6e27153e7c6357c58a8560
     def save_analysis(self, data):
         keys = list(data.keys())
         if self._backend == "postgres":
@@ -5718,44 +5699,20 @@ class DatabaseManager:
         query = 'SELECT * FROM analysis WHERE "Ticker"=%s' if self._backend == "postgres" else "SELECT * FROM analysis WHERE Ticker=?"
         try:
             with self._connection() as conn:
-<<<<<<< HEAD
                 return self._read_dataframe(conn, query, params=(ticker,))
         except (pd.errors.DatabaseError, sqlite3.DatabaseError, psycopg.Error):
             self.create_tables()
             with self._connection() as conn:
                 return self._read_dataframe(conn, query, params=(ticker,))
-=======
-                return pd.read_sql_query(
-                    query,
-                    conn,
-                    params=(ticker,),
-                )
-        except (pd.errors.DatabaseError, sqlite3.DatabaseError, psycopg.Error):
-            self.create_tables()
-            with self._connection() as conn:
-                return pd.read_sql_query(
-                    query,
-                    conn,
-                    params=(ticker,),
-                )
->>>>>>> 6a03d8a2cb7a24f0bf6e27153e7c6357c58a8560
 
     def get_all_analyses(self):
         try:
             with self._connection() as conn:
-<<<<<<< HEAD
                 return self._read_dataframe(conn, "SELECT * FROM analysis")
         except (pd.errors.DatabaseError, sqlite3.DatabaseError, psycopg.Error):
             self.create_tables()
             with self._connection() as conn:
                 return self._read_dataframe(conn, "SELECT * FROM analysis")
-=======
-                return pd.read_sql_query("SELECT * FROM analysis", conn)
-        except (pd.errors.DatabaseError, sqlite3.DatabaseError, psycopg.Error):
-            self.create_tables()
-            with self._connection() as conn:
-                return pd.read_sql_query("SELECT * FROM analysis", conn)
->>>>>>> 6a03d8a2cb7a24f0bf6e27153e7c6357c58a8560
 
 
 @st.cache_resource
