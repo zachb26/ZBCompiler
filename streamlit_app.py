@@ -1206,6 +1206,57 @@ def build_dcf_download_bytes(record):
     return json.dumps(payload, indent=2).encode("utf-8")
 
 
+def normalize_download_payload(value):
+    if isinstance(value, dict):
+        return {str(key): normalize_download_payload(sub_value) for key, sub_value in value.items()}
+    if isinstance(value, list):
+        return [normalize_download_payload(item) for item in value]
+    if isinstance(value, tuple):
+        return [normalize_download_payload(item) for item in value]
+    if isinstance(value, pd.Timestamp):
+        return format_datetime_value(value)
+    if isinstance(value, datetime.datetime):
+        return format_datetime_value(value)
+    if isinstance(value, datetime.date):
+        return value.isoformat()
+    if isinstance(value, np.generic):
+        return normalize_download_payload(value.item())
+    if isinstance(value, float) and pd.isna(value):
+        return None
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    return value
+
+
+def build_company_analysis_download_bytes(record):
+    if record is None or not hasattr(record, "to_dict"):
+        return b""
+
+    raw_row = record.to_dict()
+    parsed_sections = {
+        "peer_comparison": safe_json_loads(raw_row.get("Peer_Comparison"), default={}),
+        "event_study_events": safe_json_loads(raw_row.get("Event_Study_Events"), default=[]),
+        "dcf_assumptions": safe_json_loads(raw_row.get("DCF_Assumptions"), default={}),
+        "dcf_history": safe_json_loads(raw_row.get("DCF_History"), default=[]),
+        "dcf_projection": safe_json_loads(raw_row.get("DCF_Projection"), default=[]),
+        "dcf_sensitivity": safe_json_loads(raw_row.get("DCF_Sensitivity"), default=[]),
+        "dcf_guidance_excerpts": safe_json_loads(raw_row.get("DCF_Guidance_Excerpts"), default=[]),
+    }
+    payload = {
+        "app_version": APP_VERSION,
+        "exported_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "ticker": str(raw_row.get("Ticker") or "").strip().upper(),
+        "analysis": normalize_download_payload(raw_row),
+        "parsed_sections": normalize_download_payload(parsed_sections),
+    }
+    return json.dumps(payload, indent=2).encode("utf-8")
+
+
 def get_startup_refresh_snapshot():
     with STARTUP_REFRESH_LOCK:
         return STARTUP_REFRESH_STATE.copy()
@@ -5433,6 +5484,7 @@ class DatabaseManager:
         self._fallback_notice = None
         self._storage_mode = "disk"
         self._postgres_dsn = None
+        self._postgres_optional_table_errors = {}
         self._initialize_storage_target()
         self.create_tables()
 
@@ -5557,56 +5609,146 @@ class DatabaseManager:
         finally:
             conn.close()
 
+    def _append_storage_notice(self, message):
+        text = str(message or "").strip()
+        if not text:
+            return
+        if not self._fallback_notice:
+            self._fallback_notice = text
+        elif text not in self._fallback_notice:
+            self._fallback_notice = f"{self._fallback_notice} {text}"
+
+    def _quote_postgres_identifier(self, identifier):
+        return '"' + str(identifier).replace('"', '""') + '"'
+
+    def _get_postgres_table_columns(self, conn, table_name):
+        rows = conn.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = %s
+            ORDER BY ordinal_position
+            """,
+            (str(table_name).strip(),),
+        ).fetchall()
+        return [str(row[0]) for row in rows]
+
+    def _postgres_column_has_unique_constraint(self, conn, table_name, column_name):
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM pg_constraint constraint_def
+            JOIN pg_class table_def ON table_def.oid = constraint_def.conrelid
+            JOIN pg_namespace schema_def ON schema_def.oid = table_def.relnamespace
+            JOIN pg_attribute attr
+                ON attr.attrelid = table_def.oid
+               AND attr.attnum = ANY(constraint_def.conkey)
+            WHERE schema_def.nspname = 'public'
+              AND table_def.relname = %s
+              AND attr.attname = %s
+              AND constraint_def.contype IN ('p', 'u')
+            LIMIT 1
+            """,
+            (str(table_name).strip(), str(column_name).strip()),
+        ).fetchone()
+        return row is not None
+
+    def _normalize_postgres_analysis_columns(self, conn):
+        existing_columns = self._get_postgres_table_columns(conn, "analysis")
+        existing_lookup = {column_name.lower(): column_name for column_name in existing_columns}
+        for column_name in ANALYSIS_COLUMNS:
+            existing_name = existing_lookup.get(column_name.lower())
+            if not existing_name or existing_name == column_name or column_name in existing_columns:
+                continue
+            conn.execute(
+                f"ALTER TABLE analysis RENAME COLUMN "
+                f"{self._quote_postgres_identifier(existing_name)} TO {self._quote_postgres_identifier(column_name)}"
+            )
+            existing_columns = [column_name if value == existing_name else value for value in existing_columns]
+            existing_lookup[column_name.lower()] = column_name
+        return set(existing_columns)
+
+    def _ensure_postgres_analysis_schema(self, conn):
+        column_sql = ",\n                ".join(
+            f'"{name}" {self._postgres_column_definition(definition)}'
+            for name, definition in ANALYSIS_COLUMNS.items()
+        )
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS analysis (
+                {column_sql}
+            )
+            """
+        )
+
+        existing_columns = self._normalize_postgres_analysis_columns(conn)
+        existing_lookup = {column_name.lower() for column_name in existing_columns}
+        for column_name, definition in ANALYSIS_COLUMNS.items():
+            if column_name.lower() in existing_lookup:
+                continue
+            quoted_name = self._quote_postgres_identifier(column_name)
+            if definition == "TEXT PRIMARY KEY":
+                # Legacy Postgres installs may already have a different primary key.
+                # Add the canonical ticker column without forcing a second PK.
+                conn.execute(f"ALTER TABLE analysis ADD COLUMN {quoted_name} TEXT")
+            else:
+                conn.execute(
+                    f"ALTER TABLE analysis ADD COLUMN {quoted_name} {self._postgres_column_definition(definition)}"
+                )
+            existing_columns.add(column_name)
+            existing_lookup.add(column_name.lower())
+
+        if "Ticker" in existing_columns and not self._postgres_column_has_unique_constraint(conn, "analysis", "Ticker"):
+            conn.execute(
+                'CREATE UNIQUE INDEX IF NOT EXISTS analysis_ticker_unique_idx ON analysis ("Ticker")'
+            )
+
+    def _mark_postgres_optional_table_unavailable(self, table_name, exc):
+        message = summarize_fetch_error(exc)
+        if self._postgres_optional_table_errors.get(table_name) == message:
+            return
+        self._postgres_optional_table_errors[table_name] = message
+        feature_name = str(table_name).replace("_", " ")
+        self._append_storage_notice(
+            f"Postgres {feature_name} features are unavailable right now. Error: {message}"
+        )
+
+    def _ensure_postgres_optional_table(self, table_name, ddl):
+        try:
+            with self._connection() as conn:
+                conn.execute(ddl)
+            self._postgres_optional_table_errors.pop(table_name, None)
+        except psycopg.Error as exc:
+            self._mark_postgres_optional_table_unavailable(table_name, exc)
+
     def create_tables(self):
         with self._write_lock:
             if self._backend == "postgres":
                 with self._connection() as conn:
-                    column_sql = ",\n                ".join(
-                        f'"{name}" {self._postgres_column_definition(definition)}'
-                        for name, definition in ANALYSIS_COLUMNS.items()
+                    self._ensure_postgres_analysis_schema(conn)
+                self._ensure_postgres_optional_table(
+                    "portfolio_memberships",
+                    """
+                    CREATE TABLE IF NOT EXISTS portfolio_memberships (
+                        ticker TEXT NOT NULL,
+                        portfolio TEXT NOT NULL,
+                        PRIMARY KEY (ticker, portfolio)
                     )
-                    conn.execute(
-                        f"""
-                        CREATE TABLE IF NOT EXISTS analysis (
-                            {column_sql}
-                        )
-                        """
+                    """,
+                )
+                self._ensure_postgres_optional_table(
+                    "decision_log",
+                    """
+                    CREATE TABLE IF NOT EXISTS decision_log (
+                        id BIGSERIAL PRIMARY KEY,
+                        timestamp TEXT NOT NULL,
+                        portfolio TEXT NOT NULL,
+                        ticker TEXT NOT NULL,
+                        recommendation TEXT NOT NULL,
+                        rationale TEXT NOT NULL
                     )
-                    existing_columns = {
-                        row[0] for row in conn.execute(
-                            """
-                            SELECT column_name
-                            FROM information_schema.columns
-                            WHERE table_schema = 'public' AND table_name = 'analysis'
-                            """
-                        ).fetchall()
-                    }
-                    for name, definition in ANALYSIS_COLUMNS.items():
-                        if name not in existing_columns:
-                            conn.execute(
-                                f'ALTER TABLE analysis ADD COLUMN "{name}" {self._postgres_column_definition(definition)}'
-                            )
-                    conn.execute(
-                        """
-                        CREATE TABLE IF NOT EXISTS portfolio_memberships (
-                            ticker TEXT NOT NULL,
-                            portfolio TEXT NOT NULL,
-                            PRIMARY KEY (ticker, portfolio)
-                        )
-                        """
-                    )
-                    conn.execute(
-                        """
-                        CREATE TABLE IF NOT EXISTS decision_log (
-                            id BIGSERIAL PRIMARY KEY,
-                            timestamp TEXT NOT NULL,
-                            portfolio TEXT NOT NULL,
-                            ticker TEXT NOT NULL,
-                            recommendation TEXT NOT NULL,
-                            rationale TEXT NOT NULL
-                        )
-                        """
-                    )
+                    """,
+                )
                 return
             try:
                 with self._connection() as conn:
@@ -5678,6 +5820,14 @@ class DatabaseManager:
     @property
     def supports_database_download(self):
         return self._backend == "sqlite" and self.uses_persistent_storage and self.db_path is not None
+
+    @property
+    def supports_portfolio_memberships(self):
+        return self._backend != "postgres" or "portfolio_memberships" not in self._postgres_optional_table_errors
+
+    @property
+    def supports_decision_log(self):
+        return self._backend != "postgres" or "decision_log" not in self._postgres_optional_table_errors
 
     def _postgres_column_definition(self, definition):
         mapping = {
@@ -5760,6 +5910,8 @@ class DatabaseManager:
                 return self._read_dataframe(conn, "SELECT * FROM analysis")
 
     def get_portfolio_memberships(self, portfolio=None):
+        if self._backend == "postgres" and not self.supports_portfolio_memberships:
+            return pd.DataFrame(columns=["ticker", "portfolio"])
         normalized_portfolio = str(portfolio or "").strip()
         if self._backend == "postgres":
             query = "SELECT ticker, portfolio FROM portfolio_memberships"
@@ -5781,6 +5933,8 @@ class DatabaseManager:
                 return self._read_dataframe(conn, query, params=tuple(params))
         except (pd.errors.DatabaseError, sqlite3.DatabaseError, psycopg.Error):
             self.create_tables()
+            if self._backend == "postgres" and not self.supports_portfolio_memberships:
+                return pd.DataFrame(columns=["ticker", "portfolio"])
             with self._connection() as conn:
                 return self._read_dataframe(conn, query, params=tuple(params))
 
@@ -5809,6 +5963,8 @@ class DatabaseManager:
                 seen.add(cleaned)
         if not normalized_ticker:
             return
+        if self._backend == "postgres" and not self.supports_portfolio_memberships:
+            return
 
         if self._backend == "postgres":
             delete_sql = "DELETE FROM portfolio_memberships WHERE ticker=%s"
@@ -5836,6 +5992,8 @@ class DatabaseManager:
         timestamp_text = str(timestamp or datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         if not normalized_portfolio or not normalized_ticker or not normalized_recommendation or not normalized_rationale:
             return
+        if self._backend == "postgres" and not self.supports_decision_log:
+            return
 
         if self._backend == "postgres":
             insert_sql = (
@@ -5862,6 +6020,8 @@ class DatabaseManager:
                 )
 
     def get_decision_log(self, portfolio=None, ticker=None):
+        if self._backend == "postgres" and not self.supports_decision_log:
+            return pd.DataFrame(columns=["id", "timestamp", "portfolio", "ticker", "recommendation", "rationale"])
         filters = []
         params = []
         if str(portfolio or "").strip():
@@ -5881,6 +6041,8 @@ class DatabaseManager:
                 return self._read_dataframe(conn, query, params=tuple(params))
         except (pd.errors.DatabaseError, sqlite3.DatabaseError, psycopg.Error):
             self.create_tables()
+            if self._backend == "postgres" and not self.supports_decision_log:
+                return pd.DataFrame(columns=["id", "timestamp", "portfolio", "ticker", "recommendation", "rationale"])
             with self._connection() as conn:
                 return self._read_dataframe(conn, query, params=tuple(params))
 
@@ -6920,7 +7082,7 @@ def get_secret_value(secret_name):
     try:
         value = st.secrets[secret_name]
     except Exception:
-        return None
+        value = os.environ.get(secret_name)
     text = str(value or "").strip()
     return text or None
 
@@ -7355,6 +7517,7 @@ def render_new_analyst_view(db, analyst):
         return
 
     row = starter_df.iloc[0]
+    company_download_bytes = build_company_analysis_download_bytes(row)
     render_analysis_signal_cards(
         [
             {
@@ -7391,6 +7554,14 @@ def render_new_analyst_view(db, analyst):
             },
         ],
         columns=4,
+    )
+    st.download_button(
+        "Download Company Data",
+        data=company_download_bytes,
+        file_name=f"{row.get('Ticker', starter_ticker)}_analysis_snapshot.json",
+        mime="application/json",
+        key=f"download_starter_company_data_{starter_ticker}",
+        width="stretch",
     )
 
     fund_tab, tech_tab, sent_tab = st.tabs(["Fundamental Analysis", "Technical Analysis", "Sentiment Analysis"])
@@ -7688,6 +7859,20 @@ def render_portfolio_manager_view(db, portfolio_bot, active_preset_name, active_
     st.subheader("Portfolio Manager")
     st.caption("View portfolio dashboards without a password. Authentication is only required for portfolio changes and decision logging.")
 
+    portfolio_memberships_available = db.supports_portfolio_memberships
+    decision_log_available = db.supports_decision_log
+    if not portfolio_memberships_available or not decision_log_available:
+        unavailable_features = []
+        if not portfolio_memberships_available:
+            unavailable_features.append("portfolio memberships")
+        if not decision_log_available:
+            unavailable_features.append("decision logging")
+        st.warning(
+            "The connected Postgres database is available for research rows, but "
+            + " and ".join(unavailable_features)
+            + " could not be initialized. The affected Portfolio Manager tools are running in read-only mode."
+        )
+
     selected_portfolio = st.selectbox("Portfolio", PORTFOLIO_OPTIONS, key="pm_selected_portfolio")
     memberships_df = db.get_portfolio_memberships()
     selected_tickers = db.get_portfolio_tickers(selected_portfolio)
@@ -7747,7 +7932,9 @@ def render_portfolio_manager_view(db, portfolio_bot, active_preset_name, active_
             st.dataframe(sector_breakdown, width="stretch")
     with holdings_col:
         st.markdown("##### Portfolio Memberships")
-        if memberships_df.empty:
+        if not portfolio_memberships_available:
+            st.info("Portfolio membership data is unavailable in the connected Postgres database.")
+        elif memberships_df.empty:
             st.info("No portfolio memberships have been saved yet.")
         else:
             membership_view = memberships_df.copy()
@@ -7766,48 +7953,54 @@ def render_portfolio_manager_view(db, portfolio_bot, active_preset_name, active_
         manage_col, decision_col = st.columns(2)
         with manage_col:
             st.markdown("###### Manage Tickers")
-            manage_ticker = st.text_input(
-                "Ticker to Assign",
-                value=st.session_state.get("pm_manage_ticker", ""),
-                key="pm_manage_ticker",
-            )
-            selected_assignments = st.multiselect(
-                "Assign to Portfolios",
-                PORTFOLIO_OPTIONS,
-                key="pm_manage_portfolios",
-                help="Select one or more portfolios. Leaving this blank removes the ticker from all portfolios.",
-            )
-            if st.button("Save Memberships", key="pm_save_memberships", width="stretch"):
-                cleaned_ticker = str(manage_ticker or "").strip().upper()
-                if not cleaned_ticker:
-                    st.error("Enter a ticker before saving portfolio memberships.")
-                else:
-                    db.save_portfolio_memberships(cleaned_ticker, selected_assignments)
-                    st.session_state.pm_membership_feedback = f"Updated portfolio assignments for {cleaned_ticker}."
-                    st.rerun()
-            if st.session_state.get("pm_membership_feedback"):
-                st.success(st.session_state.pop("pm_membership_feedback"))
+            if not portfolio_memberships_available:
+                st.info("Portfolio membership edits are unavailable in the connected Postgres database.")
+            else:
+                manage_ticker = st.text_input(
+                    "Ticker to Assign",
+                    value=st.session_state.get("pm_manage_ticker", ""),
+                    key="pm_manage_ticker",
+                )
+                selected_assignments = st.multiselect(
+                    "Assign to Portfolios",
+                    PORTFOLIO_OPTIONS,
+                    key="pm_manage_portfolios",
+                    help="Select one or more portfolios. Leaving this blank removes the ticker from all portfolios.",
+                )
+                if st.button("Save Memberships", key="pm_save_memberships", width="stretch"):
+                    cleaned_ticker = str(manage_ticker or "").strip().upper()
+                    if not cleaned_ticker:
+                        st.error("Enter a ticker before saving portfolio memberships.")
+                    else:
+                        db.save_portfolio_memberships(cleaned_ticker, selected_assignments)
+                        st.session_state.pm_membership_feedback = f"Updated portfolio assignments for {cleaned_ticker}."
+                        st.rerun()
+                if st.session_state.get("pm_membership_feedback"):
+                    st.success(st.session_state.pop("pm_membership_feedback"))
 
         with decision_col:
             st.markdown("###### Decision Log Entry")
-            default_portfolio_index = PORTFOLIO_OPTIONS.index(selected_portfolio) if selected_portfolio in PORTFOLIO_OPTIONS else 0
-            with st.form("pm_decision_log_form"):
-                log_portfolio = st.selectbox("Portfolio", PORTFOLIO_OPTIONS, index=default_portfolio_index)
-                log_ticker = st.text_input("Ticker")
-                log_recommendation = st.selectbox("Recommendation", ["Buy", "Sell", "Hold"])
-                log_rationale = st.text_area("Rationale", height=140)
-                save_log_entry = st.form_submit_button("Save Decision", type="primary", width="stretch")
-            if save_log_entry:
-                cleaned_ticker = str(log_ticker or "").strip().upper()
-                cleaned_rationale = str(log_rationale or "").strip()
-                if not cleaned_ticker or not cleaned_rationale:
-                    st.error("Portfolio, ticker, recommendation, and rationale are all required.")
-                else:
-                    db.add_decision_log_entry(log_portfolio, cleaned_ticker, log_recommendation, cleaned_rationale)
-                    st.session_state.pm_log_feedback = f"Saved {log_recommendation} decision for {cleaned_ticker}."
-                    st.rerun()
-            if st.session_state.get("pm_log_feedback"):
-                st.success(st.session_state.pop("pm_log_feedback"))
+            if not decision_log_available:
+                st.info("Decision log writes are unavailable in the connected Postgres database.")
+            else:
+                default_portfolio_index = PORTFOLIO_OPTIONS.index(selected_portfolio) if selected_portfolio in PORTFOLIO_OPTIONS else 0
+                with st.form("pm_decision_log_form"):
+                    log_portfolio = st.selectbox("Portfolio", PORTFOLIO_OPTIONS, index=default_portfolio_index)
+                    log_ticker = st.text_input("Ticker")
+                    log_recommendation = st.selectbox("Recommendation", ["Buy", "Sell", "Hold"])
+                    log_rationale = st.text_area("Rationale", height=140)
+                    save_log_entry = st.form_submit_button("Save Decision", type="primary", width="stretch")
+                if save_log_entry:
+                    cleaned_ticker = str(log_ticker or "").strip().upper()
+                    cleaned_rationale = str(log_rationale or "").strip()
+                    if not cleaned_ticker or not cleaned_rationale:
+                        st.error("Portfolio, ticker, recommendation, and rationale are all required.")
+                    else:
+                        db.add_decision_log_entry(log_portfolio, cleaned_ticker, log_recommendation, cleaned_rationale)
+                        st.session_state.pm_log_feedback = f"Saved {log_recommendation} decision for {cleaned_ticker}."
+                        st.rerun()
+                if st.session_state.get("pm_log_feedback"):
+                    st.success(st.session_state.pop("pm_log_feedback"))
 
     st.markdown("##### Performance Dashboard")
     with st.form("pm_dashboard_form"):
@@ -7877,49 +8070,55 @@ def render_portfolio_manager_view(db, portfolio_bot, active_preset_name, active_
             st.dataframe(pnl_table, width="stretch")
 
     st.markdown("##### Decision Log")
-    decision_filter_col_1, decision_filter_col_2 = st.columns([1, 1])
-    with decision_filter_col_1:
-        log_portfolio_filter = st.selectbox(
-            "Portfolio Filter",
-            ["All Portfolios"] + PORTFOLIO_OPTIONS,
-            index=(["All Portfolios"] + PORTFOLIO_OPTIONS).index(selected_portfolio),
-            key="pm_log_portfolio_filter",
-        )
-    with decision_filter_col_2:
-        log_ticker_filter = st.text_input("Ticker Filter", key="pm_log_ticker_filter")
-
-    filtered_log = db.get_decision_log(
-        portfolio=None if log_portfolio_filter == "All Portfolios" else log_portfolio_filter,
-        ticker=log_ticker_filter,
-    )
-    if filtered_log.empty:
-        st.info("No decision log entries match the current filters.")
+    if not decision_log_available:
+        st.info("Decision log history is unavailable in the connected Postgres database.")
     else:
-        log_display = filtered_log.copy()
-        log_display.columns = ["ID", "Timestamp", "Portfolio", "Ticker", "Recommendation", "Rationale"]
-        st.dataframe(log_display, width="stretch")
+        decision_filter_col_1, decision_filter_col_2 = st.columns([1, 1])
+        with decision_filter_col_1:
+            log_portfolio_filter = st.selectbox(
+                "Portfolio Filter",
+                ["All Portfolios"] + PORTFOLIO_OPTIONS,
+                index=(["All Portfolios"] + PORTFOLIO_OPTIONS).index(selected_portfolio),
+                key="pm_log_portfolio_filter",
+            )
+        with decision_filter_col_2:
+            log_ticker_filter = st.text_input("Ticker Filter", key="pm_log_ticker_filter")
+
+        filtered_log = db.get_decision_log(
+            portfolio=None if log_portfolio_filter == "All Portfolios" else log_portfolio_filter,
+            ticker=log_ticker_filter,
+        )
+        if filtered_log.empty:
+            st.info("No decision log entries match the current filters.")
+        else:
+            log_display = filtered_log.copy()
+            log_display.columns = ["ID", "Timestamp", "Portfolio", "Ticker", "Recommendation", "Rationale"]
+            st.dataframe(log_display, width="stretch")
 
     st.markdown("##### Trade Flags")
-    view_all_portfolios = st.toggle(
-        "View All Portfolios",
-        value=False,
-        help="Turn this on to scan every portfolio for decision flips instead of only the selected one.",
-    )
-    flag_mode = "All Portfolios" if view_all_portfolios else selected_portfolio
-    st.caption(f"Current scope: {flag_mode}")
-    trade_flags = build_trade_flags_dataframe(
-        db,
-        library_df,
-        selected_portfolio=selected_portfolio,
-        view_all_portfolios=view_all_portfolios,
-    )
-    if trade_flags.empty:
-        st.success("No trade flags were found between the latest logged decisions and the current saved model verdicts.")
+    if not decision_log_available:
+        st.info("Trade flags are unavailable until decision logging is available in the connected Postgres database.")
     else:
-        st.dataframe(trade_flags, width="stretch")
+        view_all_portfolios = st.toggle(
+            "View All Portfolios",
+            value=False,
+            help="Turn this on to scan every portfolio for decision flips instead of only the selected one.",
+        )
+        flag_mode = "All Portfolios" if view_all_portfolios else selected_portfolio
+        st.caption(f"Current scope: {flag_mode}")
+        trade_flags = build_trade_flags_dataframe(
+            db,
+            library_df,
+            selected_portfolio=selected_portfolio,
+            view_all_portfolios=view_all_portfolios,
+        )
+        if trade_flags.empty:
+            st.success("No trade flags were found between the latest logged decisions and the current saved model verdicts.")
+        else:
+            st.dataframe(trade_flags, width="stretch")
 
 
-st.set_page_config(page_title="ZB Compiler", layout="wide", page_icon="SE")
+st.set_page_config(page_title="OSIG Research Tool", layout="wide", page_icon="SE")
 
 db = get_database_manager()
 bot = StockAnalyst(db)
@@ -7928,7 +8127,7 @@ model_settings = get_model_settings()
 active_preset_name = detect_matching_preset(model_settings)
 active_assumption_fingerprint = get_assumption_fingerprint(model_settings)
 
-st.title("ZB Compiler")
+st.title("OSIG Research Tool")
 storage_status = "Connected to Postgres" if db.storage_backend == "postgres" else "Using SQLite"
 st.caption(f"Version: {APP_VERSION} | {storage_status}")
 if db.storage_notice:
@@ -7972,7 +8171,9 @@ analyst_tab, sector_leader_tab, portfolio_manager_tab = st.tabs(
 )
 
 with analyst_tab:
-    analyst_new_tab, analyst_senior_tab = st.tabs(["New Analyst", "Senior Analyst"])
+    analyst_new_tab, compare_tab, methodology_tab, readme_tab, options_tab, analyst_senior_tab = st.tabs(
+        ["New Analyst", "Comparison", "Methodology", "ReadMe", "Controls", "Senior Analyst"]
+    )
     with analyst_new_tab:
         render_new_analyst_view(db, bot)
     with analyst_senior_tab:
@@ -7984,33 +8185,22 @@ with analyst_tab:
             "Unlock Senior Analyst",
         )
         if senior_analyst_tools_enabled:
-            stock_tab, compare_tab, sensitivity_tab, backtest_tab, library_tab, senior_reference_tab = st.tabs(
-                ["Single Stock", "Compare", "Sensitivity", "Backtest", "Library", "Settings & Reference"]
+            stock_tab, sensitivity_tab, backtest_tab, library_tab, senior_reference_tab = st.tabs(
+                ["Single Stock", "Sensitivity", "Backtest", "Library", "Changelog"]
             )
-            readme_tab = senior_reference_tab.container()
             changelog_tab = senior_reference_tab.container()
-            methodology_tab = senior_reference_tab.container()
-            options_tab = senior_reference_tab.container()
         else:
             stock_tab = st.empty()
-            compare_tab = st.empty()
             sensitivity_tab = st.empty()
             backtest_tab = st.empty()
             library_tab = st.empty()
-            readme_tab = st.empty()
             changelog_tab = st.empty()
-            methodology_tab = st.empty()
-            options_tab = st.empty()
             hidden_senior_placeholders = [
                 stock_tab,
-                compare_tab,
                 sensitivity_tab,
                 backtest_tab,
                 library_tab,
-                readme_tab,
                 changelog_tab,
-                methodology_tab,
-                options_tab,
             ]
 
 with sector_leader_tab:
@@ -8046,6 +8236,7 @@ with stock_tab:
             peer_rows = pd.DataFrame(peer_comparison.get("rows", [])) if isinstance(peer_comparison, dict) else pd.DataFrame()
             event_study_events = pd.DataFrame(safe_json_loads(row.get("Event_Study_Events"), default=[]))
             dcf_assumptions = safe_json_loads(row.get("DCF_Assumptions"), default={})
+            company_download_bytes = build_company_analysis_download_bytes(row)
             dcf_feedback = st.session_state.get("dcf_action_feedback")
             if isinstance(dcf_feedback, dict) and dcf_feedback.get("ticker") == str(row["Ticker"]):
                 if dcf_feedback.get("kind") == "success":
@@ -8068,6 +8259,14 @@ with stock_tab:
                 st.metric("Last Data Update", str(row.get("Last_Data_Update") or "Unknown"))
             st.caption(
                 f"Sector: {row.get('Sector', 'Unknown')} | Industry: {row.get('Industry', 'Unknown')}"
+            )
+            st.download_button(
+                "Download Company Data",
+                data=company_download_bytes,
+                file_name=f"{row['Ticker']}_analysis_snapshot.json",
+                mime="application/json",
+                key=f"download_company_data_{row['Ticker']}",
+                width="stretch",
             )
 
             render_analysis_signal_cards(
