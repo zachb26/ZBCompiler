@@ -51,6 +51,18 @@ FETCH_CACHE = {
     "treasury_yield": {},
 }
 FETCH_CACHE_LOCK = threading.RLock()
+FETCH_CACHE_MAX_ENTRIES = {
+    "ticker_history":    200,
+    "ticker_info":       300,
+    "ticker_news":       200,
+    "batch_history":      20,
+    "peer_group":        150,
+    "sec_ticker_map":      5,
+    "sec_companyfacts":   80,
+    "sec_submissions":    80,
+    "sec_filing_text":    60,
+    "treasury_yield":      5,
+}
 AUTO_REFRESH_STATUS_UPDATE_INTERVAL = 25
 AUTO_REFRESH_STALE_AFTER_HOURS = 12
 AUTO_REFRESH_FAILURE_STREAK_LIMIT = 6
@@ -68,6 +80,20 @@ PEER_GROUP_SIZE = 5
 PEER_SEARCH_CANDIDATE_LIMIT = 140
 PEER_MIN_REQUIRED = 3
 PEER_UNIVERSE_FILENAME = "sp500_tickers.txt"
+PEER_METRIC_MAP = {
+    "PE": "trailingPE",
+    "Forward_PE": "forwardPE",
+    "PEG": "pegRatio",
+    "PS": "priceToSalesTrailing12Months",
+    "PB": "priceToBook",
+    "EV_EBITDA": "enterpriseToEbitda",
+    "ROE": "returnOnEquity",
+    "Profit_Margins": "profitMargins",
+    "Debt_to_Equity": "debtToEquity",
+    "Revenue_Growth": "revenueGrowth",
+    "Current_Ratio": "currentRatio",
+    "Equity_Beta": "beta",
+}
 BENCHMARK_RELATIVE_STRENGTH_WINDOWS = {
     "Relative_Strength_3M": 63,
     "Relative_Strength_6M": 126,
@@ -677,6 +703,10 @@ STOCK_TYPE_STRATEGIES = {
 }
 
 
+def normalize_ticker(value):
+    return str(value or "").strip().upper()
+
+
 def safe_num(value):
     if value is None:
         return None
@@ -987,7 +1017,7 @@ def tone_from_balanced_band(value, healthy_min, healthy_max, caution_low, cautio
 
 
 def tone_from_signal_text(value, positives=None, negatives=None):
-    normalized = str(value or "").strip().upper()
+    normalized = normalize_ticker(value)
     positive_values = set(positives or [])
     negative_values = set(negatives or [])
     if normalized in positive_values:
@@ -1168,7 +1198,7 @@ def build_dcf_download_bytes(record):
         return b""
 
     payload = {
-        "ticker": str(record.get("Ticker", "")).strip().upper(),
+        "ticker": normalize_ticker(record.get("Ticker", "")),
         "price": safe_num(record.get("Price")),
         "assumption_profile": record.get("Assumption_Profile"),
         "analysis_last_updated": record.get("Last_Updated"),
@@ -1250,11 +1280,353 @@ def build_company_analysis_download_bytes(record):
     payload = {
         "app_version": APP_VERSION,
         "exported_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "ticker": str(raw_row.get("Ticker") or "").strip().upper(),
+        "ticker": normalize_ticker(raw_row.get("Ticker")),
         "analysis": normalize_download_payload(raw_row),
         "parsed_sections": normalize_download_payload(parsed_sections),
     }
     return json.dumps(payload, indent=2).encode("utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Skill-input brief builders
+# Each function returns a UTF-8 markdown string pre-formatted as input for the
+# corresponding Claude Code skill (from anthropics/financial-services-plugins).
+# ---------------------------------------------------------------------------
+
+def _fmt(value, fmt="{}", fallback="N/A"):
+    if value is None:
+        return fallback
+    try:
+        v = float(value)
+        import math
+        if math.isnan(v):
+            return fallback
+        return fmt.format(v)
+    except (TypeError, ValueError):
+        return str(value) if value else fallback
+
+
+def build_earnings_skill_brief(record):
+    """Markdown input brief for /equity-research:earnings."""
+    if record is None:
+        return ""
+    r = record if isinstance(record, dict) else record.to_dict()
+    ticker = normalize_ticker(r.get("Ticker"))
+    peer_comparison = safe_json_loads(r.get("Peer_Comparison"), default={})
+    peers_str = str(r.get("Peer_Tickers") or "N/A")
+
+    lines = [
+        f"# Earnings Analysis Brief — {ticker}",
+        f"_Generated from brazingtoncompiler analysis snapshot. Use as input for `/equity-research:earnings`._",
+        "",
+        "## Company Overview",
+        f"- **Ticker:** {ticker}",
+        f"- **Sector:** {r.get('Sector') or 'N/A'}",
+        f"- **Industry:** {r.get('Industry') or 'N/A'}",
+        f"- **Stock Type:** {r.get('Stock_Type') or 'N/A'}  |  **Cap Bucket:** {r.get('Cap_Bucket') or 'N/A'}",
+        f"- **Market Cap:** {_fmt(r.get('Market_Cap'), '${:,.0f}M')}",
+        f"- **Current Price:** {_fmt(r.get('Price'), '${:.2f}')}",
+        f"- **52-Week Range Position:** {_fmt(r.get('Range_Position_52W'), '{:.1%}')}",
+        "",
+        "## Model Verdict & Scores",
+        f"- **Overall Verdict:** {r.get('Verdict_Overall') or 'N/A'}",
+        f"- **Fundamental:** {r.get('Verdict_Fundamental') or 'N/A'}  (Score: {r.get('Score_Fund') or 'N/A'})",
+        f"- **Valuation:** {r.get('Verdict_Valuation') or 'N/A'}  (Score: {r.get('Score_Val') or 'N/A'})",
+        f"- **Technical:** {r.get('Verdict_Technical') or 'N/A'}  (Score: {r.get('Score_Tech') or 'N/A'})",
+        f"- **Sentiment:** {r.get('Verdict_Sentiment') or 'N/A'}  (Score: {r.get('Score_Sentiment') or 'N/A'})",
+        f"- **Market Regime:** {r.get('Market_Regime') or 'N/A'}",
+        f"- **Decision Notes:** {r.get('Decision_Notes') or 'N/A'}",
+        "",
+        "## Valuation Multiples",
+        f"- **Trailing P/E:** {_fmt(r.get('PE_Ratio'), '{:.1f}x')}",
+        f"- **Forward P/E:** {_fmt(r.get('Forward_PE'), '{:.1f}x')}",
+        f"- **PEG Ratio:** {_fmt(r.get('PEG_Ratio'), '{:.2f}')}",
+        f"- **P/S:** {_fmt(r.get('PS_Ratio'), '{:.1f}x')}  |  **P/B:** {_fmt(r.get('PB_Ratio'), '{:.1f}x')}",
+        f"- **EV/EBITDA:** {_fmt(r.get('EV_EBITDA'), '{:.1f}x')}",
+        f"- **Graham Number:** {_fmt(r.get('Graham_Number'), '${:.2f}')}",
+        f"- **DCF Intrinsic Value:** {_fmt(r.get('DCF_Intrinsic_Value'), '${:.2f}')}  (Upside: {_fmt(r.get('DCF_Upside'), '{:.1%}')})",
+        "",
+        "## Fundamentals",
+        f"- **Revenue Growth (YoY):** {_fmt(r.get('Revenue_Growth'), '{:.1%}')}",
+        f"- **Profit Margin:** {_fmt(r.get('Profit_Margins'), '{:.1%}')}",
+        f"- **ROE:** {_fmt(r.get('ROE'), '{:.1%}')}",
+        f"- **Debt/Equity:** {_fmt(r.get('Debt_to_Equity'), '{:.2f}')}",
+        f"- **Current Ratio:** {_fmt(r.get('Current_Ratio'), '{:.2f}')}",
+        f"- **Quality Score:** {_fmt(r.get('Quality_Score'), '{:.1f}')}",
+        f"- **Dividend Yield:** {_fmt(r.get('Dividend_Yield'), '{:.2%}')}",
+        "",
+        "## Technical Indicators",
+        f"- **RSI (14d):** {_fmt(r.get('RSI'), '{:.1f}')}",
+        f"- **MACD Signal:** {r.get('MACD_Signal') or 'N/A'}",
+        f"- **Trend Strength:** {_fmt(r.get('Trend_Strength'), '{:.2f}')}",
+        f"- **Momentum 1M (risk-adj):** {_fmt(r.get('Momentum_1M_Risk_Adjusted'), '{:.2f}')}",
+        f"- **Beta:** {_fmt(r.get('Equity_Beta'), '{:.2f}')}",
+        f"- **Volatility 1M / 1Y:** {_fmt(r.get('Volatility_1M'), '{:.1%}')} / {_fmt(r.get('Volatility_1Y'), '{:.1%}')}",
+        "",
+        "## Analyst Coverage",
+        f"- **Consensus Recommendation:** {r.get('Recommendation_Key') or 'N/A'}",
+        f"- **Mean Target Price:** {_fmt(r.get('Target_Mean_Price'), '${:.2f}')}",
+        f"- **Analyst Count:** {r.get('Analyst_Opinions') or 'N/A'}",
+        "",
+        "## Peer Group",
+        f"- **Peer Group:** {r.get('Peer_Group_Label') or 'N/A'}",
+        f"- **Peer Tickers:** {peers_str}",
+    ]
+    if peer_comparison:
+        lines.append("- **Peer Comparison (vs. group averages):**")
+        for metric, vals in peer_comparison.items():
+            if isinstance(vals, dict):
+                subj = vals.get("subject", "N/A")
+                avg = vals.get("average", "N/A")
+                lines.append(f"  - {metric}: Subject={subj}, Peer Avg={avg}")
+    lines += [
+        "",
+        "## Risk Flags",
+        f"{r.get('Risk_Flags') or 'None identified.'}",
+        "",
+        "## Sentiment",
+        f"- **Headline Count:** {r.get('Sentiment_Headline_Count') or 'N/A'}",
+        f"- **Sentiment Summary:** {r.get('Sentiment_Summary') or 'N/A'}",
+        "",
+        "---",
+        "<!-- Skill: /equity-research:earnings -->",
+        "<!-- Usage: In Claude Code, run /equity-research:earnings and attach this file as context when prompted for company data. -->",
+    ]
+    return "\n".join(lines)
+
+
+def build_comps_skill_brief(record):
+    """Markdown input brief for /financial-analysis:comps-analysis."""
+    if record is None:
+        return ""
+    r = record if isinstance(record, dict) else record.to_dict()
+    ticker = normalize_ticker(r.get("Ticker"))
+    peer_comparison = safe_json_loads(r.get("Peer_Comparison"), default={})
+    peer_tickers = [t.strip() for t in str(r.get("Peer_Tickers") or "").split(",") if t.strip()]
+
+    lines = [
+        f"# Comparable Company Analysis Brief — {ticker}",
+        f"_Use as input for `/financial-analysis:comps-analysis`._",
+        "",
+        "## Subject Company",
+        f"| Metric | Value |",
+        f"|--------|-------|",
+        f"| Ticker | {ticker} |",
+        f"| Sector | {r.get('Sector') or 'N/A'} |",
+        f"| Industry | {r.get('Industry') or 'N/A'} |",
+        f"| Market Cap | {_fmt(r.get('Market_Cap'), '${:,.0f}M')} |",
+        f"| Trailing P/E | {_fmt(r.get('PE_Ratio'), '{:.1f}x')} |",
+        f"| Forward P/E | {_fmt(r.get('Forward_PE'), '{:.1f}x')} |",
+        f"| EV/EBITDA | {_fmt(r.get('EV_EBITDA'), '{:.1f}x')} |",
+        f"| P/S | {_fmt(r.get('PS_Ratio'), '{:.1f}x')} |",
+        f"| P/B | {_fmt(r.get('PB_Ratio'), '{:.1f}x')} |",
+        f"| Revenue Growth | {_fmt(r.get('Revenue_Growth'), '{:.1%}')} |",
+        f"| Profit Margin | {_fmt(r.get('Profit_Margins'), '{:.1%}')} |",
+        f"| ROE | {_fmt(r.get('ROE'), '{:.1%}')} |",
+        f"| Debt/Equity | {_fmt(r.get('Debt_to_Equity'), '{:.2f}')} |",
+        "",
+        f"## Peer Group: {r.get('Peer_Group_Label') or 'N/A'}",
+        f"Peers: {', '.join(peer_tickers) if peer_tickers else 'N/A'}",
+    ]
+    if peer_comparison:
+        lines += ["", "## Peer Comparison vs. Group Averages", "| Metric | Subject | Peer Avg |", "|--------|---------|----------|"]
+        for metric, vals in peer_comparison.items():
+            if isinstance(vals, dict):
+                subj = vals.get("subject", "N/A")
+                avg = vals.get("average", "N/A")
+                lines.append(f"| {metric} | {subj} | {avg} |")
+    lines += [
+        "",
+        "---",
+        "<!-- Skill: /financial-analysis:comps-analysis -->",
+        "<!-- Usage: In Claude Code, run /financial-analysis:comps-analysis and attach this file as context. -->",
+    ]
+    return "\n".join(lines)
+
+
+def build_dcf_skill_brief(record):
+    """Markdown input brief for /financial-analysis:dcf-model."""
+    if record is None:
+        return ""
+    r = record if isinstance(record, dict) else record.to_dict()
+    ticker = normalize_ticker(r.get("Ticker"))
+    dcf_history = safe_json_loads(r.get("DCF_History"), default=[])
+    dcf_projection = safe_json_loads(r.get("DCF_Projection"), default=[])
+    dcf_sensitivity = safe_json_loads(r.get("DCF_Sensitivity"), default=[])
+
+    lines = [
+        f"# DCF Model Input Brief — {ticker}",
+        f"_Use as input for `/financial-analysis:dcf-model`._",
+        "",
+        "## Company",
+        f"- **Ticker:** {ticker}  |  **Sector:** {r.get('Sector') or 'N/A'}  |  **Industry:** {r.get('Industry') or 'N/A'}",
+        f"- **Current Price:** {_fmt(r.get('Price'), '${:.2f}')}  |  **Market Cap:** {_fmt(r.get('Market_Cap'), '${:,.0f}M')}",
+        "",
+        "## DCF Assumptions",
+        f"| Assumption | Value |",
+        f"|------------|-------|",
+        f"| WACC | {_fmt(r.get('DCF_WACC'), '{:.2%}')} |",
+        f"| Risk-Free Rate | {_fmt(r.get('DCF_Risk_Free_Rate'), '{:.2%}')} |",
+        f"| Beta | {_fmt(r.get('DCF_Beta'), '{:.2f}')} |",
+        f"| Cost of Equity | {_fmt(r.get('DCF_Cost_of_Equity'), '{:.2%}')} |",
+        f"| Cost of Debt | {_fmt(r.get('DCF_Cost_of_Debt'), '{:.2%}')} |",
+        f"| Equity Weight | {_fmt(r.get('DCF_Equity_Weight'), '{:.1%}')} |",
+        f"| Debt Weight | {_fmt(r.get('DCF_Debt_Weight'), '{:.1%}')} |",
+        f"| Growth Rate (explicit period) | {_fmt(r.get('DCF_Growth_Rate'), '{:.2%}')} |",
+        f"| Terminal Growth Rate | {_fmt(r.get('DCF_Terminal_Growth'), '{:.2%}')} |",
+        f"| Base FCF | {_fmt(r.get('DCF_Base_FCF'), '${:,.1f}M')} |",
+        f"| Historical FCF Growth | {_fmt(r.get('DCF_Historical_FCF_Growth'), '{:.2%}')} |",
+        f"| Historical Revenue Growth | {_fmt(r.get('DCF_Historical_Revenue_Growth'), '{:.2%}')} |",
+        f"| Guidance Growth | {_fmt(r.get('DCF_Guidance_Growth'), '{:.2%}')} |",
+        f"| Data Source | {r.get('DCF_Source') or 'N/A'} |",
+        f"| Confidence | {r.get('DCF_Confidence') or 'N/A'} |",
+        "",
+        "## DCF Results",
+        f"- **Intrinsic Value per Share:** {_fmt(r.get('DCF_Intrinsic_Value'), '${:.2f}')}",
+        f"- **Implied Upside:** {_fmt(r.get('DCF_Upside'), '{:.1%}')}",
+        f"- **Enterprise Value:** {_fmt(r.get('DCF_Enterprise_Value'), '${:,.1f}M')}",
+        f"- **Equity Value:** {_fmt(r.get('DCF_Equity_Value'), '${:,.1f}M')}",
+    ]
+    if dcf_history:
+        lines += ["", "## Historical FCF / Revenue", "| Year | FCF | Revenue |", "|------|-----|---------|"]
+        for entry in dcf_history:
+            if isinstance(entry, dict):
+                lines.append(f"| {entry.get('year','?')} | {entry.get('fcf','N/A')} | {entry.get('revenue','N/A')} |")
+    if dcf_projection:
+        lines += ["", "## Projected FCF", "| Year | FCF |", "|------|-----|"]
+        for entry in dcf_projection:
+            if isinstance(entry, dict):
+                lines.append(f"| {entry.get('year','?')} | {entry.get('fcf','N/A')} |")
+    if dcf_sensitivity:
+        lines += ["", "## Sensitivity Table (selected rows)", "| WACC | Terminal Growth | Intrinsic Value |", "|------|----------------|-----------------|"]
+        for entry in dcf_sensitivity[:10]:
+            if isinstance(entry, dict):
+                lines.append(f"| {entry.get('wacc','?')} | {entry.get('terminal_growth','?')} | {entry.get('intrinsic_value','N/A')} |")
+    lines += [
+        "",
+        f"**Guidance Summary:** {r.get('DCF_Guidance_Summary') or 'N/A'}",
+        f"**Filing Form:** {r.get('DCF_Filing_Form') or 'N/A'}  |  **Filing Date:** {r.get('DCF_Filing_Date') or 'N/A'}",
+        "",
+        "---",
+        "<!-- Skill: /financial-analysis:dcf-model -->",
+        "<!-- Usage: In Claude Code, run /financial-analysis:dcf-model and attach this file. The skill will build a full Excel DCF model from these assumptions. -->",
+    ]
+    return "\n".join(lines)
+
+
+def build_ic_memo_skill_brief(record):
+    """Markdown input brief for /private-equity:ic-memo and /investment-banking:one-pager."""
+    if record is None:
+        return ""
+    r = record if isinstance(record, dict) else record.to_dict()
+    ticker = normalize_ticker(r.get("Ticker"))
+
+    lines = [
+        f"# IC Memo / Investment Brief — {ticker}",
+        f"_Use as input for `/private-equity:ic-memo` or `/investment-banking:one-pager`._",
+        "",
+        "## Company Profile",
+        f"- **Ticker:** {ticker}",
+        f"- **Sector:** {r.get('Sector') or 'N/A'}  |  **Industry:** {r.get('Industry') or 'N/A'}",
+        f"- **Stock Type:** {r.get('Stock_Type') or 'N/A'}  |  **Cap Bucket:** {r.get('Cap_Bucket') or 'N/A'}",
+        f"- **Market Cap:** {_fmt(r.get('Market_Cap'), '${:,.0f}M')}",
+        f"- **Current Price:** {_fmt(r.get('Price'), '${:.2f}')}",
+        f"- **Style Tags:** {r.get('Style_Tags') or 'N/A'}",
+        f"- **Type Strategy:** {r.get('Type_Strategy') or 'N/A'}",
+        "",
+        "## Financial Summary",
+        f"| Metric | Value |",
+        f"|--------|-------|",
+        f"| Revenue Growth (YoY) | {_fmt(r.get('Revenue_Growth'), '{:.1%}')} |",
+        f"| Profit Margin | {_fmt(r.get('Profit_Margins'), '{:.1%}')} |",
+        f"| ROE | {_fmt(r.get('ROE'), '{:.1%}')} |",
+        f"| Debt/Equity | {_fmt(r.get('Debt_to_Equity'), '{:.2f}')} |",
+        f"| Current Ratio | {_fmt(r.get('Current_Ratio'), '{:.2f}')} |",
+        f"| Quality Score | {_fmt(r.get('Quality_Score'), '{:.1f}')} |",
+        f"| Dividend Yield | {_fmt(r.get('Dividend_Yield'), '{:.2%}')} |",
+        f"| Beta | {_fmt(r.get('Equity_Beta'), '{:.2f}')} |",
+        "",
+        "## Valuation",
+        f"| Metric | Value |",
+        f"|--------|-------|",
+        f"| Current Price | {_fmt(r.get('Price'), '${:.2f}')} |",
+        f"| DCF Intrinsic Value | {_fmt(r.get('DCF_Intrinsic_Value'), '${:.2f}')} |",
+        f"| DCF Upside | {_fmt(r.get('DCF_Upside'), '{:.1%}')} |",
+        f"| Trailing P/E | {_fmt(r.get('PE_Ratio'), '{:.1f}x')} |",
+        f"| Forward P/E | {_fmt(r.get('Forward_PE'), '{:.1f}x')} |",
+        f"| EV/EBITDA | {_fmt(r.get('EV_EBITDA'), '{:.1f}x')} |",
+        f"| P/S | {_fmt(r.get('PS_Ratio'), '{:.1f}x')} |",
+        f"| Graham Number | {_fmt(r.get('Graham_Number'), '${:.2f}')} |",
+        "",
+        "## Investment Verdict",
+        f"- **Overall:** {r.get('Verdict_Overall') or 'N/A'}",
+        f"- **Confidence:** {_fmt(r.get('Decision_Confidence'), '{:.1%}')}",
+        f"- **Notes:** {r.get('Decision_Notes') or 'N/A'}",
+        f"- **Analyst Consensus:** {r.get('Recommendation_Key') or 'N/A'}  (Target: {_fmt(r.get('Target_Mean_Price'), '${:.2f}')})",
+        "",
+        "## Risk Factors",
+        f"{r.get('Risk_Flags') or 'None identified.'}",
+        "",
+        "## Technical Context",
+        f"- **Market Regime:** {r.get('Market_Regime') or 'N/A'}",
+        f"- **RSI:** {_fmt(r.get('RSI'), '{:.1f}')}  |  **MACD:** {r.get('MACD_Signal') or 'N/A'}",
+        f"- **Volatility 1Y:** {_fmt(r.get('Volatility_1Y'), '{:.1%}')}",
+        f"- **52-Week Range Position:** {_fmt(r.get('Range_Position_52W'), '{:.1%}')}",
+        "",
+        "---",
+        "<!-- Skill: /private-equity:ic-memo  OR  /investment-banking:one-pager -->",
+        "<!-- Usage: In Claude Code, run the skill and attach this file when prompted for company data. -->",
+    ]
+    return "\n".join(lines)
+
+
+def build_rebalance_skill_brief(portfolio_result, portfolio_name):
+    """Markdown input brief for /wealth-management:rebalance."""
+    if not portfolio_result:
+        return ""
+    recommendations = portfolio_result.get("recommendations")
+    asset_metrics = portfolio_result.get("asset_metrics")
+    period = portfolio_result.get("period", "N/A")
+    benchmark = portfolio_result.get("benchmark", "N/A")
+
+    lines = [
+        f"# Portfolio Rebalance Brief — {portfolio_name}",
+        f"_Use as input for `/wealth-management:rebalance`._",
+        "",
+        f"- **Portfolio:** {portfolio_name}",
+        f"- **Benchmark:** {benchmark}  |  **Lookback Period:** {period}",
+        "",
+        "## Recommended Allocations (Efficient Frontier — Tangent Portfolio)",
+    ]
+    if recommendations is not None and not recommendations.empty and "Recommended Weight" in recommendations.columns:
+        lines += ["", "| Ticker | Name | Sector | Recommended Weight | Role |", "|--------|------|--------|-------------------|------|"]
+        for rec in recommendations.itertuples(index=False):
+            weight = getattr(rec, "Recommended Weight", "N/A")
+            name = getattr(rec, "Name", "N/A")
+            sector = getattr(rec, "Sector", "N/A")
+            role = getattr(rec, "Role", "N/A")
+            ticker = getattr(rec, "Ticker", "N/A")
+            lines.append(f"| {ticker} | {name} | {sector} | {weight} | {role} |")
+
+    if asset_metrics is not None and not asset_metrics.empty:
+        lines += ["", "## Asset-Level Risk/Return Metrics", "| Ticker | Annual Return | Annual Volatility | Sharpe |", "|--------|--------------|-------------------|--------|"]
+        disp_cols = [c for c in ["Ticker", "Annual Return", "Annual Volatility", "Sharpe"] if c in asset_metrics.columns]
+        if len(disp_cols) == 4:
+            for row in asset_metrics[disp_cols].itertuples(index=False):
+                lines.append(
+                    f"| {row.Ticker} | {_fmt(getattr(row, 'Annual Return', None), '{:.1%}')} "
+                    f"| {_fmt(getattr(row, 'Annual Volatility', None), '{:.1%}')} "
+                    f"| {_fmt(getattr(row, 'Sharpe', None), '{:.2f}')} |"
+                )
+    lines += [
+        "",
+        "---",
+        "<!-- Skill: /wealth-management:rebalance -->",
+        "<!-- Usage: In Claude Code, run /wealth-management:rebalance and attach this file. -->",
+        "<!-- The skill will analyze drift from targets and generate a trade list. -->",
+        "<!-- Note: Add your current holdings and cost basis before running the skill. -->",
+    ]
+    return "\n".join(lines)
 
 
 def get_startup_refresh_snapshot():
@@ -1473,17 +1845,25 @@ def clone_cached_payload(payload):
 def get_cached_fetch_payload(bucket, key, max_age_seconds=FETCH_CACHE_TTL_SECONDS):
     with FETCH_CACHE_LOCK:
         cache_entry = FETCH_CACHE[bucket].get(key)
-    if not cache_entry:
-        return None
-    age_seconds = time.time() - cache_entry["timestamp"]
-    if age_seconds > max_age_seconds:
-        return None
-    return clone_cached_payload(cache_entry["payload"])
+        if not cache_entry:
+            return None
+        age_seconds = time.time() - cache_entry["timestamp"]
+        if age_seconds > max_age_seconds:
+            if age_seconds > FETCH_STALE_FALLBACK_TTL_SECONDS:
+                FETCH_CACHE[bucket].pop(key, None)
+            return None
+        return clone_cached_payload(cache_entry["payload"])
 
 
 def set_cached_fetch_payload(bucket, key, payload):
     with FETCH_CACHE_LOCK:
-        FETCH_CACHE[bucket][key] = {
+        bucket_store = FETCH_CACHE[bucket]
+        max_entries = FETCH_CACHE_MAX_ENTRIES.get(bucket, 200)
+        if len(bucket_store) >= max_entries:
+            evict_count = max(1, len(bucket_store) - max_entries + 1)
+            for _ in range(evict_count):
+                bucket_store.pop(next(iter(bucket_store)), None)
+        bucket_store[key] = {
             "timestamp": time.time(),
             "payload": clone_cached_payload(payload),
         }
@@ -1617,7 +1997,7 @@ def get_peer_universe_tickers(db=None):
 
     def add_many(values):
         for raw_value in values or []:
-            ticker = str(raw_value or "").strip().upper()
+            ticker = normalize_ticker(raw_value)
             if not ticker or ticker in seen:
                 continue
             seen.add(ticker)
@@ -1686,7 +2066,7 @@ def score_peer_similarity(target_info, candidate_info):
 
 
 def build_peer_candidate_info(candidate_ticker, db=None):
-    cached_info = get_cached_fetch_payload("ticker_info", str(candidate_ticker).strip().upper())
+    cached_info = get_cached_fetch_payload("ticker_info", normalize_ticker(candidate_ticker))
     if cached_info:
         return cached_info
 
@@ -1705,21 +2085,33 @@ def build_peer_candidate_info(candidate_ticker, db=None):
 
 
 def find_closest_peer_group(ticker, info, db=None, peer_count=PEER_GROUP_SIZE):
-    cache_key = (str(ticker).strip().upper(), str(info.get("sector") or "").strip(), str(info.get("industry") or "").strip())
+    cache_key = (normalize_ticker(ticker), str(info.get("sector") or "").strip(), str(info.get("industry") or "").strip())
     cached_group = get_cached_fetch_payload("peer_group", cache_key, max_age_seconds=FETCH_STALE_FALLBACK_TTL_SECONDS)
     if cached_group:
         return cached_group
 
-    target_ticker = str(ticker).strip().upper()
+    target_ticker = normalize_ticker(ticker)
     target_info = info or {}
     universe = get_peer_universe_tickers(db)
+    if db is not None:
+        try:
+            db_tickers_set = set(
+                db.get_all_analyses()["Ticker"].dropna().str.strip().str.upper()
+            )
+        except Exception:
+            db_tickers_set = set()
+        db_first = [t for t in universe if normalize_ticker(t) in db_tickers_set]
+        file_only = [t for t in universe if normalize_ticker(t) not in db_tickers_set]
+        universe = db_first + file_only
+
     target_sector = str(target_info.get("sector") or "").strip()
     target_industry = str(target_info.get("industry") or "").strip()
 
     candidates = []
     scanned = 0
+    close_match_count = 0
     for candidate_ticker in universe:
-        candidate_ticker = str(candidate_ticker).strip().upper()
+        candidate_ticker = normalize_ticker(candidate_ticker)
         if not candidate_ticker or candidate_ticker == target_ticker:
             continue
 
@@ -1730,6 +2122,9 @@ def find_closest_peer_group(ticker, info, db=None, peer_count=PEER_GROUP_SIZE):
         priority, similarity_score = score_peer_similarity(target_info, candidate_info)
         if similarity_score is None:
             continue
+
+        if priority <= 1:
+            close_match_count += 1
 
         candidates.append(
             {
@@ -1756,8 +2151,7 @@ def find_closest_peer_group(ticker, info, db=None, peer_count=PEER_GROUP_SIZE):
         )
         scanned += 1
         if scanned >= PEER_SEARCH_CANDIDATE_LIMIT and len(candidates) >= peer_count:
-            enough_close_matches = len([row for row in candidates if row["Priority"] <= 1]) >= peer_count
-            if enough_close_matches:
+            if close_match_count >= peer_count:
                 break
 
     candidates = sorted(
@@ -1766,22 +2160,8 @@ def find_closest_peer_group(ticker, info, db=None, peer_count=PEER_GROUP_SIZE):
     )
     selected = candidates[:peer_count]
 
-    metric_map = {
-        "PE": "trailingPE",
-        "Forward_PE": "forwardPE",
-        "PEG": "pegRatio",
-        "PS": "priceToSalesTrailing12Months",
-        "PB": "priceToBook",
-        "EV_EBITDA": "enterpriseToEbitda",
-        "ROE": "returnOnEquity",
-        "Profit_Margins": "profitMargins",
-        "Debt_to_Equity": "debtToEquity",
-        "Revenue_Growth": "revenueGrowth",
-        "Current_Ratio": "currentRatio",
-        "Equity_Beta": "beta",
-    }
     averages = {}
-    for output_key, input_key in metric_map.items():
+    for output_key, input_key in PEER_METRIC_MAP.items():
         values = [row[input_key] for row in selected if has_numeric_value(row.get(input_key))]
         averages[output_key] = float(np.mean(values)) if values else None
 
@@ -2313,7 +2693,7 @@ def load_sec_ticker_map():
     for item in payload.values():
         if not isinstance(item, dict):
             continue
-        ticker = str(item.get("ticker", "")).strip().upper()
+        ticker = normalize_ticker(item.get("ticker", ""))
         cik_value = item.get("cik_str")
         if not ticker or cik_value in {None, ""}:
             continue
@@ -2329,7 +2709,7 @@ def load_sec_ticker_map():
 
 def lookup_company_cik(ticker):
     ticker_map, error = load_sec_ticker_map()
-    payload = ticker_map.get(str(ticker).strip().upper())
+    payload = ticker_map.get(normalize_ticker(ticker))
     if payload:
         return payload["cik"], payload.get("title"), None
     return None, None, error or f"SEC ticker mapping did not contain {ticker}."
@@ -4065,7 +4445,7 @@ def parse_ticker_list(raw_text):
     seen = set()
     normalized = raw_text.replace("\n", ",").replace(" ", ",")
     for token in normalized.split(","):
-        ticker = token.strip().upper()
+        ticker = normalize_ticker(token)
         if not ticker or ticker in seen:
             continue
         seen.add(ticker)
@@ -4626,9 +5006,10 @@ def summarize_backtest_trades(analysis):
     closed_trades = []
     previous_position = 0.0
 
-    for date, row in analysis.iterrows():
-        close = safe_num(row.get("Close"))
-        current_position = safe_num(row.get("Position")) or 0.0
+    for row in analysis.itertuples():
+        date = row.Index
+        close = safe_num(row.Close)
+        current_position = safe_num(row.Position) or 0.0
         if close is None:
             previous_position = current_position
             continue
@@ -5541,6 +5922,9 @@ class DatabaseManager:
             except sqlite3.DatabaseError:
                 continue
 
+    def _ph(self):
+        return "%s" if self._backend == "postgres" else "?"
+
     def _connect(self, allow_recover=True):
         if self._backend == "postgres":
             try:
@@ -5913,20 +6297,13 @@ class DatabaseManager:
         if self._backend == "postgres" and not self.supports_portfolio_memberships:
             return pd.DataFrame(columns=["ticker", "portfolio"])
         normalized_portfolio = str(portfolio or "").strip()
-        if self._backend == "postgres":
-            query = "SELECT ticker, portfolio FROM portfolio_memberships"
-            params = []
-            if normalized_portfolio:
-                query += " WHERE portfolio=%s"
-                params.append(normalized_portfolio)
-            query += " ORDER BY portfolio, ticker"
-        else:
-            query = "SELECT ticker, portfolio FROM portfolio_memberships"
-            params = []
-            if normalized_portfolio:
-                query += " WHERE portfolio=?"
-                params.append(normalized_portfolio)
-            query += " ORDER BY portfolio, ticker"
+        ph = self._ph()
+        query = "SELECT ticker, portfolio FROM portfolio_memberships"
+        params = []
+        if normalized_portfolio:
+            query += f" WHERE portfolio={ph}"
+            params.append(normalized_portfolio)
+        query += " ORDER BY portfolio, ticker"
 
         try:
             with self._connection() as conn:
@@ -5953,7 +6330,7 @@ class DatabaseManager:
         )
 
     def save_portfolio_memberships(self, ticker, portfolios):
-        normalized_ticker = str(ticker or "").strip().upper()
+        normalized_ticker = normalize_ticker(ticker)
         normalized_portfolios = []
         seen = set()
         for portfolio_name in portfolios or []:
@@ -5986,7 +6363,7 @@ class DatabaseManager:
 
     def add_decision_log_entry(self, portfolio, ticker, recommendation, rationale, timestamp=None):
         normalized_portfolio = str(portfolio or "").strip()
-        normalized_ticker = str(ticker or "").strip().upper()
+        normalized_ticker = normalize_ticker(ticker)
         normalized_recommendation = str(recommendation or "").strip().title()
         normalized_rationale = str(rationale or "").strip()
         timestamp_text = str(timestamp or datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
@@ -5995,16 +6372,11 @@ class DatabaseManager:
         if self._backend == "postgres" and not self.supports_decision_log:
             return
 
-        if self._backend == "postgres":
-            insert_sql = (
-                "INSERT INTO decision_log (timestamp, portfolio, ticker, recommendation, rationale) "
-                "VALUES (%s, %s, %s, %s, %s)"
-            )
-        else:
-            insert_sql = (
-                "INSERT INTO decision_log (timestamp, portfolio, ticker, recommendation, rationale) "
-                "VALUES (?, ?, ?, ?, ?)"
-            )
+        ph = self._ph()
+        insert_sql = (
+            f"INSERT INTO decision_log (timestamp, portfolio, ticker, recommendation, rationale) "
+            f"VALUES ({ph}, {ph}, {ph}, {ph}, {ph})"
+        )
 
         with self._write_lock:
             with self._connection() as conn:
@@ -6022,14 +6394,15 @@ class DatabaseManager:
     def get_decision_log(self, portfolio=None, ticker=None):
         if self._backend == "postgres" and not self.supports_decision_log:
             return pd.DataFrame(columns=["id", "timestamp", "portfolio", "ticker", "recommendation", "rationale"])
+        ph = self._ph()
         filters = []
         params = []
         if str(portfolio or "").strip():
-            filters.append("portfolio=%s" if self._backend == "postgres" else "portfolio=?")
+            filters.append(f"portfolio={ph}")
             params.append(str(portfolio).strip())
         if str(ticker or "").strip():
-            filters.append("ticker=%s" if self._backend == "postgres" else "ticker=?")
-            params.append(str(ticker).strip().upper())
+            filters.append(f"ticker={ph}")
+            params.append(normalize_ticker(ticker))
 
         query = "SELECT id, timestamp, portfolio, ticker, recommendation, rationale FROM decision_log"
         if filters:
@@ -6114,7 +6487,7 @@ class StockAnalyst:
     def build_record_from_market_data(self, ticker, hist, info, news, settings=None, compute_dcf=False, dcf_settings=None):
         settings = get_model_settings() if settings is None else settings
         dcf_settings = get_dcf_settings() if dcf_settings is None else normalize_dcf_settings(dcf_settings)
-        ticker = ticker.strip().upper()
+        ticker = normalize_ticker(ticker)
         info = info or {}
         news = news or []
         if hist is None or hist.empty or "Close" not in hist.columns:
@@ -6669,7 +7042,7 @@ class StockAnalyst:
 
     def analyze(self, ticker, settings=None, persist=True, preloaded=None, compute_dcf=False, dcf_settings=None):
         active_settings = get_model_settings() if settings is None else settings
-        ticker = ticker.strip().upper()
+        ticker = normalize_ticker(ticker)
         self.last_error = None
         existing_row = None
         if persist:
@@ -6856,14 +7229,9 @@ class PortfolioAnalyst:
         if portfolio_df.empty:
             return None, None, None, None, None
 
-        frontier_rows = []
-        best_return = -np.inf
-        for _, row in portfolio_df.sort_values("Volatility").iterrows():
-            if row["Return"] > best_return:
-                frontier_rows.append(row)
-                best_return = row["Return"]
-
-        frontier = pd.DataFrame(frontier_rows)
+        sorted_df = portfolio_df.sort_values("Volatility").reset_index(drop=True)
+        sorted_df["_cummax"] = sorted_df["Return"].cummax()
+        frontier = sorted_df[sorted_df["Return"] == sorted_df["_cummax"]].drop(columns="_cummax")
         tangent = portfolio_df.loc[portfolio_df["Sharpe"].idxmax()]
         minimum_volatility = portfolio_df.loc[portfolio_df["Volatility"].idxmin()]
 
@@ -7118,7 +7486,7 @@ def render_password_gate(session_key, secret_name, heading, description, button_
 
 
 def normalize_recommendation_label(value):
-    normalized = str(value or "").strip().upper()
+    normalized = normalize_ticker(value)
     if "BUY" in normalized:
         return "Buy"
     if "SELL" in normalized:
@@ -7130,7 +7498,7 @@ def build_sector_news_dataframe(tickers, max_tickers=12, max_items=18):
     news_rows = []
     seen_titles = set()
     for ticker in list(tickers or [])[:max_tickers]:
-        ticker_news, _ = fetch_ticker_news_with_retry(str(ticker).strip().upper(), attempts=1)
+        ticker_news, _ = fetch_ticker_news_with_retry(normalize_ticker(ticker), attempts=1)
         for item in ticker_news or []:
             title = extract_news_title(item)
             if not title:
@@ -7151,7 +7519,7 @@ def build_sector_news_dataframe(tickers, max_tickers=12, max_items=18):
             news_rows.append(
                 {
                     "Published": format_datetime_value(published, fallback="Unknown"),
-                    "Ticker": str(ticker).strip().upper(),
+                    "Ticker": normalize_ticker(ticker),
                     "Publisher": publisher or "Unknown",
                     "Headline": title,
                     "_published_sort": published or datetime.datetime.min,
@@ -7218,22 +7586,22 @@ def build_sector_weekly_briefing(sector_name, sector_df, sector_news_df):
     if risk_rows.empty:
         lines.append("- No major saved risk flags were surfaced in the current sector slice.")
     else:
-        for _, risk_row in risk_rows.iterrows():
-            lines.append(f"- {risk_row['Ticker']}: {risk_row['Risk_Flags']}")
+        for risk_row in risk_rows.itertuples(index=False):
+            lines.append(f"- {risk_row.Ticker}: {risk_row.Risk_Flags}")
 
     lines.append("")
     lines.append("Relevant headlines:")
     if sector_news_df is None or sector_news_df.empty:
         lines.append("- No recent fundamental-event headlines were available from the current feed.")
     else:
-        for _, news_row in sector_news_df.head(5).iterrows():
-            lines.append(f"- {news_row['Ticker']}: {news_row['Headline']}")
+        for news_row in sector_news_df.head(5).itertuples(index=False):
+            lines.append(f"- {news_row.Ticker}: {news_row.Headline}")
 
     return "\n".join(lines)
 
 
 def build_portfolio_composition_snapshot(library_df, portfolio_tickers):
-    normalized_tickers = [str(ticker).strip().upper() for ticker in portfolio_tickers or [] if str(ticker).strip()]
+    normalized_tickers = [normalize_ticker(ticker) for ticker in portfolio_tickers or [] if str(ticker).strip()]
     unique_tickers = list(dict.fromkeys(normalized_tickers))
     if not unique_tickers:
         return {
@@ -7320,9 +7688,9 @@ def build_trade_flags_dataframe(db, library_df, selected_portfolio, view_all_por
         )
 
     flag_rows = []
-    for _, membership in memberships.iterrows():
-        portfolio_name = str(membership.get("portfolio") or "").strip()
-        ticker = str(membership.get("ticker") or "").strip().upper()
+    for membership in memberships.itertuples(index=False):
+        portfolio_name = str(membership.portfolio or "").strip()
+        ticker = normalize_ticker(membership.ticker)
         if not portfolio_name or not ticker:
             continue
         matching_decision = latest_decisions[
@@ -7496,7 +7864,7 @@ def render_new_analyst_view(db, analyst):
             run_new_analyst = st.form_submit_button("Analyze Stock", type="primary", width="stretch")
 
     if run_new_analyst:
-        cleaned_ticker = str(new_analyst_ticker or "").strip().upper()
+        cleaned_ticker = normalize_ticker(new_analyst_ticker)
         st.session_state.new_analyst_ticker = cleaned_ticker
         if not cleaned_ticker:
             st.error("Enter a ticker to analyze.")
@@ -7506,7 +7874,7 @@ def render_new_analyst_view(db, analyst):
             if not record:
                 st.error(analyst.last_error or "Unable to build a starter analysis for this ticker right now.")
 
-    starter_ticker = str(st.session_state.get("new_analyst_ticker", "") or "").strip().upper()
+    starter_ticker = normalize_ticker(st.session_state.get("new_analyst_ticker", ""))
     if not starter_ticker:
         st.info("Enter a ticker above to open the beginner-friendly analyst view.")
         return
@@ -7563,6 +7931,53 @@ def render_new_analyst_view(db, analyst):
         key=f"download_starter_company_data_{starter_ticker}",
         width="stretch",
     )
+
+    with st.expander("Export for Claude Code Skills"):
+        st.caption(
+            "Download pre-formatted input briefs for the installed financial skills. "
+            "In Claude Code, run the skill (e.g. `/equity-research:earnings`) and attach the brief when prompted."
+        )
+        _skill_row = row.to_dict() if hasattr(row, "to_dict") else row
+        _brief_cols = st.columns(2)
+        with _brief_cols[0]:
+            st.download_button(
+                "Earnings Brief (.md)",
+                data=build_earnings_skill_brief(_skill_row).encode("utf-8"),
+                file_name=f"{starter_ticker}_earnings_brief.md",
+                mime="text/markdown",
+                key=f"skill_earnings_{starter_ticker}",
+                help="Input for /equity-research:earnings",
+                width="stretch",
+            )
+            st.download_button(
+                "DCF Brief (.md)",
+                data=build_dcf_skill_brief(_skill_row).encode("utf-8"),
+                file_name=f"{starter_ticker}_dcf_brief.md",
+                mime="text/markdown",
+                key=f"skill_dcf_{starter_ticker}",
+                help="Input for /financial-analysis:dcf-model",
+                disabled=not row.get("DCF_Intrinsic_Value"),
+                width="stretch",
+            )
+        with _brief_cols[1]:
+            st.download_button(
+                "Comps Brief (.md)",
+                data=build_comps_skill_brief(_skill_row).encode("utf-8"),
+                file_name=f"{starter_ticker}_comps_brief.md",
+                mime="text/markdown",
+                key=f"skill_comps_{starter_ticker}",
+                help="Input for /financial-analysis:comps-analysis",
+                width="stretch",
+            )
+            st.download_button(
+                "IC Memo Brief (.md)",
+                data=build_ic_memo_skill_brief(_skill_row).encode("utf-8"),
+                file_name=f"{starter_ticker}_ic_memo_brief.md",
+                mime="text/markdown",
+                key=f"skill_ic_{starter_ticker}",
+                help="Input for /private-equity:ic-memo or /investment-banking:one-pager",
+                width="stretch",
+            )
 
     fund_tab, tech_tab, sent_tab = st.tabs(["Fundamental Analysis", "Technical Analysis", "Sentiment Analysis"])
 
@@ -7968,7 +8383,7 @@ def render_portfolio_manager_view(db, portfolio_bot, active_preset_name, active_
                     help="Select one or more portfolios. Leaving this blank removes the ticker from all portfolios.",
                 )
                 if st.button("Save Memberships", key="pm_save_memberships", width="stretch"):
-                    cleaned_ticker = str(manage_ticker or "").strip().upper()
+                    cleaned_ticker = normalize_ticker(manage_ticker)
                     if not cleaned_ticker:
                         st.error("Enter a ticker before saving portfolio memberships.")
                     else:
@@ -7991,7 +8406,7 @@ def render_portfolio_manager_view(db, portfolio_bot, active_preset_name, active_
                     log_rationale = st.text_area("Rationale", height=140)
                     save_log_entry = st.form_submit_button("Save Decision", type="primary", width="stretch")
                 if save_log_entry:
-                    cleaned_ticker = str(log_ticker or "").strip().upper()
+                    cleaned_ticker = normalize_ticker(log_ticker)
                     cleaned_rationale = str(log_rationale or "").strip()
                     if not cleaned_ticker or not cleaned_rationale:
                         st.error("Portfolio, ticker, recommendation, and rationale are all required.")
@@ -8027,7 +8442,7 @@ def render_portfolio_manager_view(db, portfolio_bot, active_preset_name, active_
             with st.spinner(f"Building the {selected_portfolio} dashboard..."):
                 portfolio_result = portfolio_bot.analyze_portfolio(
                     tickers=selected_tickers,
-                    benchmark_ticker=benchmark_ticker.strip().upper() or DEFAULT_BENCHMARK_TICKER,
+                    benchmark_ticker=normalize_ticker(benchmark_ticker) or DEFAULT_BENCHMARK_TICKER,
                     period=lookback_period,
                     risk_free_rate=risk_free_percent / 100,
                     max_weight=max_weight_percent / 100,
@@ -8042,7 +8457,7 @@ def render_portfolio_manager_view(db, portfolio_bot, active_preset_name, active_
                 st.session_state.pm_portfolio_result = portfolio_result
                 st.session_state.pm_portfolio_config = {
                     "selected_portfolio": selected_portfolio,
-                    "benchmark": benchmark_ticker.strip().upper() or DEFAULT_BENCHMARK_TICKER,
+                    "benchmark": normalize_ticker(benchmark_ticker) or DEFAULT_BENCHMARK_TICKER,
                     "period": lookback_period,
                     "risk_free_percent": risk_free_percent,
                     "max_weight_percent": max_weight_percent,
@@ -8068,6 +8483,22 @@ def render_portfolio_manager_view(db, portfolio_bot, active_preset_name, active_
             st.markdown("##### Position-Level P&L Snapshot")
             st.caption("This uses the selected lookback window's total return as a clean position-level performance proxy.")
             st.dataframe(pnl_table, width="stretch")
+
+        with st.expander("Export for Claude Code Skills"):
+            st.caption(
+                "Download a pre-formatted brief for wealth management skills. "
+                "In Claude Code, run `/wealth-management:rebalance` and attach the file when prompted."
+            )
+            _pm_brief = build_rebalance_skill_brief(pm_result, selected_portfolio)
+            st.download_button(
+                "Rebalance Brief (.md)",
+                data=_pm_brief.encode("utf-8"),
+                file_name="portfolio_rebalance_brief.md",
+                mime="text/markdown",
+                key="skill_pm_rebalance",
+                help="Input for /wealth-management:rebalance",
+                width="stretch",
+            )
 
     st.markdown("##### Decision Log")
     if not decision_log_available:
@@ -9378,7 +9809,7 @@ with portfolio_tab:
             with st.spinner("Building efficient frontier and CAL recommendation..."):
                 portfolio_result = portfolio_bot.analyze_portfolio(
                     tickers=parsed_tickers,
-                    benchmark_ticker=benchmark_ticker.strip().upper() or DEFAULT_BENCHMARK_TICKER,
+                    benchmark_ticker=normalize_ticker(benchmark_ticker) or DEFAULT_BENCHMARK_TICKER,
                     period=lookback_period,
                     risk_free_rate=risk_free_percent / 100,
                     max_weight=max_weight_percent / 100,
@@ -9396,7 +9827,7 @@ with portfolio_tab:
                 st.session_state.portfolio_result = portfolio_result
                 st.session_state.portfolio_config = {
                     "tickers": parsed_tickers,
-                    "benchmark": benchmark_ticker.strip().upper() or DEFAULT_BENCHMARK_TICKER,
+                    "benchmark": normalize_ticker(benchmark_ticker) or DEFAULT_BENCHMARK_TICKER,
                     "period": lookback_period,
                     "risk_free_percent": risk_free_percent,
                     "max_weight_percent": max_weight_percent,
@@ -9566,7 +9997,7 @@ with sensitivity_tab:
             run_sensitivity = st.form_submit_button("Run Sensitivity Check", type="primary", width="stretch")
 
     if run_sensitivity:
-        cleaned_ticker = sensitivity_ticker.strip().upper()
+        cleaned_ticker = normalize_ticker(sensitivity_ticker)
         if not cleaned_ticker:
             st.error("Enter a ticker to run a sensitivity check.")
         else:
@@ -9686,7 +10117,7 @@ with backtest_tab:
             run_backtest = st.form_submit_button("Run Backtest", type="primary", width="stretch")
 
     if run_backtest:
-        cleaned_ticker = backtest_ticker.strip().upper()
+        cleaned_ticker = normalize_ticker(backtest_ticker)
         if not cleaned_ticker:
             st.error("Enter a ticker to run a backtest.")
         else:
