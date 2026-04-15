@@ -8773,44 +8773,45 @@ changelog_tab = None
 methodology_tab = None
 options_tab = None
 
-analyst_tab, sector_leader_tab, portfolio_manager_tab = st.tabs(
-    ["Analyst", "Sector Leader", "Portfolio Manager"]
+new_analyst_tab, analyst_senior_tab, sector_leader_tab, portfolio_manager_tab = st.tabs(
+    ["New Analyst", "Senior Analyst", "Sector Leader", "Portfolio Manager"]
 )
 
-with analyst_tab:
-    analyst_new_tab, compare_tab, ai_reports_tab, methodology_tab, readme_tab, options_tab, analyst_senior_tab = st.tabs(
-        ["New Analyst", "Comparison", "AI Reports", "Methodology", "ReadMe", "Controls", "Senior Analyst"]
+with new_analyst_tab:
+    analyst_new_tab, compare_tab, methodology_tab, readme_tab, options_tab = st.tabs(
+        ["Analysis", "Comparison", "Methodology", "ReadMe", "Controls"]
     )
     with analyst_new_tab:
         render_new_analyst_view(db, bot)
-    with ai_reports_tab:
-        render_ai_reports_tab(db)
-    with analyst_senior_tab:
-        senior_analyst_tools_enabled = render_password_gate(
-            "senior_analyst_authenticated",
-            SENIOR_ANALYST_PASSWORD_SECRET,
-            "Senior Analyst Access",
-            "Unlock the full analyst toolkit, including valuation labs, peer analysis, SEC filing automation, backtesting, and model controls.",
-            "Unlock Senior Analyst",
+
+with analyst_senior_tab:
+    senior_analyst_tools_enabled = render_password_gate(
+        "senior_analyst_authenticated",
+        SENIOR_ANALYST_PASSWORD_SECRET,
+        "Senior Analyst Access",
+        "Unlock the full analyst toolkit, including valuation labs, peer analysis, SEC filing automation, backtesting, and model controls.",
+        "Unlock Senior Analyst",
+    )
+    if senior_analyst_tools_enabled:
+        stock_tab, ai_reports_tab, sensitivity_tab, backtest_tab, library_tab, senior_reference_tab = st.tabs(
+            ["Single Stock", "AI Reports", "Sensitivity", "Backtest", "Library", "Changelog"]
         )
-        if senior_analyst_tools_enabled:
-            stock_tab, sensitivity_tab, backtest_tab, library_tab, senior_reference_tab = st.tabs(
-                ["Single Stock", "Sensitivity", "Backtest", "Library", "Changelog"]
-            )
-            changelog_tab = senior_reference_tab.container()
-        else:
-            stock_tab = st.empty()
-            sensitivity_tab = st.empty()
-            backtest_tab = st.empty()
-            library_tab = st.empty()
-            changelog_tab = st.empty()
-            hidden_senior_placeholders = [
-                stock_tab,
-                sensitivity_tab,
-                backtest_tab,
-                library_tab,
-                changelog_tab,
-            ]
+        changelog_tab = senior_reference_tab.container()
+        with ai_reports_tab:
+            render_ai_reports_tab(db)
+    else:
+        stock_tab = st.empty()
+        sensitivity_tab = st.empty()
+        backtest_tab = st.empty()
+        library_tab = st.empty()
+        changelog_tab = st.empty()
+        hidden_senior_placeholders = [
+            stock_tab,
+            sensitivity_tab,
+            backtest_tab,
+            library_tab,
+            changelog_tab,
+        ]
 
 with sector_leader_tab:
     render_sector_leader_view(db)
