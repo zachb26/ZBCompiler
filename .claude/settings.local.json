@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wc -l /c/brazingtoncompiler/*.py /c/brazingtoncompiler/archive/*.py)",
+      "Bash(git -C \"c:\\\\brazingtoncompiler\" log --oneline)",
+      "Bash(git -C \"c:\\\\brazingtoncompiler\" remote -v)",
+      "Bash(du -sh \"c:\\\\brazingtoncompiler\"/*)",
+      "Bash(grep -n \"TODO\\\\|FIXME\\\\|HACK\\\\|XXX\\\\|BROKEN\\\\|BROKEN\" /c/brazingtoncompiler/archive/*.py)",
+      "Bash(gh repo:*)",
+      "Bash(claude plugin:*)",
+      "Bash(npx skills:*)",
+      "Bash(awk '/^def render_ai_reports_tab/,/^def [a-z_]/{print NR\": \"$0}' /c/brazingtoncompiler/streamlit_app.py)",
+      "Bash(git add:*)",
+      "Bash(git commit -m ':*)",
+      "Bash(git pull:*)",
+      "Bash(grep -n:*)",
+      "Bash(git checkout:*)",
+      "Bash(git rebase:*)",
+      "Bash(git push:*)"
+    ]
+  }
+}

@@ -36,6 +36,15 @@ DEFAULT_PORTFOLIO_TICKERS = "AAPL, MSFT, NVDA, JNJ, XOM"
 PORTFOLIO_OPTIONS = ["Large-Cap", "Global", "DADCO"]
 SENIOR_ANALYST_PASSWORD_SECRET = "SENIOR_ANALYST_PASSWORD"
 PORTFOLIO_MANAGER_PASSWORD_SECRET = "PORTFOLIO_MANAGER_PASSWORD"
+# Engine score normalisation — each raw score is divided by its theoretical
+# maximum magnitude and then rescaled to FUND_SCORE_MAX so that a weight of
+# 1.0 represents the same ceiling contribution for every engine.
+# Tech has ~14 discrete ±1/±2 components; Val has up to 8 (5 multiples + PEG
+# + Graham ±2); Fund has 7 (6 binary + quality bonus) and is the reference.
+TECH_SCORE_MAX = 14.0
+FUND_SCORE_MAX = 7.0  # reference scale
+VAL_SCORE_MAX = 8.0
+
 FETCH_CACHE_TTL_SECONDS = 300
 FETCH_STALE_FALLBACK_TTL_SECONDS = 1800
 FETCH_CACHE = {
@@ -4864,12 +4873,21 @@ def resolve_overall_verdict(
             strong_sell=strong_sell_threshold,
         )
 
-    if bias_summary["mixed"]:
-        return "HOLD"
-
+    # Graduated mixed-signal handling: the hold_buffer raise at the top of
+    # this function already penalised mixed signals by requiring a higher score
+    # to escape HOLD. If the score cleared even those raised thresholds the
+    # signal has genuine conviction and should not be killed outright.
+    # Only force HOLD when bearish/bullish engines one-sidedly outnumber the
+    # direction of the verdict (not a balanced 2v2 split).
     if verdict in {"BUY", "STRONG BUY"}:
         if bias_summary["bearish_count"] >= 2:
-            verdict = "HOLD"
+            if bias_summary["mixed"]:
+                # True 2v2 split but score cleared the raised threshold.
+                # Demote STRONG BUY → BUY; do not kill the signal entirely.
+                verdict = "BUY"
+            else:
+                # Bearish engines outnumber bullish; override the upward call.
+                verdict = "HOLD"
         elif bearish_trend and f_score <= 0 and sentiment_score <= 0:
             verdict = "HOLD"
         elif v_val == "OVERVALUED" and f_score < 2:
@@ -4877,7 +4895,13 @@ def resolve_overall_verdict(
 
     if verdict in {"SELL", "STRONG SELL"}:
         if bias_summary["bullish_count"] >= 2:
-            verdict = "HOLD"
+            if bias_summary["mixed"]:
+                # True 2v2 split but score cleared the raised threshold.
+                # Demote STRONG SELL → SELL; do not kill the signal entirely.
+                verdict = "SELL"
+            else:
+                # Bullish engines outnumber bearish; override the downward call.
+                verdict = "HOLD"
         elif bullish_trend and f_score >= 1:
             verdict = "HOLD"
         elif v_val == "UNDERVALUED" and f_score >= 0 and sentiment_score > -3:
@@ -5492,10 +5516,12 @@ def prepare_analysis_dataframe(df, settings=None):
     if "Composite Score" not in enriched.columns:
         enriched["Composite Score"] = np.nan
     if score_columns:
+        # Normalise stored raw scores to the FUND_SCORE_MAX reference scale so
+        # weights mean the same thing across engines in the library composite.
         score_weights = {
-            "Score_Tech": active_settings["weight_technical"],
+            "Score_Tech": active_settings["weight_technical"] * (FUND_SCORE_MAX / TECH_SCORE_MAX),
             "Score_Fund": active_settings["weight_fundamental"],
-            "Score_Val": active_settings["weight_valuation"],
+            "Score_Val": active_settings["weight_valuation"] * (FUND_SCORE_MAX / VAL_SCORE_MAX),
             "Score_Sentiment": active_settings["weight_sentiment"],
         }
         composite_score = pd.Series(0.0, index=enriched.index)
@@ -7002,10 +7028,14 @@ class StockAnalyst:
             effective_f_score += np.clip(dividend_safety_score / 4, -0.5, 1.0)
         if has_numeric_value(event_study.get("avg_abnormal_5d")):
             effective_f_score += np.clip(event_study["avg_abnormal_5d"] * 10, -0.75, 0.75)
+        # Normalise each engine score to the FUND_SCORE_MAX reference scale so
+        # that a weight of 1.0 means the same maximum contribution per engine.
+        norm_tech = effective_tech_score / TECH_SCORE_MAX * FUND_SCORE_MAX
+        norm_val = effective_v_score / VAL_SCORE_MAX * FUND_SCORE_MAX
         base_overall_score = (
-            effective_tech_score * engine_weights["technical"]
+            norm_tech * engine_weights["technical"]
             + effective_f_score * engine_weights["fundamental"]
-            + effective_v_score * engine_weights["valuation"]
+            + norm_val * engine_weights["valuation"]
             + effective_sentiment_score * engine_weights["sentiment"]
         )
         base_overall_score -= min(len(risk_flags), 4) * 0.35
