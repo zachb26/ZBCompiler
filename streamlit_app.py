@@ -2888,6 +2888,167 @@ def extract_guidance_with_anthropic(excerpts):
     return None, "Anthropic guidance extraction returned no usable JSON payload."
 
 
+# ---------------------------------------------------------------------------
+# AI Reports — skill-mirroring Claude API calls for in-app report generation
+# ---------------------------------------------------------------------------
+
+SKILL_REPORT_TYPES = {
+    "Earnings Analysis": {
+        "skill": "/equity-research:earnings",
+        "brief_fn": "earnings",
+        "description": "Institutional earnings update: beat/miss analysis, key metrics, updated estimates, revised thesis.",
+        "system": (
+            "You are an institutional equity research analyst at a top-tier investment bank. "
+            "Produce a professional earnings update report in markdown. Structure it with: "
+            "1) Executive Summary (rating, price target if derivable, 1-paragraph verdict), "
+            "2) Beat/Miss Analysis (revenue, margins, key metrics vs. model expectations), "
+            "3) Investment Thesis Update (bull/base/bear case impact), "
+            "4) Valuation Commentary (multiple context vs. peers), "
+            "5) Key Risks. "
+            "Use only the data provided. Do not invent numbers. Be precise and concise."
+        ),
+    },
+    "Investment Thesis": {
+        "skill": "/equity-research:thesis",
+        "brief_fn": "ic_memo",
+        "description": "Bull/base/bear thesis with catalysts, risks, and price target rationale.",
+        "system": (
+            "You are a senior equity research analyst. Produce a structured investment thesis in markdown. "
+            "Include: 1) One-line verdict, 2) Bull case (3 pillars with supporting data), "
+            "3) Bear case (3 risks with mitigants), 4) Base case valuation (DCF-anchored if data present), "
+            "5) Key catalysts (3-5 events that could move the stock), 6) Recommendation summary. "
+            "Use only the data provided. Do not invent numbers."
+        ),
+    },
+    "Comparable Company Analysis": {
+        "skill": "/financial-analysis:comps-analysis",
+        "brief_fn": "comps",
+        "description": "Peer valuation table with median/quartile benchmarks and relative positioning.",
+        "system": (
+            "You are a financial analyst building a comparable company analysis. "
+            "From the provided data, produce a markdown comps summary that includes: "
+            "1) Comps table (EV/EBITDA, P/E, P/S, Revenue Growth, Margin for subject + peers), "
+            "2) Statistical summary (max, 75th pct, median, 25th pct, min for each multiple), "
+            "3) Relative positioning narrative (where the subject trades vs. peers and why), "
+            "4) Key takeaway. Use only the data provided."
+        ),
+    },
+    "Deal Screening Memo": {
+        "skill": "/private-equity:screen-deal",
+        "brief_fn": "ic_memo",
+        "description": "One-page pass / further-diligence / hard-pass verdict with bull and bear cases.",
+        "system": (
+            "You are a private equity associate screening an inbound deal. "
+            "Produce a one-page screening memo in markdown with: "
+            "1) Deal Facts (company, sector, revenue, EBITDA/margins, growth, valuation implied), "
+            "2) Fund Fit (does it match typical PE criteria: size, sector, growth profile?), "
+            "3) Verdict: Pass / Further Diligence / Hard Pass, "
+            "4) Bull Case (2-3 bullets: why it could be attractive), "
+            "5) Bear Case (2-3 bullets: key risks/red flags), "
+            "6) Key Questions for first call. "
+            "Use only the data provided. Do not invent numbers."
+        ),
+    },
+}
+
+
+def call_claude_for_skill_report(report_key, record):
+    """Call Claude API to generate a skill-quality markdown report from the analysis record."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise ValueError("ANTHROPIC_API_KEY is not set. Add it to your environment to use AI Reports.")
+    try:
+        from anthropic import Anthropic
+    except Exception as exc:
+        raise RuntimeError("The anthropic package is unavailable.") from exc
+
+    config = SKILL_REPORT_TYPES[report_key]
+    brief_fn_name = config["brief_fn"]
+    if brief_fn_name == "earnings":
+        brief = build_earnings_skill_brief(record)
+    elif brief_fn_name == "comps":
+        brief = build_comps_skill_brief(record)
+    elif brief_fn_name == "ic_memo":
+        brief = build_ic_memo_skill_brief(record)
+    else:
+        brief = build_earnings_skill_brief(record)
+
+    client = Anthropic(api_key=api_key)
+    response = client.messages.create(
+        model="claude-opus-4-6",
+        max_tokens=4096,
+        system=config["system"],
+        messages=[{"role": "user", "content": brief}],
+    )
+    return "".join(
+        getattr(block, "text", "") for block in getattr(response, "content", [])
+        if getattr(block, "type", "") == "text"
+    )
+
+
+def render_ai_reports_tab(db):
+    st.caption(
+        "Generate institutional-quality markdown reports directly from your saved analyses. "
+        "Powered by Claude — requires `ANTHROPIC_API_KEY` in your environment."
+    )
+    has_api_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
+    if not has_api_key:
+        st.warning(
+            "No `ANTHROPIC_API_KEY` found in the environment. "
+            "Set it to enable report generation. The app's DCF guidance extraction uses the same key."
+        )
+
+    ticker_input = st.text_input(
+        "Ticker to report on",
+        value=st.session_state.get("new_analyst_ticker", ""),
+        placeholder="e.g. AAPL",
+        key="ai_reports_ticker",
+    )
+    ticker_input = normalize_ticker(ticker_input)
+
+    report_key = st.selectbox(
+        "Report type",
+        list(SKILL_REPORT_TYPES.keys()),
+        key="ai_reports_type",
+    )
+    config = SKILL_REPORT_TYPES[report_key]
+    st.info(f"**Mirrors:** `{config['skill']}`  \n{config['description']}")
+
+    generate_btn = st.button(
+        "Generate Report",
+        disabled=not has_api_key or not ticker_input,
+        type="primary",
+        key="ai_reports_generate",
+    )
+
+    result_key = f"ai_report_{ticker_input}_{report_key}"
+    if generate_btn and ticker_input:
+        analysis_df = prepare_analysis_dataframe(db.get_analysis(ticker_input))
+        if analysis_df.empty:
+            st.error(f"No saved analysis found for {ticker_input}. Run an analysis first in the New Analyst tab.")
+        else:
+            record = analysis_df.iloc[0].to_dict()
+            with st.spinner("Generating report — typically 20–60 seconds…"):
+                try:
+                    report_text = call_claude_for_skill_report(report_key, record)
+                    st.session_state[result_key] = report_text
+                except Exception as exc:
+                    st.error(f"Report generation failed: {exc}")
+
+    if st.session_state.get(result_key):
+        report_text = st.session_state[result_key]
+        st.markdown("---")
+        st.markdown(report_text)
+        st.download_button(
+            "Download Report (.md)",
+            data=report_text.encode("utf-8"),
+            file_name=f"{ticker_input}_{report_key.lower().replace(' ', '_')}.md",
+            mime="text/markdown",
+            key=f"ai_reports_download_{result_key}",
+            width="stretch",
+        )
+
+
 def parse_percentage_range(text):
     if not text:
         return None
@@ -5990,6 +6151,9 @@ class DatabaseManager:
         try:
             yield conn
             conn.commit()
+        except:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
@@ -6267,8 +6431,8 @@ class DatabaseManager:
             try:
                 with self._connection() as conn:
                     conn.execute(sql, list(data.values()))
-            except sqlite3.DatabaseError as exc:
-                if self._storage_mode == "disk" and self._enable_in_memory_fallback(exc):
+            except (sqlite3.DatabaseError, psycopg.Error) as exc:
+                if self._backend != "postgres" and self._storage_mode == "disk" and self._enable_in_memory_fallback(exc):
                     with self._connection() as conn:
                         conn.execute(sql, list(data.values()))
                     return
@@ -6356,10 +6520,13 @@ class DatabaseManager:
             )
 
         with self._write_lock:
-            with self._connection() as conn:
-                conn.execute(delete_sql, (normalized_ticker,))
-                for portfolio_name in normalized_portfolios:
-                    conn.execute(insert_sql, (normalized_ticker, portfolio_name))
+            try:
+                with self._connection() as conn:
+                    conn.execute(delete_sql, (normalized_ticker,))
+                    for portfolio_name in normalized_portfolios:
+                        conn.execute(insert_sql, (normalized_ticker, portfolio_name))
+            except (sqlite3.DatabaseError, psycopg.Error):
+                raise
 
     def add_decision_log_entry(self, portfolio, ticker, recommendation, rationale, timestamp=None):
         normalized_portfolio = str(portfolio or "").strip()
@@ -6379,17 +6546,20 @@ class DatabaseManager:
         )
 
         with self._write_lock:
-            with self._connection() as conn:
-                conn.execute(
-                    insert_sql,
-                    (
-                        timestamp_text,
-                        normalized_portfolio,
-                        normalized_ticker,
-                        normalized_recommendation,
-                        normalized_rationale,
-                    ),
-                )
+            try:
+                with self._connection() as conn:
+                    conn.execute(
+                        insert_sql,
+                        (
+                            timestamp_text,
+                            normalized_portfolio,
+                            normalized_ticker,
+                            normalized_recommendation,
+                            normalized_rationale,
+                        ),
+                    )
+            except (sqlite3.DatabaseError, psycopg.Error):
+                raise
 
     def get_decision_log(self, portfolio=None, ticker=None):
         if self._backend == "postgres" and not self.supports_decision_log:
@@ -8602,11 +8772,13 @@ analyst_tab, sector_leader_tab, portfolio_manager_tab = st.tabs(
 )
 
 with analyst_tab:
-    analyst_new_tab, compare_tab, methodology_tab, readme_tab, options_tab, analyst_senior_tab = st.tabs(
-        ["New Analyst", "Comparison", "Methodology", "ReadMe", "Controls", "Senior Analyst"]
+    analyst_new_tab, compare_tab, ai_reports_tab, methodology_tab, readme_tab, options_tab, analyst_senior_tab = st.tabs(
+        ["New Analyst", "Comparison", "AI Reports", "Methodology", "ReadMe", "Controls", "Senior Analyst"]
     )
     with analyst_new_tab:
         render_new_analyst_view(db, bot)
+    with ai_reports_tab:
+        render_ai_reports_tab(db)
     with analyst_senior_tab:
         senior_analyst_tools_enabled = render_password_gate(
             "senior_analyst_authenticated",
