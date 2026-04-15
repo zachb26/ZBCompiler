@@ -6592,7 +6592,7 @@ class DatabaseManager:
 
 @st.cache_resource
 def get_database_manager():
-    return DatabaseManager(DATABASE_URL or DB_PATH)
+    return DatabaseManager(DATABASE_URL)
 
 
 class StockAnalyst:
@@ -8721,6 +8721,12 @@ def render_portfolio_manager_view(db, portfolio_bot, active_preset_name, active_
 
 st.set_page_config(page_title="OSIG Research Tool", layout="wide", page_icon="SE")
 
+if not DATABASE_URL:
+    st.error(
+        "A PostgreSQL connection is required. "
+        "Set the `STOCKS_DATABASE_URL` (or `DATABASE_URL`) environment variable to a valid PostgreSQL DSN and restart the app."
+    )
+    st.stop()
 db = get_database_manager()
 bot = StockAnalyst(db)
 portfolio_bot = PortfolioAnalyst(db)
