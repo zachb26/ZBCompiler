@@ -23,6 +23,9 @@ from constants import (
     DCF_DEFAULT_AFTER_TAX_COST_OF_DEBT,
     DCF_DEFAULT_MARKET_RISK_PREMIUM,
     DCF_DEFAULT_RISK_FREE_RATE,
+    DCF_GROWTH_FADE_CAP,
+    DCF_GROWTH_FADE_TARGET,
+    DCF_GROWTH_FADE_YEARS,
     DCF_TERMINAL_GROWTH_RATE,
 )
 from fetch import (
@@ -79,9 +82,34 @@ def calculate_growth_rate_from_series(history_rows, field_name, lookback_years=3
 
 
 def build_growth_schedule(initial_growth_rate, terminal_growth_rate, years):
-    """Return a list of linearly interpolated annual growth rates."""
+    """
+    Return a list of annual growth rates for the explicit projection period.
+
+    When initial_growth_rate exceeds DCF_GROWTH_FADE_CAP (15%), applies a
+    two-phase mean-reversion schedule: the first DCF_GROWTH_FADE_YEARS years
+    collapse linearly to DCF_GROWTH_FADE_TARGET (~GDP+2%), then the remaining
+    years fade linearly to terminal_growth_rate.  This prevents anomalously
+    high short-run FCF/revenue history (e.g. pandemic recovery) from inflating
+    intrinsic value across the entire explicit period.
+
+    For rates at or below the fade cap the schedule is a simple linear
+    interpolation from initial to terminal, unchanged from prior behavior.
+    """
     if years <= 1:
         return [float(terminal_growth_rate)]
+
+    if initial_growth_rate > DCF_GROWTH_FADE_CAP and years > DCF_GROWTH_FADE_YEARS:
+        fade_end = DCF_GROWTH_FADE_YEARS
+        # Phase 1: rapid collapse to the fade target
+        phase1 = list(np.linspace(initial_growth_rate, DCF_GROWTH_FADE_TARGET, fade_end + 1))
+        # Phase 2: gentle fade from the target to terminal
+        remaining = years - fade_end - 1
+        if remaining > 0:
+            phase2 = list(np.linspace(DCF_GROWTH_FADE_TARGET, terminal_growth_rate, remaining + 1))[1:]
+        else:
+            phase2 = []
+        return [float(v) for v in (phase1 + phase2)[:years]]
+
     return [float(value) for value in np.linspace(initial_growth_rate, terminal_growth_rate, years)]
 
 

@@ -38,7 +38,13 @@
       "Bash(python -c ' *)",
       "Bash(grep -rn \"from utils_news import\" *.py)",
       "Bash(python -c \"import sec_ai; print\\('sec_ai: OK'\\)\")",
-      "Bash(wc -l streamlit_app.py database.py analyst.py *.py)"
+      "Bash(wc -l streamlit_app.py database.py analyst.py *.py)",
+      "Bash(cd c:\\\\\\\\osig-research-tool\\\\\\\\OSIG-Research-Tool)",
+      "Bash(python -m py_compile dcf.py)",
+      "Bash(sed 's/\\\\s*$//')",
+      "Bash(python fix_imports.py)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('streamlit_app.py', encoding='utf-8'\\).read\\(\\)\\); print\\('Syntax OK'\\)\")",
+      "Bash(del fix_imports.py)"
     ]
   }
 }

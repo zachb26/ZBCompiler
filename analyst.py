@@ -323,18 +323,19 @@ class StockAnalyst:
         bvps = safe_num(info.get("bookValue"))
         graham_num = None
         intrinsic_value = None
+        graham_adj = 0
         if has_numeric_value(eps) and has_numeric_value(bvps) and eps > 0 and bvps > 0:
             graham_num = (22.5 * eps * bvps) ** 0.5
             intrinsic_value = graham_num
             valuation_signal_count += 1
             if price < graham_num * 0.85:
-                v_score += 2
+                graham_adj = 2
             elif price < graham_num:
-                v_score += 1
+                graham_adj = 1
             elif price > graham_num * settings["valuation_graham_overpriced_multiple"]:
-                v_score -= 2
+                graham_adj = -2
             elif price > graham_num * 1.15:
-                v_score -= 1
+                graham_adj = -1
         elif has_numeric_value(eps) and eps <= 0:
             v_score -= 1
 
@@ -364,7 +365,6 @@ class StockAnalyst:
         else:
             v_val = "OVERVALUED"
         valuation_confidence = calculate_valuation_confidence(valuation_signal_count)
-        effective_v_score = v_score * (0.45 + 0.55 * valuation_confidence / 100)
 
         dividend_safety_score = calculate_dividend_safety_score(
             dividend_yield,
@@ -408,6 +408,17 @@ class StockAnalyst:
             debt_eq=debt_eq,
             momentum_1y=momentum_1y,
         )
+        _GRAHAM_FULL = {"Value Stocks", "Dividend / Income Stocks", "Blue-Chip Stocks"}
+        _GRAHAM_LIGHT = {"Growth Stocks", "Speculative / Penny Stocks"}
+        if graham_adj != 0:
+            _pt = stock_profile["primary_type"]
+            if _pt in _GRAHAM_FULL:
+                v_score += graham_adj
+            elif _pt in _GRAHAM_LIGHT:
+                v_score += graham_adj * 0.25
+            else:
+                v_score += graham_adj * 0.5
+        effective_v_score = v_score * (0.45 + 0.55 * valuation_confidence / 100)
         risk_flags = build_risk_flags(
             eps=eps,
             debt_eq=debt_eq,
@@ -452,7 +463,7 @@ class StockAnalyst:
             tech_score=tech_score,
             f_score=f_score,
             v_score=v_score,
-            sentiment_score=sentiment["score"],
+            sentiment_score=0,
             v_fund=v_fund,
             v_val=v_val,
             regime=regime,
@@ -586,7 +597,7 @@ class StockAnalyst:
             tech_score,
             f_score,
             v_score,
-            sentiment["score"],
+            0,
             v_val,
             bullish_trend,
             bearish_trend,
