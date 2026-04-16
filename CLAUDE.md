@@ -8,7 +8,7 @@ A Streamlit stock analysis web application (`streamlit_app.py`, ~10,800 lines). 
 
 ## Architecture
 
-- **Storage:** SQLite (`stocks_data.db` by default) or PostgreSQL (set `DATABASE_URL` env var). Schema: `analysis` table (109 columns), `portfolio_memberships`, `decision_log`.
+- **Storage:** PostgreSQL (set `DATABASE_URL` env var). Schema: `analysis` table (109 columns), `portfolio_memberships`, `decision_log`.
 - **Data sources:** yfinance (prices, fundamentals, news), SEC EDGAR REST API (10-K/10-Q for DCF cash-flow history), US Treasury API (10-year yield for WACC).
 - **Key classes:** `DatabaseManager` (~line 5500) — all DB I/O. `PortfolioBot` — efficient frontier + Monte Carlo.
 - **Key constants:** `FETCH_CACHE` (in-memory TTL cache, bounded FIFO), `PEER_METRIC_MAP`, `FETCH_CACHE_MAX_ENTRIES`.
