@@ -44,7 +44,13 @@
       "Bash(sed 's/\\\\s*$//')",
       "Bash(python fix_imports.py)",
       "Bash(python -c \"import ast; ast.parse\\(open\\('streamlit_app.py', encoding='utf-8'\\).read\\(\\)\\); print\\('Syntax OK'\\)\")",
-      "Bash(del fix_imports.py)"
+      "Bash(del fix_imports.py)",
+      "Bash(git -C c:/osig-research-tool/OSIG-Research-Tool status)",
+      "Bash(git -C c:/osig-research-tool/OSIG-Research-Tool diff analytics_tech.py streamlit_app.py)",
+      "Bash(git -C c:/osig-research-tool/OSIG-Research-Tool diff HEAD analytics_tech.py streamlit_app.py)",
+      "Bash(git -C c:/osig-research-tool/OSIG-Research-Tool log --oneline -3)",
+      "Bash(git -C c:/osig-research-tool/OSIG-Research-Tool diff HEAD~1 HEAD -- analytics_tech.py streamlit_app.py)",
+      "Bash(git -C c:/osig-research-tool/OSIG-Research-Tool log --oneline origin/main -3)"
     ]
   }
 }
