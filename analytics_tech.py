@@ -11,8 +11,27 @@ Functions:
 """
 
 import numpy as np
+import pandas as pd
 
 from fetch import has_numeric_value, safe_divide
+
+
+def compute_relative_strength(close, benchmark_close, window):
+    if close is None or benchmark_close is None or window <= 0:
+        return None
+    close = close.dropna()
+    benchmark_close = benchmark_close.dropna()
+    aligned = pd.concat([close.rename("stock"), benchmark_close.rename("benchmark")], axis=1, join="inner").dropna()
+    if len(aligned) <= window:
+        return None
+    stock_return = safe_divide(aligned["stock"].iloc[-1] - aligned["stock"].iloc[-window - 1], aligned["stock"].iloc[-window - 1])
+    benchmark_return = safe_divide(
+        aligned["benchmark"].iloc[-1] - aligned["benchmark"].iloc[-window - 1],
+        aligned["benchmark"].iloc[-window - 1],
+    )
+    if stock_return is None or benchmark_return is None:
+        return None
+    return float(stock_return - benchmark_return)
 
 
 def calculate_realized_volatility(close, window):
