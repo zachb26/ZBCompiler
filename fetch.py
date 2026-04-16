@@ -51,8 +51,8 @@ from constants import (
     PEER_UNIVERSE_FILENAME,
 )
 from utils_fmt import normalize_ticker, parse_ticker_list, safe_num
-from utils_time import format_datetime_value
-from utils_news import extract_news_publish_time, extract_news_title, trim_history_to_period
+from utils_time import format_datetime_value, trim_history_to_period
+from utils_news import extract_news_publish_time, extract_news_title
 
 
 # ---------------------------------------------------------------------------

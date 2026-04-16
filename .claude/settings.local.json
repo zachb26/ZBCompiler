@@ -18,7 +18,27 @@
       "Bash(git rebase:*)",
       "Bash(git push:*)",
       "Bash(ls \"c:/brazingtoncompiler/\"*.py)",
-      "Bash(ls /c/brazingtoncompiler/*.py)"
+      "Bash(ls /c/brazingtoncompiler/*.py)",
+      "Bash(ls *.py)",
+      "Bash(awk -F: '{print $1, $2}')",
+      "Bash(awk '{print $1, $2, $3}')",
+      "Bash(awk -F: '$2 >= 7571')",
+      "Bash(grep -rn \"refresh_saved_analyses_on_launch\\\\|render_compiling_badge\\\\|collect_stale_analysis\" *.py)",
+      "Bash(sed -n '951,968p' streamlit_app.py)",
+      "Bash(sed -n '1641,1840p' streamlit_app.py)",
+      "Bash(sed -n '28,50p' cache.py)",
+      "Bash(sed -n '33,55p' exports.py)",
+      "Bash(grep -rn \"^def summarize_fetch_error\" *.py)",
+      "Bash(python3 -)",
+      "Bash(python -)",
+      "Bash(python -m py_compile streamlit_app.py)",
+      "Bash(python -m py_compile constants.py cache.py fetch.py utils_fmt.py utils_time.py utils_ui.py utils_news.py exports.py skill_briefs.py sec_ai.py dcf.py analytics_tech.py analytics_scoring.py analytics_decision.py settings.py analysis_prep.py backtest.py)",
+      "Bash(python -m py_compile database.py)",
+      "Bash(python -m py_compile analyst.py)",
+      "Bash(python -c ' *)",
+      "Bash(grep -rn \"from utils_news import\" *.py)",
+      "Bash(python -c \"import sec_ai; print\\('sec_ai: OK'\\)\")",
+      "Bash(wc -l streamlit_app.py database.py analyst.py *.py)"
     ]
   }
 }
