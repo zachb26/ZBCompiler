@@ -1,0 +1,43 @@
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+# E/W = pycodestyle, F = pyflakes, I = isort, UP = pyupgrade
+select = ["E", "W", "F", "I", "UP"]
+ignore = [
+    "E501",   # line-length — ruff format handles wrapping
+    "F403",   # star imports are used intentionally in analyst.py
+    "F405",   # names from star imports can't be resolved
+    "UP007",  # X | Y union syntax — allow Optional for older compat
+]
+
+[tool.ruff.lint.per-file-ignores]
+"streamlit_app.py" = ["E402"]   # top-level imports after st.set_page_config
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+# ---------------------------------------------------------------------------
+# mypy — strict only on the pure-logic compute modules
+# ---------------------------------------------------------------------------
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+warn_return_any = false      # too noisy with Any-heavy settings dicts
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = [
+    "analytics_tech",
+    "analytics_scoring",
+    "analytics_decision",
+    "dcf",
+    "backtest",
+    "analysis_prep",
+]
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true

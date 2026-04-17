@@ -5,6 +5,7 @@ import streamlit as st
 import constants as const
 import exports
 import fetch
+import cache
 import settings
 import utils_fmt as fmt
 import utils_time as tutil
@@ -13,18 +14,31 @@ import analysis_prep as prep
 
 
 def render_single_stock_view(db, bot, model_settings, active_assumption_fingerprint):
-    c1, c2 = st.columns([3, 1])
+    if "single_ticker" not in st.session_state:
+        _prefill = st.session_state.get("new_analyst_ticker", "")
+        if _prefill:
+            st.session_state["single_ticker"] = _prefill
+    c1, c2, c3 = st.columns([3, 1, 1], vertical_alignment="bottom")
     with c1:
-        txt_input = st.text_input("Enter Ticker Symbol (e.g., AAPL, NVDA, F)", "", key="single_ticker")
+        txt_input = st.text_input("Enter Ticker Symbol (e.g., AAPL, NVDA, F)", key="single_ticker")
     with c2:
-        st.write("")
-        st.write("")
         if st.button("Run Full Analysis", type="primary", width="stretch"):
             if txt_input:
                 with st.spinner(f"Running multiple engines on {txt_input}..."):
                     res = bot.analyze(txt_input)
                     if not res:
                         st.error(bot.last_error or "Unable to fetch enough market data for this ticker right now.")
+    with c3:
+        if st.button("Refresh Data", width="stretch", help="Evict cached market data for this ticker and re-run the full analysis with fresh data."):
+            if txt_input:
+                ticker_clean = fmt.normalize_ticker(txt_input)
+                cache.evict_ticker_from_cache(ticker_clean)
+                with st.spinner(f"Refreshing {ticker_clean} with fresh data..."):
+                    res = bot.analyze(ticker_clean)
+                    if res:
+                        st.success(f"Data refreshed for {ticker_clean}.")
+                    else:
+                        st.error(bot.last_error or "Unable to fetch fresh data for this ticker right now.")
 
     if txt_input:
         df = prep.prepare_analysis_dataframe(db.get_analysis(txt_input.upper()))
@@ -60,14 +74,6 @@ def render_single_stock_view(db, bot, model_settings, active_assumption_fingerpr
                 st.metric("Last Data Update", str(row.get("Last_Data_Update") or "Unknown"))
             st.caption(
                 f"Sector: {row.get('Sector', 'Unknown')} | Industry: {row.get('Industry', 'Unknown')}"
-            )
-            st.download_button(
-                "Download Company Data",
-                data=company_download_bytes,
-                file_name=f"{row['Ticker']}_analysis_snapshot.json",
-                mime="application/json",
-                key=f"download_company_data_{row['Ticker']}",
-                width="stretch",
             )
 
             ui.render_analysis_signal_cards(
@@ -108,149 +114,149 @@ def render_single_stock_view(db, bot, model_settings, active_assumption_fingerpr
             if row.get("Type_Strategy"):
                 st.caption(f"The model's default playbook for this kind of stock: {row.get('Type_Strategy')}")
 
-            st.subheader("Method Breakdown")
-            st.info("This section shows how each part of the model is reading the stock right now, so you can see what is helping or hurting the final verdict.")
-            st.caption("These results stay tied to the settings that were active when the analysis was run. If you changed something in Options, rerun the ticker to refresh this snapshot.")
+            with st.expander("Method Breakdown", expanded=False):
+                st.info("This section shows how each part of the model is reading the stock right now, so you can see what is helping or hurting the final verdict.")
+                st.caption("These results stay tied to the settings that were active when the analysis was run. If you changed something in Options, rerun the ticker to refresh this snapshot.")
 
-            ui.render_analysis_signal_cards(
-                [
-                    {
-                        "label": "Technical",
-                        "value": fmt.format_int(row["Score_Tech"]),
-                        "note": "Price action, momentum, and trend signals.",
-                        "tone": ui.tone_from_metric_threshold(row["Score_Tech"], good_min=1, bad_max=-1),
-                        "help": const.ANALYSIS_HELP_TEXT["Technical"],
-                    },
-                    {
-                        "label": "Fundamental",
-                        "value": fmt.format_int(row["Score_Fund"]),
-                        "note": "Business strength, growth, and balance-sheet signals.",
-                        "tone": ui.tone_from_metric_threshold(row["Score_Fund"], good_min=1, bad_max=-1),
-                        "help": const.ANALYSIS_HELP_TEXT["Fundamental"],
-                    },
-                    {
-                        "label": "Valuation",
-                        "value": fmt.format_int(row["Score_Val"]),
-                        "note": "How cheap or expensive the stock looks versus its closest peer set.",
-                        "tone": ui.tone_from_metric_threshold(row["Score_Val"], good_min=1, bad_max=-1),
-                        "help": const.ANALYSIS_HELP_TEXT["Valuation"],
-                    },
-                    {
-                        "label": "Sentiment Context",
-                        "value": fmt.format_int(row["Sentiment_Headline_Count"]),
-                        "note": "Context only: recent headlines and analyst metadata with no directional score applied.",
-                        "tone": "neutral",
-                        "help": const.ANALYSIS_HELP_TEXT["Sentiment"],
-                    },
-                    {
-                        "label": "Updated",
-                        "value": str(row["Last_Updated"]),
-                        "note": "When this saved analysis was last refreshed.",
-                        "tone": "neutral",
-                        "help": const.ANALYSIS_HELP_TEXT["Updated"],
-                    },
-                ],
-                columns=5,
-            )
-
-            ui.render_analysis_signal_cards(
-                [
-                    {
-                        "label": "Overall Score",
-                        "value": fmt.format_value(row.get("Overall_Score"), "{:,.1f}"),
-                        "note": "The model's combined read after blending all engines.",
-                        "tone": ui.tone_from_metric_threshold(row.get("Overall_Score"), good_min=1, bad_max=-1),
-                        "help": const.ANALYSIS_HELP_TEXT["Overall Score"],
-                    },
-                    {
-                        "label": "Data Quality",
-                        "value": str(row.get("Data_Quality", "Unknown")),
-                        "note": "How complete and usable the source data was.",
-                        "tone": ui.tone_from_quality_label(row.get("Data_Quality", "Unknown")),
-                        "help": const.ANALYSIS_HELP_TEXT["Data Quality"],
-                    },
-                    {
-                        "label": "Assumption Profile",
-                        "value": str(row.get("Assumption_Profile", "Legacy")),
-                        "note": "The preset or custom settings used for this run.",
-                        "tone": "neutral",
-                        "help": const.ANALYSIS_HELP_TEXT["Assumption Profile"],
-                    },
-                    {
-                        "label": "Missing Metrics",
-                        "value": fmt.format_int(row.get("Missing_Metric_Count")),
-                        "note": "How many important data points were unavailable.",
-                        "tone": ui.tone_from_metric_threshold(row.get("Missing_Metric_Count"), good_max=1, bad_min=5),
-                        "help": const.ANALYSIS_HELP_TEXT["Missing Metrics"],
-                    },
-                    {
-                        "label": "Consistency",
-                        "value": fmt.format_value(row.get("Decision_Confidence"), "{:,.0f}", "/100"),
-                        "note": "How consistently the model's signals lined up on this run.",
-                        "tone": ui.tone_from_metric_threshold(row.get("Decision_Confidence"), good_min=70, bad_max=45),
-                        "help": const.ANALYSIS_HELP_TEXT["Consistency"],
-                    },
-                    {
-                        "label": "Regime",
-                        "value": str(row.get("Market_Regime", "Unknown")),
-                        "note": "The market backdrop the model sees in the chart.",
-                        "tone": ui.tone_from_regime(row.get("Market_Regime", "Unknown")),
-                        "help": const.ANALYSIS_HELP_TEXT["Regime"],
-                    },
-                ],
-                columns=6,
-            )
-            st.caption(f"Fingerprint: {row.get('Assumption_Fingerprint', 'Legacy')}")
-            ui.render_analysis_signal_cards(
-                [
-                    {
-                        "label": "Trend Strength",
-                        "value": fmt.format_value(row.get("Trend_Strength"), "{:,.0f}"),
-                        "note": "A quick read on how healthy the long-term trend looks.",
-                        "tone": ui.tone_from_metric_threshold(row.get("Trend_Strength"), good_min=20, bad_max=-20),
-                        "help": const.ANALYSIS_HELP_TEXT["Trend Strength"],
-                    },
-                    {
-                        "label": "Quality Score",
-                        "value": fmt.format_value(row.get("Quality_Score"), "{:,.1f}"),
-                        "note": "A shorthand measure of business durability.",
-                        "tone": ui.tone_from_metric_threshold(row.get("Quality_Score"), good_min=2, bad_max=0),
-                        "help": const.ANALYSIS_HELP_TEXT["Quality Score"],
-                    },
-                    {
-                        "label": "Dividend Safety",
-                        "value": fmt.format_value(row.get("Dividend_Safety_Score"), "{:,.1f}"),
-                        "note": "A rough check on how safe the dividend appears.",
-                        "tone": ui.tone_from_metric_threshold(row.get("Dividend_Safety_Score"), good_min=1.5, bad_max=0),
-                        "help": const.ANALYSIS_HELP_TEXT["Dividend Safety"],
-                    },
-                    {
-                        "label": "Valuation Confidence",
-                        "value": fmt.format_value(row.get("Valuation_Confidence"), "{:,.0f}", "/100"),
-                        "note": "Higher means the valuation read is backed by more usable inputs.",
-                        "tone": ui.tone_from_metric_threshold(row.get("Valuation_Confidence"), good_min=70, bad_max=40),
-                        "help": const.ANALYSIS_HELP_TEXT["Valuation Confidence"],
-                    },
-                    {
-                        "label": "Context Depth",
-                        "value": fmt.format_value(row.get("Sentiment_Conviction"), "{:,.0f}", "/100"),
-                        "note": "How much analyst and headline context was available for this company snapshot.",
-                        "tone": "neutral",
-                        "help": const.ANALYSIS_HELP_TEXT["Sentiment Conviction"],
-                    },
-                ],
-                columns=5,
-            )
-            if row.get("Engine_Weight_Profile"):
-                st.caption(f"Dynamic engine weights: {row.get('Engine_Weight_Profile')}")
-            if row.get("Risk_Flags"):
-                st.caption(f"Risk flags: {row.get('Risk_Flags')}")
-            if row.get("Decision_Notes"):
-                st.caption(str(row.get("Decision_Notes")))
-            if str(row.get("Assumption_Fingerprint", "Legacy")) != active_assumption_fingerprint:
-                st.warning(
-                    "This saved analysis was generated under a different assumption set than the one currently active in Options."
+                ui.render_analysis_signal_cards(
+                    [
+                        {
+                            "label": "Technical",
+                            "value": fmt.format_int(row["Score_Tech"]),
+                            "note": "Price action, momentum, and trend signals.",
+                            "tone": ui.tone_from_metric_threshold(row["Score_Tech"], good_min=1, bad_max=-1),
+                            "help": const.ANALYSIS_HELP_TEXT["Technical"],
+                        },
+                        {
+                            "label": "Fundamental",
+                            "value": fmt.format_int(row["Score_Fund"]),
+                            "note": "Business strength, growth, and balance-sheet signals.",
+                            "tone": ui.tone_from_metric_threshold(row["Score_Fund"], good_min=1, bad_max=-1),
+                            "help": const.ANALYSIS_HELP_TEXT["Fundamental"],
+                        },
+                        {
+                            "label": "Valuation",
+                            "value": fmt.format_int(row["Score_Val"]),
+                            "note": "How cheap or expensive the stock looks versus its closest peer set.",
+                            "tone": ui.tone_from_metric_threshold(row["Score_Val"], good_min=1, bad_max=-1),
+                            "help": const.ANALYSIS_HELP_TEXT["Valuation"],
+                        },
+                        {
+                            "label": "Sentiment Context",
+                            "value": fmt.format_int(row["Sentiment_Headline_Count"]),
+                            "note": "Context only: recent headlines and analyst metadata with no directional score applied.",
+                            "tone": "neutral",
+                            "help": const.ANALYSIS_HELP_TEXT["Sentiment"],
+                        },
+                        {
+                            "label": "Updated",
+                            "value": str(row["Last_Updated"]),
+                            "note": "When this saved analysis was last refreshed.",
+                            "tone": "neutral",
+                            "help": const.ANALYSIS_HELP_TEXT["Updated"],
+                        },
+                    ],
+                    columns=5,
                 )
+
+                ui.render_analysis_signal_cards(
+                    [
+                        {
+                            "label": "Overall Score",
+                            "value": fmt.format_value(row.get("Overall_Score"), "{:,.1f}"),
+                            "note": "The model's combined read after blending all engines.",
+                            "tone": ui.tone_from_metric_threshold(row.get("Overall_Score"), good_min=1, bad_max=-1),
+                            "help": const.ANALYSIS_HELP_TEXT["Overall Score"],
+                        },
+                        {
+                            "label": "Data Quality",
+                            "value": str(row.get("Data_Quality", "Unknown")),
+                            "note": "How complete and usable the source data was.",
+                            "tone": ui.tone_from_quality_label(row.get("Data_Quality", "Unknown")),
+                            "help": const.ANALYSIS_HELP_TEXT["Data Quality"],
+                        },
+                        {
+                            "label": "Assumption Profile",
+                            "value": str(row.get("Assumption_Profile", "Legacy")),
+                            "note": "The preset or custom settings used for this run.",
+                            "tone": "neutral",
+                            "help": const.ANALYSIS_HELP_TEXT["Assumption Profile"],
+                        },
+                        {
+                            "label": "Missing Metrics",
+                            "value": fmt.format_int(row.get("Missing_Metric_Count")),
+                            "note": "How many important data points were unavailable.",
+                            "tone": ui.tone_from_metric_threshold(row.get("Missing_Metric_Count"), good_max=1, bad_min=5),
+                            "help": const.ANALYSIS_HELP_TEXT["Missing Metrics"],
+                        },
+                        {
+                            "label": "Consistency",
+                            "value": fmt.format_value(row.get("Decision_Confidence"), "{:,.0f}", "/100"),
+                            "note": "How consistently the model's signals lined up on this run.",
+                            "tone": ui.tone_from_metric_threshold(row.get("Decision_Confidence"), good_min=70, bad_max=45),
+                            "help": const.ANALYSIS_HELP_TEXT["Consistency"],
+                        },
+                        {
+                            "label": "Regime",
+                            "value": str(row.get("Market_Regime", "Unknown")),
+                            "note": "The market backdrop the model sees in the chart.",
+                            "tone": ui.tone_from_regime(row.get("Market_Regime", "Unknown")),
+                            "help": const.ANALYSIS_HELP_TEXT["Regime"],
+                        },
+                    ],
+                    columns=6,
+                )
+                st.caption(f"Fingerprint: {row.get('Assumption_Fingerprint', 'Legacy')}")
+                ui.render_analysis_signal_cards(
+                    [
+                        {
+                            "label": "Trend Strength",
+                            "value": fmt.format_value(row.get("Trend_Strength"), "{:,.0f}"),
+                            "note": "A quick read on how healthy the long-term trend looks.",
+                            "tone": ui.tone_from_metric_threshold(row.get("Trend_Strength"), good_min=20, bad_max=-20),
+                            "help": const.ANALYSIS_HELP_TEXT["Trend Strength"],
+                        },
+                        {
+                            "label": "Quality Score",
+                            "value": fmt.format_value(row.get("Quality_Score"), "{:,.1f}"),
+                            "note": "A shorthand measure of business durability.",
+                            "tone": ui.tone_from_metric_threshold(row.get("Quality_Score"), good_min=2, bad_max=0),
+                            "help": const.ANALYSIS_HELP_TEXT["Quality Score"],
+                        },
+                        {
+                            "label": "Dividend Safety",
+                            "value": fmt.format_value(row.get("Dividend_Safety_Score"), "{:,.1f}"),
+                            "note": "A rough check on how safe the dividend appears.",
+                            "tone": ui.tone_from_metric_threshold(row.get("Dividend_Safety_Score"), good_min=1.5, bad_max=0),
+                            "help": const.ANALYSIS_HELP_TEXT["Dividend Safety"],
+                        },
+                        {
+                            "label": "Valuation Confidence",
+                            "value": fmt.format_value(row.get("Valuation_Confidence"), "{:,.0f}", "/100"),
+                            "note": "Higher means the valuation read is backed by more usable inputs.",
+                            "tone": ui.tone_from_metric_threshold(row.get("Valuation_Confidence"), good_min=70, bad_max=40),
+                            "help": const.ANALYSIS_HELP_TEXT["Valuation Confidence"],
+                        },
+                        {
+                            "label": "Context Depth",
+                            "value": fmt.format_value(row.get("Sentiment_Conviction"), "{:,.0f}", "/100"),
+                            "note": "How much analyst and headline context was available for this company snapshot.",
+                            "tone": "neutral",
+                            "help": const.ANALYSIS_HELP_TEXT["Sentiment Conviction"],
+                        },
+                    ],
+                    columns=5,
+                )
+                if row.get("Engine_Weight_Profile"):
+                    st.caption(f"Dynamic engine weights: {row.get('Engine_Weight_Profile')}")
+                if row.get("Risk_Flags"):
+                    st.caption(f"Risk flags: {row.get('Risk_Flags')}")
+                if row.get("Decision_Notes"):
+                    st.caption(str(row.get("Decision_Notes")))
+                if str(row.get("Assumption_Fingerprint", "Legacy")) != active_assumption_fingerprint:
+                    st.warning(
+                        "This saved analysis was generated under a different assumption set than the one currently active in Options."
+                    )
 
             tab_val, tab_fund, tab_tech, tab_sent, tab_dcf = st.tabs(
                 ["Valuation Engine", "Fundamental Engine", "Technical Engine", "Sentiment Context", "DCF Lab"]
@@ -943,5 +949,15 @@ def render_single_stock_view(db, bot, model_settings, active_assumption_fingerpr
                     st.markdown("##### Filing Takeaways")
                     for excerpt in dcf_excerpts[:5]:
                         st.write(f"- {excerpt}")
+
+            st.divider()
+            st.download_button(
+                "Download Company Data",
+                data=company_download_bytes,
+                file_name=f"{row['Ticker']}_analysis_snapshot.json",
+                mime="application/json",
+                key=f"download_company_data_{row['Ticker']}",
+                width="stretch",
+            )
         else:
             st.info("Run the full analysis to save this ticker into the shared research library.")

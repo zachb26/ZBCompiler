@@ -17,7 +17,12 @@ Functions:
     adjust_type_based_confidence
 """
 
+from __future__ import annotations
+
+from typing import Any
+
 import numpy as np
+import pandas as pd
 
 from constants import CYCLICAL_SECTORS, DEFENSIVE_SECTORS, INCOME_SECTORS, QUALITY_SECTORS, STOCK_TYPE_STRATEGIES
 from fetch import has_numeric_value, safe_num, score_relative_multiple
@@ -28,7 +33,7 @@ from analytics_scoring import resolve_overall_verdict
 # Valuation and sentiment confidence helpers
 # ---------------------------------------------------------------------------
 
-def calculate_valuation_confidence(signal_count):
+def calculate_valuation_confidence(signal_count: float | None) -> float:
     """Return a 20–95 valuation confidence score based on available signal count."""
     if not has_numeric_value(signal_count):
         return 25.0
@@ -36,7 +41,14 @@ def calculate_valuation_confidence(signal_count):
     return float(np.clip(20 + signal_count * 12, 20, 95))
 
 
-def calculate_sentiment_conviction(sentiment_score, analyst_opinions, recommendation_key, target_mean_price, price, headline_count):
+def calculate_sentiment_conviction(
+    sentiment_score: float,
+    analyst_opinions: float | None,
+    recommendation_key: str | None,
+    target_mean_price: float | None,
+    price: float | None,
+    headline_count: int | None,
+) -> float:
     """
     Return a 10–95 sentiment conviction score that combines analyst
     opinion depth, target-price upside, and headline volume.
@@ -56,7 +68,7 @@ def calculate_sentiment_conviction(sentiment_score, analyst_opinions, recommenda
 # Engine-weight adjustment
 # ---------------------------------------------------------------------------
 
-def get_type_adjusted_engine_weights(stock_profile, settings):
+def get_type_adjusted_engine_weights(stock_profile: dict[str, Any], settings: dict[str, Any]) -> tuple[dict[str, float], str]:
     """
     Return (weights_dict, weight_profile_string) with per-engine multipliers
     applied for the detected stock primary type.
@@ -108,15 +120,15 @@ def get_type_adjusted_engine_weights(stock_profile, settings):
 
 def build_risk_flags(
     *,
-    eps,
-    debt_eq,
-    current_ratio,
-    overextended,
-    distance_52w_high,
-    range_position,
-    volatility_1y,
-    stock_profile,
-):
+    eps: float | None,
+    debt_eq: float | None,
+    current_ratio: float | None,
+    overextended: bool,
+    distance_52w_high: float | None,
+    range_position: float | None,
+    volatility_1y: float | None,
+    stock_profile: dict[str, Any],
+) -> list[str]:
     """
     Return a list of short risk-flag labels for visible red flags in the
     current snapshot.
@@ -145,7 +157,7 @@ def build_risk_flags(
 # Cap-bucket and stock-type classification
 # ---------------------------------------------------------------------------
 
-def classify_cap_bucket(market_cap):
+def classify_cap_bucket(market_cap: float | None) -> str:
     """Return 'Small-Cap', 'Mid-Cap', 'Large-Cap', or 'Unknown'."""
     if not has_numeric_value(market_cap) or market_cap <= 0:
         return "Unknown"
@@ -156,7 +168,7 @@ def classify_cap_bucket(market_cap):
     return "Large-Cap"
 
 
-def build_stock_type_strategy(primary_type):
+def build_stock_type_strategy(primary_type: str) -> str:
     """Return the strategy string for *primary_type* from the constant map."""
     return STOCK_TYPE_STRATEGIES.get(
         primary_type,
@@ -396,7 +408,7 @@ def classify_stock_profile(
     }
 
 
-def extract_stock_profile_from_saved_row(saved_row):
+def extract_stock_profile_from_saved_row(saved_row: dict[str, Any] | None) -> dict[str, Any]:
     """Build a minimal stock-profile dict from a previously saved database row."""
     if saved_row is None:
         return {}
@@ -414,7 +426,13 @@ def extract_stock_profile_from_saved_row(saved_row):
     }
 
 
-def infer_stock_profile_from_snapshot(info, hist, settings=None, db=None, ticker=None):
+def infer_stock_profile_from_snapshot(
+    info: dict[str, Any],
+    hist: pd.DataFrame,
+    settings: dict[str, Any] | None = None,
+    db: Any = None,
+    ticker: str | None = None,
+) -> dict[str, Any]:
     """
     Classify the stock type using live info and price history.
 
@@ -525,21 +543,21 @@ def infer_stock_profile_from_snapshot(info, hist, settings=None, db=None, ticker
 
 def apply_stock_type_framework(
     *,
-    stock_profile,
-    overall_score,
-    tech_score,
-    f_score,
-    v_score,
-    sentiment_score,
-    v_fund,
-    v_val,
-    regime,
-    bullish_trend,
-    bearish_trend,
-    data_quality,
-    momentum_1y,
-    settings,
-):
+    stock_profile: dict[str, Any],
+    overall_score: float,
+    tech_score: float,
+    f_score: float,
+    v_score: float,
+    sentiment_score: float,
+    v_fund: str,
+    v_val: str,
+    regime: str,
+    bullish_trend: bool,
+    bearish_trend: bool,
+    data_quality: str,
+    momentum_1y: float | None,
+    settings: dict[str, Any],
+) -> tuple[float, str, dict[str, Any], list[str]]:
     """
     Apply stock-type-specific score adjustments and threshold overrides,
     then call resolve_overall_verdict to compute the final verdict.
@@ -685,7 +703,7 @@ def apply_stock_type_framework(
     return adjusted_score, verdict, local_settings, notes
 
 
-def adjust_type_based_confidence(confidence, stock_profile, data_quality):
+def adjust_type_based_confidence(confidence: float, stock_profile: dict[str, Any], data_quality: str) -> float:
     """
     Nudge the confidence score up for durable types (Blue-Chip, Defensive)
     and down for riskier types (Small-Cap, Speculative).

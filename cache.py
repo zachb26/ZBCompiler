@@ -86,6 +86,23 @@ def get_cached_fetch_payload(bucket, key, max_age_seconds=FETCH_CACHE_TTL_SECOND
         return clone_cached_payload(cache_entry["payload"])
 
 
+def evict_ticker_from_cache(ticker):
+    """Remove all in-memory cache entries associated with *ticker*.
+
+    Clears ticker_history (tuple keys), ticker_info, ticker_news, and
+    peer_group entries whose cache key contains the ticker string.
+    """
+    t = ticker.upper()
+    with FETCH_CACHE_LOCK:
+        for bucket_name, store in FETCH_CACHE.items():
+            keys_to_drop = [
+                k for k in list(store.keys())
+                if k == t or (isinstance(k, tuple) and t in k)
+            ]
+            for k in keys_to_drop:
+                store.pop(k, None)
+
+
 def set_cached_fetch_payload(bucket, key, payload):
     """Write *payload* into the cache, evicting the oldest entry when the bucket is full."""
     with FETCH_CACHE_LOCK:

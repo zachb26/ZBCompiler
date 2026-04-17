@@ -58,7 +58,14 @@
       "Bash(python -c \"import ast; [print\\(f'{f}: OK'\\) for f in ['views/readme.py','views/changelog.py','views/backtest_view.py','views/sensitivity.py','services/startup_refresh.py','ui/auth.py','ui/charts.py'] if not ast.parse\\(open\\(f\\).read\\(\\)\\)]\")",
       "Bash(python -m pytest tests/ -v --tb=short)",
       "Bash(pip install *)",
-      "Bash(python -m pip install pytest --quiet)"
+      "Bash(python -m pip install pytest --quiet)",
+      "Bash(grep -E \"except Exception|pass$|return|=.*None\")",
+      "Bash(python3)",
+      "Bash(python -c \"import streamlit; print\\(streamlit.__version__\\)\")",
+      "Bash(pip show *)",
+      "Bash(python -m py_compile c:/osig-research-tool/OSIG-Research-Tool/views/new_analyst.py)",
+      "Bash(python -m py_compile c:/osig-research-tool/OSIG-Research-Tool/views/senior_analyst.py)",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('views/library.py'\\).read\\(\\)\\); print\\('OK'\\)\")"
     ]
   }
 }

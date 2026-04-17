@@ -13,6 +13,10 @@ Functions:
     run_sensitivity_analysis
 """
 
+from __future__ import annotations
+
+from typing import Any
+
 import numpy as np
 import pandas as pd
 
@@ -32,7 +36,7 @@ from settings import (
 # Data-quality helpers
 # ---------------------------------------------------------------------------
 
-def rate_data_quality(completeness):
+def rate_data_quality(completeness: float) -> str:
     """Return 'High', 'Medium', or 'Low' based on *completeness* fraction."""
     if completeness >= 0.85:
         return "High"
@@ -41,7 +45,7 @@ def rate_data_quality(completeness):
     return "Low"
 
 
-def assess_record_quality(record):
+def assess_record_quality(record: dict[str, Any]) -> tuple[float, int, str]:
     """
     Return (completeness_fraction, missing_count, quality_label) for the
     key metric fields in *record*.
@@ -75,7 +79,7 @@ def assess_record_quality(record):
 # Verdict helpers
 # ---------------------------------------------------------------------------
 
-def map_verdict_bias(verdict):
+def map_verdict_bias(verdict: str) -> int:
     """Return 'Bullish', 'Bearish', or 'Neutral' for a verdict string."""
     if verdict in {"BUY", "STRONG BUY"}:
         return "Bullish"
@@ -88,7 +92,7 @@ def map_verdict_bias(verdict):
 # DataFrame enrichment
 # ---------------------------------------------------------------------------
 
-def prepare_analysis_dataframe(df, settings=None):
+def prepare_analysis_dataframe(df: pd.DataFrame, settings: dict[str, Any] | None = None) -> pd.DataFrame:
     """
     Enrich a raw database DataFrame with computed columns (Composite Score,
     Target Upside, Graham Discount, DCF Upside, data-quality stats,
@@ -251,7 +255,7 @@ def prepare_analysis_dataframe(df, settings=None):
 # Batch collection
 # ---------------------------------------------------------------------------
 
-def collect_analysis_rows(analyst, db, tickers, refresh_live=False):
+def collect_analysis_rows(analyst: Any, db: Any, tickers: list[str], refresh_live: bool = False) -> list[dict[str, Any]]:
     """
     Collect analysis records for *tickers*, running live analysis when no
     saved record exists or *refresh_live* is True.
@@ -286,7 +290,7 @@ def collect_analysis_rows(analyst, db, tickers, refresh_live=False):
 # Sensitivity analysis
 # ---------------------------------------------------------------------------
 
-def build_sensitivity_scenarios(base_settings):
+def build_sensitivity_scenarios(base_settings: dict[str, Any]) -> list[dict[str, Any]]:
     """
     Return a list of (scenario_name, settings_dict) pairs covering the
     standard preset variants plus a valuation-strict and low-sentiment-weight
@@ -323,7 +327,7 @@ def build_sensitivity_scenarios(base_settings):
     ]
 
 
-def run_sensitivity_analysis(analyst, ticker, settings=None):
+def run_sensitivity_analysis(analyst: Any, ticker: str, settings: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """
     Run the stock-type framework across multiple assumption scenarios and
     return (scenarios_df, summary_dict) — or (None, None) on failure.

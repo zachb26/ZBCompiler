@@ -1,8 +1,11 @@
 # -*- coding: utf-8 -*-
 import datetime
+import logging
 import time
 
 import streamlit as st
+
+logger = logging.getLogger(__name__)
 
 import constants as const
 import fetch
@@ -147,6 +150,7 @@ def refresh_saved_analyses_on_launch(db, settings, badge_placeholder=None):
                     except Exception as exc:
                         record = None
                         analyst.last_error = fetch.summarize_fetch_error(exc)
+                        logger.warning("Startup refresh failed for %s: %s", ticker, exc)
 
                     if record is None:
                         failed_count += 1
@@ -189,6 +193,7 @@ def refresh_saved_analyses_on_launch(db, settings, badge_placeholder=None):
                     )
                 return get_startup_refresh_snapshot()
             except Exception as exc:
+                logger.error("Startup refresh run crashed: %s", exc)
                 with const.STARTUP_REFRESH_LOCK:
                     const.STARTUP_REFRESH_STATE.update(
                         {

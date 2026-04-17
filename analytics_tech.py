@@ -10,13 +10,21 @@ Functions:
     calculate_dividend_safety_score
 """
 
+from __future__ import annotations
+
+from typing import Any
+
 import numpy as np
 import pandas as pd
 
 from fetch import has_numeric_value, safe_divide
 
 
-def compute_relative_strength(close, benchmark_close, window):
+def compute_relative_strength(
+    close: pd.Series,
+    benchmark_close: pd.Series,
+    window: int,
+) -> float | None:
     if close is None or benchmark_close is None or window <= 0:
         return None
     close = close.dropna()
@@ -34,7 +42,7 @@ def compute_relative_strength(close, benchmark_close, window):
     return float(stock_return - benchmark_return)
 
 
-def calculate_realized_volatility(close, window):
+def calculate_realized_volatility(close: pd.Series, window: int) -> float | None:
     """Return annualised realised volatility over the last *window* periods."""
     if close is None or len(close) < max(window, 2):
         return None
@@ -44,7 +52,12 @@ def calculate_realized_volatility(close, window):
     return float(returns.tail(window).std() * np.sqrt(252))
 
 
-def calculate_trend_strength(price, sma50, sma200, momentum_1y=None):
+def calculate_trend_strength(
+    price: float | None,
+    sma50: float | None,
+    sma200: float | None,
+    momentum_1y: float | None = None,
+) -> float | None:
     """
     Return a composite trend-strength score in the range [-100, 100].
 
@@ -63,7 +76,9 @@ def calculate_trend_strength(price, sma50, sma200, momentum_1y=None):
     return float(np.clip(sum(components), -100, 100))
 
 
-def calculate_52w_context(close):
+def calculate_52w_context(
+    close: pd.Series,
+) -> tuple[float | None, float | None, float | None]:
     """
     Return (range_position, distance_from_high, distance_from_low) over
     the trailing 252-bar window.
@@ -87,7 +102,15 @@ def calculate_52w_context(close):
     return range_position, distance_high, distance_low
 
 
-def calculate_quality_score(roe, margins, debt_eq, revenue_growth, earnings_growth, current_ratio, settings):
+def calculate_quality_score(
+    roe: float | None,
+    margins: float | None,
+    debt_eq: float | None,
+    revenue_growth: float | None,
+    earnings_growth: float | None,
+    current_ratio: float | None,
+    settings: dict[str, Any],
+) -> float:
     """
     Return a quality score in the range [-4, 5].
 
@@ -121,7 +144,13 @@ def calculate_quality_score(roe, margins, debt_eq, revenue_growth, earnings_grow
     return float(np.clip(score, -4, 5))
 
 
-def calculate_dividend_safety_score(dividend_yield, payout_ratio, margins, current_ratio, debt_eq):
+def calculate_dividend_safety_score(
+    dividend_yield: float | None,
+    payout_ratio: float | None,
+    margins: float | None,
+    current_ratio: float | None,
+    debt_eq: float | None,
+) -> float:
     """
     Return a dividend-safety score in the range [-3, 4].
 

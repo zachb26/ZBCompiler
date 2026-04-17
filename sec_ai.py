@@ -31,11 +31,14 @@ Public functions / constants:
     build_sec_financial_dataset
 """
 
+import logging
 import os
 import re
 import time
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 import pandas as pd
 
 from constants import (
@@ -122,6 +125,7 @@ def fetch_json_url_with_retry(url, *, headers=None, attempts=3, timeout=15):
             return payload, None
         except Exception as exc:
             last_error = explain_upstream_fetch_error(url, exc)
+            logger.warning("fetch_json_url attempt %d failed (%s): %s", attempt + 1, url, exc)
             if "SEC EDGAR returned HTTP 403" in str(last_error):
                 break
         if attempt < attempts - 1:
@@ -149,6 +153,7 @@ def fetch_text_url_with_retry(url, *, headers=None, attempts=3, timeout=20):
             return response.text, None
         except Exception as exc:
             last_error = explain_upstream_fetch_error(url, exc)
+            logger.warning("fetch_text_url attempt %d failed (%s): %s", attempt + 1, url, exc)
             if "SEC EDGAR returned HTTP 403" in str(last_error):
                 break
         if attempt < attempts - 1:
@@ -419,6 +424,7 @@ def extract_guidance_with_anthropic(excerpts):
         if isinstance(parsed, dict) and parsed:
             return parsed, None
     except Exception as exc:
+        logger.error("extract_guidance_with_anthropic failed: %s", exc)
         return None, summarize_fetch_error(exc)
     return None, "Anthropic guidance extraction returned no usable JSON payload."
 
@@ -589,6 +595,7 @@ def render_ai_reports_tab(db):
                     report_text = call_claude_for_skill_report(report_key, record)
                     st.session_state[result_key] = report_text
                 except Exception as exc:
+                    logger.error("AI report generation failed (report_key=%s): %s", report_key, exc)
                     st.error(f"Report generation failed: {exc}")
 
     if st.session_state.get(result_key):

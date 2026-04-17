@@ -25,8 +25,11 @@ Covers:
 import copy
 import datetime
 import json
+import logging
 import re
 import time
+
+logger = logging.getLogger(__name__)
 
 import numpy as np
 import pandas as pd
@@ -767,6 +770,7 @@ def fetch_ticker_history_with_retry(ticker, period, attempts=3):
                 return hist, None
             last_error = f"Yahoo returned no usable {period} price history for {ticker}."
         except Exception as exc:
+            logger.warning("fetch_ticker_history attempt %d failed (%s, %s): %s", attempt + 1, ticker, period, exc)
             last_error = summarize_fetch_error(exc)
         if attempt < attempts - 1:
             time.sleep(0.5 * (attempt + 1))
@@ -788,6 +792,7 @@ def fetch_ticker_history_with_retry(ticker, period, attempts=3):
                 set_cached_fetch_payload("ticker_history", cache_key, hist)
                 return hist, None
         except Exception as exc:
+            logger.warning("fetch_batch_history individual-ticker fallback failed (%s, %s): %s", ticker, period, exc)
             last_error = summarize_fetch_error(exc)
 
     stale_history = get_cached_fetch_payload(
@@ -828,6 +833,7 @@ def fetch_batch_history_with_retry(tickers, period, attempts=3):
                 return raw.copy(), None
             last_error = "Yahoo returned no portfolio price history for the selected basket."
         except Exception as exc:
+            logger.warning("fetch_batch_history attempt %d failed: %s", attempt + 1, exc)
             last_error = summarize_fetch_error(exc)
         if attempt < attempts - 1:
             time.sleep(0.5 * (attempt + 1))
@@ -882,6 +888,7 @@ def fetch_ticker_info_with_retry(ticker, attempts=3):
                 return fast_info, None
             last_error = f"Yahoo returned no company profile data for {ticker}."
         except Exception as exc:
+            logger.warning("fetch_ticker_info attempt %d failed (%s): %s", attempt + 1, ticker, exc)
             last_error = summarize_fetch_error(exc)
         if attempt < attempts - 1:
             time.sleep(0.35 * (attempt + 1))
@@ -921,6 +928,7 @@ def fetch_ticker_news_with_retry(ticker, attempts=2):
             else:
                 last_error = f"Yahoo returned no recent news items for {ticker}."
         except Exception as exc:
+            logger.warning("fetch_ticker_news attempt %d failed (%s): %s", attempt + 1, ticker, exc)
             last_error = summarize_fetch_error(exc)
         if attempt < attempts - 1:
             time.sleep(0.25 * (attempt + 1))

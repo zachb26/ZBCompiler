@@ -19,7 +19,12 @@ Functions:
     resolve_overall_verdict
 """
 
+from __future__ import annotations
+
+from typing import Any
+
 import numpy as np
+import pandas as pd
 
 from fetch import has_numeric_value
 
@@ -28,7 +33,7 @@ from fetch import has_numeric_value
 # Weight helpers
 # ---------------------------------------------------------------------------
 
-def cap_weights(weights, max_weight):
+def cap_weights(weights: pd.Series, max_weight: float) -> pd.Series:
     """
     Iteratively cap individual portfolio weights at *max_weight* and
     redistribute the excess to un-capped positions.
@@ -59,7 +64,7 @@ def cap_weights(weights, max_weight):
 # Score → label converters
 # ---------------------------------------------------------------------------
 
-def score_to_signal(score, strong_buy=4, buy=2, sell=-2, strong_sell=-4):
+def score_to_signal(score: float, strong_buy: float = 4, buy: float = 2, sell: float = -2, strong_sell: float = -4) -> str:
     """Map a numeric composite score to a 5-level directional label."""
     if score >= strong_buy:
         return "STRONG BUY"
@@ -72,7 +77,7 @@ def score_to_signal(score, strong_buy=4, buy=2, sell=-2, strong_sell=-4):
     return "HOLD"
 
 
-def score_to_sentiment(score):
+def score_to_sentiment(score: float) -> str:
     """Map a sentiment score to POSITIVE / NEGATIVE / MIXED."""
     if score >= 3:
         return "POSITIVE"
@@ -81,7 +86,7 @@ def score_to_sentiment(score):
     return "MIXED"
 
 
-def score_trend_distance(value, baseline, tolerance=0.02):
+def score_trend_distance(value: float | None, baseline: float | None, tolerance: float = 0.02) -> int:
     """Return +1 above, -1 below, 0 inside the *tolerance* band around *baseline*."""
     if not has_numeric_value(value) or not has_numeric_value(baseline) or baseline <= 0:
         return 0
@@ -92,7 +97,7 @@ def score_trend_distance(value, baseline, tolerance=0.02):
     return 0
 
 
-def step_signal_toward_neutral(signal):
+def step_signal_toward_neutral(signal: str) -> str:
     """Demote a signal by one step toward HOLD."""
     transitions = {
         "STRONG BUY": "BUY",
@@ -108,7 +113,7 @@ def step_signal_toward_neutral(signal):
 # Trend helpers
 # ---------------------------------------------------------------------------
 
-def has_bullish_trend(price, sma50, sma200, momentum_1y=None):
+def has_bullish_trend(price: float | None, sma50: float | None, sma200: float | None, momentum_1y: float | None = None) -> bool:
     """Return True when price and SMA structure are aligned bullishly."""
     if not has_numeric_value(price) or not has_numeric_value(sma200):
         return False
@@ -120,7 +125,7 @@ def has_bullish_trend(price, sma50, sma200, momentum_1y=None):
     return price >= sma200 and long_term_ok
 
 
-def has_bearish_trend(price, sma50, sma200, momentum_1y=None):
+def has_bearish_trend(price: float | None, sma50: float | None, sma200: float | None, momentum_1y: float | None = None) -> bool:
     """Return True when price and SMA structure are aligned bearishly."""
     if not has_numeric_value(price) or not has_numeric_value(sma200):
         return False
@@ -132,7 +137,13 @@ def has_bearish_trend(price, sma50, sma200, momentum_1y=None):
     return price <= sma200 and long_term_weak
 
 
-def classify_market_regime(price, sma50, sma200, momentum_1y=None, tolerance=0.02):
+def classify_market_regime(
+    price: float | None,
+    sma50: float | None,
+    sma200: float | None,
+    momentum_1y: float | None = None,
+    tolerance: float = 0.02,
+) -> str:
     """
     Return one of: 'Bullish Trend', 'Bearish Trend', 'Range-bound',
     'Transition', 'Unclear'.
@@ -152,7 +163,15 @@ def classify_market_regime(price, sma50, sma200, momentum_1y=None, tolerance=0.0
 # Decision confidence
 # ---------------------------------------------------------------------------
 
-def summarize_engine_biases(tech_score, f_score, v_score, sentiment_score, v_val, bullish_trend, bearish_trend):
+def summarize_engine_biases(
+    tech_score: float,
+    f_score: float,
+    v_score: float,
+    sentiment_score: float,
+    v_val: str,
+    bullish_trend: bool,
+    bearish_trend: bool,
+) -> dict[str, Any]:
     """
     Return a dict summarising per-engine directional biases and aggregate
     bullish / bearish counts.
@@ -182,7 +201,12 @@ def summarize_engine_biases(tech_score, f_score, v_score, sentiment_score, v_val
     }
 
 
-def compute_decision_confidence(overall_score, bias_summary, regime, completeness):
+def compute_decision_confidence(
+    overall_score: float,
+    bias_summary: dict[str, Any],
+    regime: str,
+    completeness: float | None,
+) -> float:
     """
     Compute a 0–100 decision consistency score.
 
@@ -206,7 +230,7 @@ def compute_decision_confidence(overall_score, bias_summary, regime, completenes
     return float(np.clip(round(confidence, 1), 5.0, 95.0))
 
 
-def apply_confidence_guard(verdict, confidence, data_quality, settings):
+def apply_confidence_guard(verdict: str, confidence: float, data_quality: str, settings: dict[str, Any]) -> str:
     """
     Demote a verdict toward HOLD when consistency is below the active
     floor thresholds or data quality is Low.
@@ -225,19 +249,19 @@ def apply_confidence_guard(verdict, confidence, data_quality, settings):
 
 
 def build_decision_notes(
-    verdict,
-    regime,
-    bias_summary,
-    confidence,
-    data_quality,
-    current_rsi,
-    v_val,
-    v_fund,
-    bullish_trend,
-    bearish_trend,
-    overextended,
-    pullback_recovery,
-):
+    verdict: str,
+    regime: str,
+    bias_summary: dict[str, Any],
+    confidence: float,
+    data_quality: str,
+    current_rsi: float | None,
+    v_val: str,
+    v_fund: str,
+    bullish_trend: bool,
+    bearish_trend: bool,
+    overextended: bool,
+    pullback_recovery: bool,
+) -> str:
     """
     Return a pipe-separated string of ≤4 human-readable decision notes
     explaining the current verdict.
@@ -279,18 +303,18 @@ def build_decision_notes(
 
 
 def resolve_overall_verdict(
-    overall_score,
-    tech_score,
-    f_score,
-    v_score,
-    sentiment_score,
-    v_fund,
-    v_val,
-    regime,
-    bullish_trend,
-    bearish_trend,
-    settings,
-):
+    overall_score: float,
+    tech_score: float,
+    f_score: float,
+    v_score: float,
+    sentiment_score: float,
+    v_fund: str,
+    v_val: str,
+    regime: str,
+    bullish_trend: bool,
+    bearish_trend: bool,
+    settings: dict[str, Any],
+) -> str:
     """
     Apply all qualitative guardrails to translate the composite score into
     a final 5-level verdict label.

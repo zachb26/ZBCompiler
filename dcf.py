@@ -15,7 +15,10 @@ Functions:
     build_sec_dcf_model
 """
 
+from __future__ import annotations
+
 import datetime
+from typing import Any
 
 import numpy as np
 
@@ -49,7 +52,7 @@ from settings import normalize_dcf_settings
 # Growth-rate helpers
 # ---------------------------------------------------------------------------
 
-def calculate_growth_rate_from_series(history_rows, field_name, lookback_years=3):
+def calculate_growth_rate_from_series(history_rows: list[dict[str, Any]], field_name: str, lookback_years: int = 3) -> float | None:
     """
     Compute a compound or mean annual growth rate for *field_name* across
     up to *lookback_years* of *history_rows*.
@@ -81,7 +84,7 @@ def calculate_growth_rate_from_series(history_rows, field_name, lookback_years=3
     return None
 
 
-def build_growth_schedule(initial_growth_rate, terminal_growth_rate, years):
+def build_growth_schedule(initial_growth_rate: float, terminal_growth_rate: float, years: int) -> list[float]:
     """
     Return a list of annual growth rates for the explicit projection period.
 
@@ -117,7 +120,7 @@ def build_growth_schedule(initial_growth_rate, terminal_growth_rate, years):
 # Treasury yield
 # ---------------------------------------------------------------------------
 
-def fetch_treasury_10y_yield():
+def fetch_treasury_10y_yield() -> tuple[float, str | None]:
     """
     Fetch the current 10-year US Treasury yield from the Treasury API.
 
@@ -156,7 +159,7 @@ def fetch_treasury_10y_yield():
 # WACC
 # ---------------------------------------------------------------------------
 
-def compute_wacc_components(ticker, info, sec_dataset, dcf_settings):
+def compute_wacc_components(ticker: str, info: dict[str, Any], sec_dataset: dict[str, Any], dcf_settings: dict[str, Any]) -> dict[str, Any]:
     """
     Compute all WACC components from SEC data, company info, and DCF
     settings.
@@ -245,7 +248,7 @@ def compute_wacc_components(ticker, info, sec_dataset, dcf_settings):
 # Growth assumptions
 # ---------------------------------------------------------------------------
 
-def determine_growth_assumptions(history_rows, dcf_settings=None):
+def determine_growth_assumptions(history_rows: list[dict[str, Any]], dcf_settings: dict[str, Any] | None = None) -> dict[str, Any]:
     """
     Derive the growth schedule for the DCF projection from SEC history and
     optional DCF settings overrides.
@@ -312,7 +315,7 @@ def determine_growth_assumptions(history_rows, dcf_settings=None):
 # FCF normalisation
 # ---------------------------------------------------------------------------
 
-def extract_recent_metric_values(history_rows, field_name, limit=5):
+def extract_recent_metric_values(history_rows: list[dict[str, Any]], field_name: str, limit: int = 5) -> list[float]:
     """Return the last *limit* non-null float values for *field_name*."""
     values = []
     for row in history_rows or []:
@@ -322,7 +325,7 @@ def extract_recent_metric_values(history_rows, field_name, limit=5):
     return values[-limit:]
 
 
-def calculate_normalized_base_fcf(history_rows, latest_metrics=None):
+def calculate_normalized_base_fcf(history_rows: list[dict[str, Any]], latest_metrics: dict[str, Any] | None = None) -> float | None:
     """
     Derive a normalised base FCF that smooths out capex spikes and
     negative interim periods.
@@ -433,7 +436,14 @@ def calculate_normalized_base_fcf(history_rows, latest_metrics=None):
 # Terminal exit value
 # ---------------------------------------------------------------------------
 
-def estimate_terminal_exit_value(info, sec_dataset, growth_schedule, wacc, projection_years, peer_benchmarks=None):
+def estimate_terminal_exit_value(
+    info: dict[str, Any],
+    sec_dataset: dict[str, Any],
+    growth_schedule: list[float],
+    wacc: float,
+    projection_years: int,
+    peer_benchmarks: dict[str, Any] | None = None,
+) -> float:
     """
     Estimate a blended terminal value using EV/EBITDA and EV/Sales multiples.
 
@@ -506,7 +516,14 @@ def estimate_terminal_exit_value(info, sec_dataset, growth_schedule, wacc, proje
 # Sensitivity grid
 # ---------------------------------------------------------------------------
 
-def build_dcf_sensitivity_grid(projected_fcfs, wacc, cash, debt, shares_outstanding, dcf_settings):
+def build_dcf_sensitivity_grid(
+    projected_fcfs: list[float],
+    wacc: float,
+    cash: float,
+    debt: float,
+    shares_outstanding: float,
+    dcf_settings: dict[str, Any],
+) -> dict[str, Any]:
     """
     Build a sensitivity table of per-share intrinsic values across a range of
     WACC and terminal-growth-rate combinations.
@@ -552,7 +569,13 @@ def build_dcf_sensitivity_grid(projected_fcfs, wacc, cash, debt, shares_outstand
 # Full DCF model entry point
 # ---------------------------------------------------------------------------
 
-def build_sec_dcf_model(ticker, price, info, dcf_settings=None, peer_benchmarks=None):
+def build_sec_dcf_model(
+    ticker: str,
+    price: float,
+    info: dict[str, Any],
+    dcf_settings: dict[str, Any] | None = None,
+    peer_benchmarks: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """
     Build a complete DCF valuation model sourced from SEC EDGAR filings.
 

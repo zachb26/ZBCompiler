@@ -5,9 +5,13 @@ analyst.py — StockAnalyst and PortfolioAnalyst classes.
 StockAnalyst: fetches data, runs the full scoring pipeline, saves to DB.
 PortfolioAnalyst: builds efficient-frontier, Monte Carlo, and rebalance output.
 """
+import logging
+
 import numpy as np
 import pandas as pd
 import streamlit as st
+
+logger = logging.getLogger(__name__)
 
 from constants import *
 from utils_fmt import *
@@ -982,6 +986,7 @@ class PortfolioAnalyst:
                 "period": period,
             }
         except Exception as exc:
+            logger.error("PortfolioAnalyst.analyze failed: %s", exc)
             self.last_error = f"Portfolio analysis hit an upstream or data-shape error: {summarize_fetch_error(exc)}"
             return None
 

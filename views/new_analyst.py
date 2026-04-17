@@ -2,6 +2,7 @@
 import streamlit as st
 
 import constants as const
+import cache
 import exports
 import utils_fmt as fmt
 import utils_ui as ui
@@ -14,18 +15,24 @@ def render_new_analyst_view(db, analyst):
     st.caption("This starter view focuses on the three beginner-friendly lenses: fundamentals, technicals, and sentiment context.")
     st.caption("Advanced valuation labs, peer comparisons, SEC filing automation, backtests, and model controls are reserved for Senior Analysts.")
 
+    current_ticker = fmt.normalize_ticker(st.session_state.get("new_analyst_ticker", ""))
     with st.form("new_analyst_form"):
-        input_col, action_col = st.columns([3, 1])
+        input_col, analyze_col, refresh_col = st.columns([3, 1, 1], vertical_alignment="bottom")
         with input_col:
             new_analyst_ticker = st.text_input(
                 "Ticker",
                 value=st.session_state.get("new_analyst_ticker", ""),
                 help="Enter one stock symbol to pull the latest saved or refreshed research snapshot.",
             )
-        with action_col:
-            st.write("")
-            st.write("")
+        with analyze_col:
             run_new_analyst = st.form_submit_button("Analyze Stock", type="primary", width="stretch")
+        with refresh_col:
+            refresh_data = st.form_submit_button(
+                "Refresh Data",
+                width="stretch",
+                disabled=not current_ticker,
+                help=f"Evict cached market data for {current_ticker} and re-run the analysis with fresh data." if current_ticker else "Analyze a stock first.",
+            )
 
     if run_new_analyst:
         cleaned_ticker = fmt.normalize_ticker(new_analyst_ticker)
@@ -37,6 +44,15 @@ def render_new_analyst_view(db, analyst):
                 record = analyst.analyze(cleaned_ticker)
             if not record:
                 st.error(analyst.last_error or "Unable to build a starter analysis for this ticker right now.")
+
+    if refresh_data and current_ticker:
+        cache.evict_ticker_from_cache(current_ticker)
+        with st.spinner(f"Refreshing {current_ticker} with fresh data..."):
+            record = analyst.analyze(current_ticker)
+        if record:
+            st.success(f"Data refreshed for {current_ticker}.")
+        else:
+            st.error(analyst.last_error or "Unable to fetch fresh data for this ticker right now.")
 
     starter_ticker = fmt.normalize_ticker(st.session_state.get("new_analyst_ticker", ""))
     if not starter_ticker:
@@ -50,6 +66,7 @@ def render_new_analyst_view(db, analyst):
 
     row = starter_df.iloc[0]
     company_download_bytes = exports.build_company_analysis_download_bytes(row)
+    _skill_row = row.to_dict() if hasattr(row, "to_dict") else row
     ui.render_analysis_signal_cards(
         [
             {
@@ -87,21 +104,19 @@ def render_new_analyst_view(db, analyst):
         ],
         columns=4,
     )
-    st.download_button(
-        "Download Company Data",
-        data=company_download_bytes,
-        file_name=f"{row.get('Ticker', starter_ticker)}_analysis_snapshot.json",
-        mime="application/json",
-        key=f"download_starter_company_data_{starter_ticker}",
-        width="stretch",
-    )
-
-    with st.expander("Export for Claude Code Skills"):
+    with st.expander("Downloads & Export"):
+        st.download_button(
+            "Download Company Data",
+            data=company_download_bytes,
+            file_name=f"{row.get('Ticker', starter_ticker)}_analysis_snapshot.json",
+            mime="application/json",
+            key=f"download_starter_company_data_{starter_ticker}",
+            width="stretch",
+        )
         st.caption(
             "Download pre-formatted input briefs for the installed financial skills. "
             "In Claude Code, run the skill (e.g. `/equity-research:earnings`) and attach the brief when prompted."
         )
-        _skill_row = row.to_dict() if hasattr(row, "to_dict") else row
         _brief_cols = st.columns(2)
         with _brief_cols[0]:
             st.download_button(

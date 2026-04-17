@@ -1,7 +1,14 @@
 # -*- coding: utf-8 -*-
+import logging
 import os
 
 import streamlit as st
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(name)s %(levelname)s %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
 
 import constants as const
 import settings
@@ -65,24 +72,35 @@ if const.RUN_STARTUP_REFRESH and os.environ.get("STOCK_ENGINE_SKIP_STARTUP_REFRE
     startup_refresh_summary = refresh_saved_analyses_on_launch(db, model_settings, badge_placeholder=startup_badge)
     startup_badge.empty()
 
-new_analyst_tab, analyst_senior_tab, sector_leader_tab, portfolio_manager_tab = st.tabs(
-    ["New Analyst", "Senior Analyst", "Sector Leader", "Portfolio Manager"]
+with st.sidebar:
+    st.header("Model Preset")
+    preset_catalog = settings.get_model_presets()
+    preset_names = list(preset_catalog.keys())
+    preset_index = preset_names.index(active_preset_name) if active_preset_name in preset_names else preset_names.index(settings.get_default_preset_name())
+    sidebar_preset = st.selectbox("Preset", preset_names, index=preset_index, label_visibility="collapsed")
+    st.caption(const.PRESET_DESCRIPTIONS.get(sidebar_preset, ""))
+    if st.button("Apply Preset", type="primary", use_container_width=True):
+        st.session_state.model_settings = preset_catalog[sidebar_preset].copy()
+        st.session_state.model_preset_name = sidebar_preset
+        st.session_state.options_feedback = {
+            "message": f"{sidebar_preset} preset loaded.",
+            "notes": [],
+        }
+        st.rerun()
+    st.caption(f"Active: **{active_preset_name}**")
+    st.divider()
+    st.caption("Full model controls and sliders are in Senior Analyst → Controls.")
+
+new_analyst_tab, analyst_senior_tab, sector_leader_tab, portfolio_manager_tab, methodology_tab, readme_tab = st.tabs(
+    ["New Analyst", "Senior Analyst", "Sector Leader", "Portfolio Manager", "Methodology", "ReadMe"]
 )
 
 with new_analyst_tab:
-    analyst_new_tab, compare_tab, methodology_tab, readme_tab, options_tab = st.tabs(
-        ["Analysis", "Comparison", "Methodology", "ReadMe", "Controls"]
-    )
+    analyst_new_tab, compare_tab = st.tabs(["Analysis", "Comparison"])
     with analyst_new_tab:
         render_new_analyst_view(db, bot)
     with compare_tab:
         render_comparison_view(db, bot, model_settings, active_preset_name, active_assumption_fingerprint)
-    with methodology_tab:
-        render_methodology_view(db, model_settings, active_preset_name, active_assumption_fingerprint)
-    with readme_tab:
-        render_readme_view()
-    with options_tab:
-        render_options_view(model_settings, active_preset_name, active_assumption_fingerprint)
 
 with analyst_senior_tab:
     senior_analyst_tools_enabled = render_password_gate(
@@ -93,8 +111,8 @@ with analyst_senior_tab:
         "Unlock Senior Analyst",
     )
     if senior_analyst_tools_enabled:
-        stock_tab, ai_reports_tab, sensitivity_tab, backtest_tab, library_tab, senior_reference_tab = st.tabs(
-            ["Single Stock", "AI Reports", "Sensitivity", "Backtest", "Library", "Changelog"]
+        stock_tab, ai_reports_tab, sensitivity_tab, backtest_tab, library_tab, options_tab, senior_reference_tab = st.tabs(
+            ["Single Stock", "AI Reports", "Sensitivity", "Backtest", "Library", "Controls", "Changelog"]
         )
         with stock_tab:
             render_single_stock_view(db, bot, model_settings, active_assumption_fingerprint)
@@ -106,6 +124,8 @@ with analyst_senior_tab:
             render_backtest_view(db, model_settings, active_preset_name, active_assumption_fingerprint)
         with library_tab:
             render_library_view(db, startup_refresh_summary)
+        with options_tab:
+            render_options_view(model_settings, active_preset_name, active_assumption_fingerprint)
         with senior_reference_tab:
             render_changelog_view()
 
@@ -118,3 +138,9 @@ with portfolio_manager_tab:
         render_portfolio_manager_view(db, portfolio_bot, active_preset_name, active_assumption_fingerprint)
     with portfolio_builder_tab:
         render_portfolio_builder_view(portfolio_bot, active_preset_name, active_assumption_fingerprint)
+
+with methodology_tab:
+    render_methodology_view(db, model_settings, active_preset_name, active_assumption_fingerprint)
+
+with readme_tab:
+    render_readme_view()

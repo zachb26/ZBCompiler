@@ -14,31 +14,13 @@ def render_options_view(model_settings, active_preset_name, active_assumption_fi
     st.caption(f"Active profile: {active_preset_name} | Fingerprint: {active_assumption_fingerprint}")
 
     preset_catalog = settings.get_model_presets()
-    preset_names = list(preset_catalog.keys())
-    preset_index = preset_names.index(active_preset_name) if active_preset_name in preset_names else preset_names.index(settings.get_default_preset_name())
-    preset_col_1, preset_col_2 = st.columns([3, 1])
-    with preset_col_1:
-        preset_selection = st.selectbox(
-            "Load Preset",
-            preset_names,
-            index=preset_index,
-            help=const.OPTIONS_HELP_TEXT["load_preset"],
-        )
-        st.caption(const.PRESET_DESCRIPTIONS.get(preset_selection, ""))
-    with preset_col_2:
-        st.write("")
-        st.write("")
-        if st.button("Apply Preset", width="stretch"):
-            st.session_state.model_settings = preset_catalog[preset_selection].copy()
-            st.session_state.model_preset_name = preset_selection
-            st.session_state.options_feedback = {
-                "message": f"{preset_selection} preset loaded.",
-                "notes": [
-                    const.PRESET_DESCRIPTIONS.get(preset_selection, ""),
-                    "You can still fine-tune any slider below and save the result as a custom assumption set.",
-                ],
-            }
-            st.rerun()
+    st.caption("Switch presets using the sidebar selector.")
+
+    feedback = st.session_state.pop("options_feedback", None)
+    if feedback:
+        st.success(feedback["message"])
+        for note in feedback.get("notes", []):
+            st.caption(note)
 
     preset_snapshot = pd.DataFrame(
         [
@@ -61,12 +43,6 @@ def render_options_view(model_settings, active_preset_name, active_assumption_fi
     st.subheader("Preset Snapshot")
     st.dataframe(preset_snapshot, width="stretch")
 
-    feedback = st.session_state.pop("options_feedback", None)
-    if feedback:
-        st.success(feedback["message"])
-        for note in feedback.get("notes", []):
-            st.caption(note)
-
     assumption_drift = settings.calculate_assumption_drift(model_settings)
     weight_values = [
         model_settings["weight_technical"],
@@ -86,7 +62,7 @@ def render_options_view(model_settings, active_preset_name, active_assumption_fi
     else:
         st.info("The controls are intentionally range-limited so the model remains stable even when you tune it.")
 
-    if st.button("Restore Default Assumptions", width="content"):
+    if st.button("Restore Default Assumptions", width="small"):
         st.session_state.model_settings = settings.get_default_model_settings()
         st.session_state.model_preset_name = settings.get_default_preset_name()
         st.session_state.options_feedback = {

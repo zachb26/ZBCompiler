@@ -10,3 +10,8 @@ requests
 beautifulsoup4
 anthropic
 psycopg[binary]
+
+# dev / code-quality tools
+ruff
+mypy
+pandas-stubs

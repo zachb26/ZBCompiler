@@ -9,6 +9,10 @@ Functions:
     compute_technical_backtest
 """
 
+from __future__ import annotations
+
+from typing import Any
+
 import numpy as np
 import pandas as pd
 
@@ -22,7 +26,11 @@ from utils_fmt import safe_num
 # Position generation
 # ---------------------------------------------------------------------------
 
-def derive_backtest_positions(analysis, settings=None, stock_profile=None):
+def derive_backtest_positions(
+    analysis: pd.DataFrame,
+    settings: dict[str, Any] | None = None,
+    stock_profile: dict[str, Any] | None = None,
+) -> pd.Series:
     """
     Generate a daily position-size Series (0.0 – 1.45) from the technical
     signal columns already present in *analysis*.
@@ -281,7 +289,7 @@ def derive_backtest_positions(analysis, settings=None, stock_profile=None):
 # Trade summarisation
 # ---------------------------------------------------------------------------
 
-def summarize_backtest_trades(analysis):
+def summarize_backtest_trades(analysis: pd.DataFrame) -> dict[str, Any]:
     """
     Walk the Position column with FIFO lot accounting and return
     (closed_trades_df, summary_dict).
@@ -356,7 +364,11 @@ def summarize_backtest_trades(analysis):
 # Full backtest engine
 # ---------------------------------------------------------------------------
 
-def compute_technical_backtest(hist, settings=None, stock_profile=None):
+def compute_technical_backtest(
+    hist: pd.DataFrame,
+    settings: dict[str, Any] | None = None,
+    stock_profile: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """
     Compute a full technical backtest on *hist* (a DataFrame with a Close
     column) and return a result dict with keys: history, trade_log,

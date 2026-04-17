@@ -15,7 +15,7 @@ def render_sensitivity_view(bot, model_settings, active_preset_name, active_assu
     sensitivity_default_ticker = st.session_state.get("sensitivity_last_ticker") or st.session_state.get("single_ticker", "")
 
     with st.form("sensitivity_form"):
-        sensitivity_col_1, sensitivity_col_2 = st.columns([3, 1])
+        sensitivity_col_1, sensitivity_col_2 = st.columns([3, 1], vertical_alignment="bottom")
         with sensitivity_col_1:
             sensitivity_ticker = st.text_input(
                 "Ticker",
@@ -23,8 +23,6 @@ def render_sensitivity_view(bot, model_settings, active_preset_name, active_assu
                 help="Use this to check whether the verdict stays consistent across nearby assumption sets.",
             )
         with sensitivity_col_2:
-            st.write("")
-            st.write("")
             run_sensitivity = st.form_submit_button("Run Sensitivity Check", type="primary", width="stretch")
 
     if run_sensitivity:
