@@ -2,7 +2,10 @@
 import pandas as pd
 import streamlit as st
 
+import json
+
 import constants as const
+import dcf as dcf_engine
 import exports
 import fetch
 import cache
@@ -908,6 +911,209 @@ def render_single_stock_view(db, bot, model_settings, active_assumption_fingerpr
                     columns=3,
                 )
 
+                # ── Bull / Base / Bear Scenario Builder ──────────────────────
+                dcf_bull_fv     = fmt.safe_num(row.get("DCF_Bull_Fair_Value"))
+                dcf_bear_fv     = fmt.safe_num(row.get("DCF_Bear_Fair_Value"))
+                dcf_blended_fv  = fmt.safe_num(row.get("DCF_Blended_Fair_Value"))
+                scenario_probs  = fetch.safe_json_loads(row.get("DCF_Scenario_Probs"), default={})
+                bull_saved_asmp = fetch.safe_json_loads(row.get("DCF_Bull_Assumptions"), default={})
+                bear_saved_asmp = fetch.safe_json_loads(row.get("DCF_Bear_Assumptions"), default={})
+                base_saved_asmp = fetch.safe_json_loads(row.get("DCF_Assumptions"), default={})
+                current_price   = fmt.safe_num(row.get("Price"))
+
+                with st.expander("Bull / Base / Bear Scenarios", expanded=bool(fetch.has_numeric_value(dcf_bull_fv))):
+                    st.caption("Build three DCF scenarios with independent assumptions and probability weights. The blended target is the probability-weighted fair value.")
+
+                    with st.form(f"scenario_form_{row['Ticker']}"):
+                        st.markdown("**Scenario Assumptions**")
+                        scen_bull_col, scen_base_col, scen_bear_col = st.columns(3)
+
+                        def _live_dcf_default(key, fallback):
+                            return float(live_dcf_settings.get(key) or fallback)
+
+                        with scen_bull_col:
+                            st.markdown("🟢 **Bull**")
+                            bull_growth = st.number_input("Starting Growth (%)", min_value=-20.0, max_value=50.0,
+                                value=float((bull_saved_asmp.get("manual_growth_rate") or _live_dcf_default("manual_growth_rate", 0.08)) * 100),
+                                step=0.5, key=f"bull_growth_{row['Ticker']}")
+                            bull_tgr = st.number_input("Terminal Growth (%)", min_value=0.0, max_value=5.0,
+                                value=float((bull_saved_asmp.get("terminal_growth_rate") or _live_dcf_default("terminal_growth_rate", const.DCF_TERMINAL_GROWTH_RATE)) * 100),
+                                step=0.1, key=f"bull_tgr_{row['Ticker']}")
+                            bull_haircut = st.number_input("Growth Haircut", min_value=0.5, max_value=1.2,
+                                value=float(bull_saved_asmp.get("growth_haircut") or _live_dcf_default("growth_haircut", const.DCF_GROWTH_HAIRCUT)),
+                                step=0.05, key=f"bull_haircut_{row['Ticker']}")
+                            bull_mrp = st.number_input("Market Risk Prem (%)", min_value=3.0, max_value=9.0,
+                                value=float((bull_saved_asmp.get("market_risk_premium") or _live_dcf_default("market_risk_premium", const.DCF_DEFAULT_MARKET_RISK_PREMIUM)) * 100),
+                                step=0.1, key=f"bull_mrp_{row['Ticker']}")
+
+                        with scen_base_col:
+                            st.markdown("⚪ **Base**")
+                            base_growth = st.number_input("Starting Growth (%)", min_value=-20.0, max_value=50.0,
+                                value=float((base_saved_asmp.get("manual_growth_rate") or _live_dcf_default("manual_growth_rate", 0.05)) * 100),
+                                step=0.5, key=f"base_growth_{row['Ticker']}")
+                            base_tgr = st.number_input("Terminal Growth (%)", min_value=0.0, max_value=5.0,
+                                value=float((base_saved_asmp.get("terminal_growth_rate") or _live_dcf_default("terminal_growth_rate", const.DCF_TERMINAL_GROWTH_RATE)) * 100),
+                                step=0.1, key=f"base_tgr_{row['Ticker']}")
+                            base_haircut = st.number_input("Growth Haircut", min_value=0.5, max_value=1.2,
+                                value=float(base_saved_asmp.get("growth_haircut") or _live_dcf_default("growth_haircut", const.DCF_GROWTH_HAIRCUT)),
+                                step=0.05, key=f"base_haircut_{row['Ticker']}")
+                            base_mrp = st.number_input("Market Risk Prem (%)", min_value=3.0, max_value=9.0,
+                                value=float((base_saved_asmp.get("market_risk_premium") or _live_dcf_default("market_risk_premium", const.DCF_DEFAULT_MARKET_RISK_PREMIUM)) * 100),
+                                step=0.1, key=f"base_mrp_{row['Ticker']}")
+
+                        with scen_bear_col:
+                            st.markdown("🔴 **Bear**")
+                            bear_growth = st.number_input("Starting Growth (%)", min_value=-20.0, max_value=50.0,
+                                value=float((bear_saved_asmp.get("manual_growth_rate") or _live_dcf_default("manual_growth_rate", 0.02)) * 100),
+                                step=0.5, key=f"bear_growth_{row['Ticker']}")
+                            bear_tgr = st.number_input("Terminal Growth (%)", min_value=0.0, max_value=5.0,
+                                value=float((bear_saved_asmp.get("terminal_growth_rate") or _live_dcf_default("terminal_growth_rate", const.DCF_TERMINAL_GROWTH_RATE)) * 100),
+                                step=0.1, key=f"bear_tgr_{row['Ticker']}")
+                            bear_haircut = st.number_input("Growth Haircut", min_value=0.5, max_value=1.2,
+                                value=float(bear_saved_asmp.get("growth_haircut") or _live_dcf_default("growth_haircut", const.DCF_GROWTH_HAIRCUT)),
+                                step=0.05, key=f"bear_haircut_{row['Ticker']}")
+                            bear_mrp = st.number_input("Market Risk Prem (%)", min_value=3.0, max_value=9.0,
+                                value=float((bear_saved_asmp.get("market_risk_premium") or _live_dcf_default("market_risk_premium", const.DCF_DEFAULT_MARKET_RISK_PREMIUM)) * 100),
+                                step=0.1, key=f"bear_mrp_{row['Ticker']}")
+
+                        st.markdown("**Probability Weights** (must sum to 100)")
+                        prob_col_bull, prob_col_base, prob_col_bear = st.columns(3)
+                        p_bull = prob_col_bull.number_input("Bull %", min_value=0, max_value=100,
+                            value=int(scenario_probs.get("bull", 25)), step=5, key=f"p_bull_{row['Ticker']}")
+                        p_base = prob_col_base.number_input("Base %", min_value=0, max_value=100,
+                            value=int(scenario_probs.get("base", 55)), step=5, key=f"p_base_{row['Ticker']}")
+                        p_bear = prob_col_bear.number_input("Bear %", min_value=0, max_value=100,
+                            value=int(scenario_probs.get("bear", 20)), step=5, key=f"p_bear_{row['Ticker']}")
+
+                        build_scenarios_submit = st.form_submit_button("Build Scenarios", type="primary", width="stretch")
+
+                    if build_scenarios_submit:
+                        prob_total = p_bull + p_base + p_bear
+                        if prob_total != 100:
+                            st.error(f"Probability weights must sum to 100 (currently {prob_total}).")
+                        else:
+                            def _make_scenario_settings(growth_pct, tgr_pct, haircut, mrp_pct):
+                                return settings.normalize_dcf_settings({
+                                    **live_dcf_settings,
+                                    "manual_growth_rate": growth_pct / 100,
+                                    "terminal_growth_rate": tgr_pct / 100,
+                                    "growth_haircut": haircut,
+                                    "market_risk_premium": mrp_pct / 100,
+                                })
+
+                            bull_s = _make_scenario_settings(bull_growth, bull_tgr, bull_haircut, bull_mrp)
+                            base_s = _make_scenario_settings(base_growth, base_tgr, base_haircut, base_mrp)
+                            bear_s = _make_scenario_settings(bear_growth, bear_tgr, bear_haircut, bear_mrp)
+
+                            ticker_sym = str(row["Ticker"])
+                            live_price = fmt.safe_num(row.get("Price")) or 0.0
+
+                            with st.spinner(f"Building three-case DCF for {ticker_sym}..."):
+                                live_info, _ = fetch.fetch_ticker_info_with_retry(ticker_sym)
+                                three_case = dcf_engine.build_three_case_dcf(
+                                    ticker_sym, live_price, live_info or {},
+                                    bull_settings=bull_s,
+                                    base_settings=base_s,
+                                    bear_settings=bear_s,
+                                )
+
+                            bull_r = three_case.get("bull", {})
+                            base_r = three_case.get("base", {})
+                            bear_r = three_case.get("bear", {})
+
+                            failed = [
+                                c for c, r in [("bull", bull_r), ("base", base_r), ("bear", bear_r)]
+                                if not r.get("available")
+                            ]
+                            if failed:
+                                st.error(f"Could not build DCF for {', '.join(failed)} case(s). Check that SEC data is available for this ticker.")
+                            else:
+                                bfv  = float(bull_r["intrinsic_value_per_share"])
+                                bsfv = float(base_r["intrinsic_value_per_share"])
+                                brfv = float(bear_r["intrinsic_value_per_share"])
+                                blended = bfv * (p_bull / 100) + bsfv * (p_base / 100) + brfv * (p_bear / 100)
+
+                                def _upside(fv):
+                                    if live_price and live_price > 0:
+                                        return (fv - live_price) / live_price
+                                    return None
+
+                                scenario_record = {
+                                    "Ticker": ticker_sym,
+                                    "DCF_Bull_Fair_Value": bfv,
+                                    "DCF_Bull_Upside": _upside(bfv),
+                                    "DCF_Bull_Assumptions": json.dumps({
+                                        "manual_growth_rate": bull_growth / 100,
+                                        "terminal_growth_rate": bull_tgr / 100,
+                                        "growth_haircut": bull_haircut,
+                                        "market_risk_premium": bull_mrp / 100,
+                                    }),
+                                    "DCF_Bear_Fair_Value": brfv,
+                                    "DCF_Bear_Upside": _upside(brfv),
+                                    "DCF_Bear_Assumptions": json.dumps({
+                                        "manual_growth_rate": bear_growth / 100,
+                                        "terminal_growth_rate": bear_tgr / 100,
+                                        "growth_haircut": bear_haircut,
+                                        "market_risk_premium": bear_mrp / 100,
+                                    }),
+                                    "DCF_Scenario_Probs": json.dumps({"bull": p_bull, "base": p_base, "bear": p_bear}),
+                                    "DCF_Blended_Fair_Value": blended,
+                                }
+                                db.save_analysis(scenario_record)
+                                st.session_state["dcf_action_feedback"] = {
+                                    "ticker": ticker_sym,
+                                    "kind": "success",
+                                    "message": f"Bull/Base/Bear scenarios saved for {ticker_sym}.",
+                                }
+                                st.rerun()
+
+                    # Display saved scenario results
+                    has_scenarios = fetch.has_numeric_value(dcf_bull_fv) and fetch.has_numeric_value(dcf_bear_fv)
+                    if has_scenarios:
+                        st.markdown("**Scenario Results**")
+                        p_b  = scenario_probs.get("bull", 25)
+                        p_bs = scenario_probs.get("base", 55)
+                        p_br = scenario_probs.get("bear", 20)
+                        bull_upside = fmt.safe_num(row.get("DCF_Bull_Upside"))
+                        bear_upside = fmt.safe_num(row.get("DCF_Bear_Upside"))
+                        base_fv = fmt.safe_num(row.get("DCF_Intrinsic_Value"))
+                        base_upside = fmt.safe_num(row.get("DCF_Upside"))
+                        blended_upside = (
+                            (dcf_blended_fv - current_price) / current_price
+                            if fetch.has_numeric_value(dcf_blended_fv) and fetch.has_numeric_value(current_price) and current_price > 0
+                            else None
+                        )
+                        ui.render_analysis_signal_cards(
+                            [
+                                {
+                                    "label": f"Bull Case ({p_b}%)",
+                                    "value": f"${dcf_bull_fv:,.2f}" if fetch.has_numeric_value(dcf_bull_fv) else "N/A",
+                                    "note": fmt.format_percent(bull_upside) + " upside" if fetch.has_numeric_value(bull_upside) else "",
+                                    "tone": "good",
+                                },
+                                {
+                                    "label": f"Base Case ({p_bs}%)",
+                                    "value": f"${base_fv:,.2f}" if fetch.has_numeric_value(base_fv) else "N/A",
+                                    "note": fmt.format_percent(base_upside) + " upside" if fetch.has_numeric_value(base_upside) else "",
+                                    "tone": "neutral",
+                                },
+                                {
+                                    "label": f"Bear Case ({p_br}%)",
+                                    "value": f"${dcf_bear_fv:,.2f}" if fetch.has_numeric_value(dcf_bear_fv) else "N/A",
+                                    "note": fmt.format_percent(bear_upside) + " upside" if fetch.has_numeric_value(bear_upside) else "",
+                                    "tone": "bad",
+                                },
+                                {
+                                    "label": "Blended Target",
+                                    "value": f"${dcf_blended_fv:,.2f}" if fetch.has_numeric_value(dcf_blended_fv) else "N/A",
+                                    "note": fmt.format_percent(blended_upside) + " upside" if fetch.has_numeric_value(blended_upside) else "Probability-weighted fair value",
+                                    "tone": "neutral",
+                                },
+                            ],
+                            columns=4,
+                        )
+
+                # ── End Scenario Builder ──────────────────────────────────────
                 if dcf_snapshot_exists and not dcf_history.empty:
                     dcf_hist_col_1, dcf_hist_col_2 = st.columns(2)
                     with dcf_hist_col_1:

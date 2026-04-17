@@ -65,7 +65,11 @@
       "Bash(pip show *)",
       "Bash(python -m py_compile c:/osig-research-tool/OSIG-Research-Tool/views/new_analyst.py)",
       "Bash(python -m py_compile c:/osig-research-tool/OSIG-Research-Tool/views/senior_analyst.py)",
-      "Bash(python -c \"import ast; ast.parse\\(open\\('views/library.py'\\).read\\(\\)\\); print\\('OK'\\)\")"
+      "Bash(python -c \"import ast; ast.parse\\(open\\('views/library.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(python -c \"import views.senior_analyst\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('views/senior_analyst.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('dcf.py'\\).read\\(\\)\\); print\\('OK'\\)\")",
+      "Bash(python -c \"import ast; ast.parse\\(open\\('constants.py'\\).read\\(\\)\\); print\\('OK'\\)\")"
     ]
   }
 }

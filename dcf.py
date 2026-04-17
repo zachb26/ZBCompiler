@@ -760,3 +760,19 @@ def build_sec_dcf_model(
         "latest_sec_values": latest,
         "dcf_settings": dcf_settings,
     }
+
+
+def build_three_case_dcf(
+    ticker: str,
+    price: float,
+    info: dict,
+    bull_settings: dict,
+    base_settings: dict,
+    bear_settings: dict,
+    peer_benchmarks: dict | None = None,
+) -> dict:
+    """Run build_sec_dcf_model for bull, base, and bear cases; return dict keyed by case name."""
+    results = {}
+    for case, s in [("bull", bull_settings), ("base", base_settings), ("bear", bear_settings)]:
+        results[case] = build_sec_dcf_model(ticker, price, info, dcf_settings=s, peer_benchmarks=peer_benchmarks)
+    return results
