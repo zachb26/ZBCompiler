@@ -361,6 +361,96 @@ def summarize_backtest_trades(analysis: pd.DataFrame) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Factor IC diagnostics
+# ---------------------------------------------------------------------------
+
+def compute_factor_ic(analysis: pd.DataFrame, rolling_window: int = 252) -> dict[str, Any]:
+    """
+    Compute Information Coefficient (IC) diagnostics for the Tech Score.
+
+    IC is the Spearman rank correlation between the Tech Score on each date and
+    the stock's actual forward return over 1M / 3M / 12M horizons.  Values
+    above ~0.05 indicate meaningful predictive signal.
+
+    Returns a dict with:
+        ic_summary    – overall IC and hit-rate per forward horizon
+        ic_by_window  – IC matrix sliced over full / last-3Y / last-1Y history
+        rolling_ic    – monthly-sampled rolling IC DataFrame (1M and 3M horizons)
+        sub_signal_ic – per-sub-signal IC for each horizon
+    """
+    from scipy.stats import spearmanr  # noqa: PLC0415
+
+    close = analysis["Close"]
+    horizons = {"1M": 22, "3M": 63, "12M": 252}
+    fwd = {label: close.shift(-days) / close - 1 for label, days in horizons.items()}
+
+    def _ic_hit(factor: pd.Series, ret: pd.Series):
+        valid = factor.notna() & ret.notna()
+        n = int(valid.sum())
+        if n < 30:
+            return None, None, n
+        ic_val, _ = spearmanr(factor[valid], ret[valid])
+        nonzero = valid & (factor != 0)
+        hit = (
+            float((np.sign(factor[nonzero]) == np.sign(ret[nonzero])).mean())
+            if nonzero.sum() > 10
+            else None
+        )
+        return float(ic_val), hit, n
+
+    score = analysis["Tech Score"]
+    n_total = len(analysis)
+
+    # Overall IC and hit rate across all available data
+    ic_summary: dict[str, Any] = {}
+    for label, ret in fwd.items():
+        ic_val, hit, n = _ic_hit(score, ret)
+        ic_summary[label] = {"ic": ic_val, "hit_rate": hit, "n": n}
+
+    # IC sliced over fixed lookback windows
+    ic_by_window: dict[str, dict[str, Any]] = {}
+    for win_label, win_days in [("Full", n_total), ("3Y", 756), ("1Y", 252)]:
+        if n_total < win_days:
+            continue
+        slice_score = score.iloc[-win_days:]
+        ic_by_window[win_label] = {}
+        for label, ret in fwd.items():
+            ic_val, _, _ = _ic_hit(slice_score, ret.iloc[-win_days:])
+            ic_by_window[win_label][label] = ic_val
+
+    # Rolling IC — 252-day window, monthly steps
+    rolling_records: list[dict[str, Any]] = []
+    step = 22
+    for i in range(rolling_window, n_total, step):
+        sl = slice(i - rolling_window, i)
+        row: dict[str, Any] = {"Date": analysis.index[i - 1]}
+        for label in ("1M", "3M"):
+            ic_val, _, _ = _ic_hit(score.iloc[sl], fwd[label].iloc[sl])
+            row[f"IC_{label}"] = ic_val
+        rolling_records.append(row)
+    rolling_ic_df = (
+        pd.DataFrame(rolling_records).set_index("Date") if rolling_records else pd.DataFrame()
+    )
+
+    # Sub-signal IC
+    sub_cols = [c for c in analysis.columns if c.startswith("sig_")]
+    sub_signal_ic: dict[str, dict[str, Any]] = {}
+    for col in sub_cols:
+        sig_name = col.replace("sig_", "")
+        sub_signal_ic[sig_name] = {}
+        for label, ret in fwd.items():
+            ic_val, _, _ = _ic_hit(analysis[col], ret)
+            sub_signal_ic[sig_name][label] = ic_val
+
+    return {
+        "ic_summary": ic_summary,
+        "ic_by_window": ic_by_window,
+        "rolling_ic": rolling_ic_df,
+        "sub_signal_ic": sub_signal_ic,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Full backtest engine
 # ---------------------------------------------------------------------------
 
@@ -498,6 +588,91 @@ def compute_technical_backtest(
         0,
     )
 
+    # --- Sub-signal components for IC breakdown ---
+    analysis["sig_Trend"] = (
+        np.where(
+            analysis["SMA_200"].notna(),
+            np.where(
+                analysis["Close"] >= analysis["SMA_200"] * (1 + trend_tolerance), 1,
+                np.where(analysis["Close"] <= analysis["SMA_200"] * (1 - trend_tolerance), -1, 0),
+            ),
+            0,
+        )
+        + np.where(
+            analysis["SMA_50"].notna() & analysis["SMA_200"].notna(),
+            np.where(
+                analysis["SMA_50"] >= analysis["SMA_200"] * (1 + trend_tolerance / 2), 1,
+                np.where(analysis["SMA_50"] <= analysis["SMA_200"] * (1 - trend_tolerance / 2), -1, 0),
+            ),
+            0,
+        )
+        + np.where(
+            analysis["SMA_50"].notna(),
+            np.where(
+                analysis["Close"] >= analysis["SMA_50"] * (1 + trend_tolerance / 2), 1,
+                np.where(analysis["Close"] <= analysis["SMA_50"] * (1 - trend_tolerance / 2), -1, 0),
+            ),
+            0,
+        )
+    )
+    analysis["sig_Momentum"] = (
+        np.where(analysis["Momentum_1M"] > active_settings["tech_momentum_threshold"], 1, 0)
+        + np.where(analysis["Momentum_1M"] < -active_settings["tech_momentum_threshold"], -1, 0)
+        + np.where(analysis["Momentum_1M_Risk_Adjusted"] > 0.75, 1, 0)
+        + np.where(analysis["Momentum_1M_Risk_Adjusted"] < -0.75, -1, 0)
+        + np.where(analysis["Momentum_1Y"] > long_term_momentum_threshold, 1, 0)
+        + np.where(analysis["Momentum_1Y"] < -long_term_momentum_threshold, -1, 0)
+        + np.where(analysis["Trend_Strength"] > 30, 1, 0)
+        + np.where(analysis["Trend_Strength"] < -30, -1, 0)
+    )
+    analysis["sig_Oscillator"] = (
+        np.where(
+            analysis["RSI"] < active_settings["tech_rsi_oversold"],
+            np.where(analysis["Close"] >= analysis["SMA_200"] * 0.95, 2, 1),
+            0,
+        )
+        + np.where(
+            analysis["RSI"] > active_settings["tech_rsi_overbought"],
+            np.where(analysis["Close"] <= analysis["SMA_50"] * 1.02, -2, -1),
+            0,
+        )
+        + np.where(
+            analysis["MACD"].notna() & analysis["MACD_Signal_Line"].notna(),
+            np.where(analysis["MACD"] > analysis["MACD_Signal_Line"], 1, -1),
+            0,
+        )
+        + np.where(analysis["MACD"] > 0, 1, np.where(analysis["MACD"] < 0, -1, 0))
+    )
+    analysis["sig_Range"] = (
+        np.where(
+            analysis["Range_Position_252"].ge(0.80) & analysis["Close"].ge(analysis["SMA_200"]), 1, 0
+        )
+        + np.where(
+            analysis["Range_Position_252"].le(0.20) & analysis["Close"].le(analysis["SMA_200"]), -1, 0
+        )
+        + np.where(
+            analysis["RSI"].shift(1).le(active_settings["tech_rsi_oversold"])
+            & analysis["RSI"].gt(active_settings["tech_rsi_oversold"])
+            & analysis["MACD"].ge(analysis["MACD_Signal_Line"]),
+            1,
+            0,
+        )
+    )
+    analysis["sig_Extension"] = (
+        np.where(
+            analysis["Close"].ge(analysis["SMA_50"] * (1 + extension_limit))
+            & analysis["RSI"].ge(active_settings["tech_rsi_overbought"] - 5),
+            -1,
+            0,
+        )
+        + np.where(
+            analysis["Close"].le(analysis["SMA_50"] * (1 - extension_limit))
+            & analysis["RSI"].le(active_settings["tech_rsi_oversold"] + 5),
+            1,
+            0,
+        )
+    )
+
     analysis["Tech Score"] = tech_score
     analysis["Signal"] = analysis["Tech Score"].apply(score_to_signal)
     analysis["Position"] = derive_backtest_positions(analysis, active_settings, stock_profile=stock_profile)
@@ -549,6 +724,7 @@ def compute_technical_backtest(
         }
     ).dropna(subset=["Action"])
     closed_trades_df, trade_summary = summarize_backtest_trades(analysis)
+    ic_diagnostics = compute_factor_ic(analysis)
 
     metrics = {
         "Strategy Total Return": strategy_total_return,
@@ -577,4 +753,5 @@ def compute_technical_backtest(
         "closed_trades": closed_trades_df,
         "metrics": metrics,
         "stock_profile": stock_profile or {},
+        "ic_diagnostics": ic_diagnostics,
     }

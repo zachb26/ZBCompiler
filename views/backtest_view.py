@@ -245,3 +245,81 @@ def render_backtest_view(db, model_settings, active_preset_name, active_assumpti
             closed_trades_display["Position Size"] = closed_trades_display["Position Size"].map(fmt.format_percent)
             closed_trades_display["Return"] = closed_trades_display["Return"].map(fmt.format_percent)
             st.dataframe(closed_trades_display, width="stretch")
+
+        # --- Factor IC Diagnostics ---
+        ic_diag = backtest_result.get("ic_diagnostics", {})
+        if ic_diag and ic_diag.get("ic_summary"):
+            st.divider()
+            st.subheader("Factor IC Diagnostics")
+            st.caption(
+                "IC (Information Coefficient) is the Spearman rank correlation between the Tech Score on a "
+                "given day and the stock's actual forward return. Values above 0.05 suggest meaningful "
+                "predictive signal; near zero means the score is not predictive at that horizon. "
+                "Hit Rate is the share of non-zero signals where the direction was correct."
+            )
+
+            ic_cards = []
+            for horizon_label in ("1M", "3M", "12M"):
+                row = ic_diag["ic_summary"].get(horizon_label, {})
+                ic_val = row.get("ic")
+                hit_val = row.get("hit_rate")
+                ic_cards.append(
+                    {
+                        "label": f"IC ({horizon_label})",
+                        "value": fmt.format_value(ic_val, fmt="{:.3f}") if ic_val is not None else "N/A",
+                        "note": f"Rank correlation of Tech Score vs {horizon_label} forward return. n={row.get('n', 0)}",
+                        "tone": ui.tone_from_metric_threshold(ic_val or 0, good_min=0.05, bad_max=-0.02),
+                        "help": const.ANALYSIS_HELP_TEXT.get("Factor IC"),
+                    }
+                )
+                ic_cards.append(
+                    {
+                        "label": f"Hit Rate ({horizon_label})",
+                        "value": fmt.format_percent(hit_val) if hit_val is not None else "N/A",
+                        "note": f"% of non-zero signals where direction matched {horizon_label} return",
+                        "tone": ui.tone_from_metric_threshold(hit_val or 0, good_min=0.55, bad_max=0.45),
+                        "help": const.ANALYSIS_HELP_TEXT.get("Hit Rate IC"),
+                    }
+                )
+            ui.render_analysis_signal_cards(ic_cards, columns=6)
+
+            ic_by_window = ic_diag.get("ic_by_window", {})
+            if ic_by_window:
+                st.subheader("IC by Lookback Window")
+                st.caption("How predictive power varies depending on how much history you include.")
+                win_rows = []
+                for win_label, horizon_dict in ic_by_window.items():
+                    win_rows.append(
+                        {
+                            "Window": win_label,
+                            "IC 1M": f"{horizon_dict.get('1M'):.3f}" if horizon_dict.get("1M") is not None else "—",
+                            "IC 3M": f"{horizon_dict.get('3M'):.3f}" if horizon_dict.get("3M") is not None else "—",
+                            "IC 12M": f"{horizon_dict.get('12M'):.3f}" if horizon_dict.get("12M") is not None else "—",
+                        }
+                    )
+                st.dataframe(pd.DataFrame(win_rows).set_index("Window"), width="stretch")
+
+            rolling_ic_df = ic_diag.get("rolling_ic", pd.DataFrame())
+            if not rolling_ic_df.empty:
+                st.subheader("Rolling IC (1-Year Window, Monthly Sampled)")
+                st.caption(
+                    "Each point shows the IC computed over the trailing 252 trading days. "
+                    "Declining IC signals that the Tech Score's predictive power is eroding."
+                )
+                st.line_chart(rolling_ic_df, width="stretch")
+
+            sub_ic = ic_diag.get("sub_signal_ic", {})
+            if sub_ic:
+                st.subheader("Sub-Signal IC Breakdown")
+                st.caption("Which components of the Tech Score are driving (or dragging) predictive power.")
+                sub_rows = []
+                for sig_name, horizon_dict in sub_ic.items():
+                    sub_rows.append(
+                        {
+                            "Sub-Signal": sig_name,
+                            "IC 1M": f"{horizon_dict.get('1M'):.3f}" if horizon_dict.get("1M") is not None else "—",
+                            "IC 3M": f"{horizon_dict.get('3M'):.3f}" if horizon_dict.get("3M") is not None else "—",
+                            "IC 12M": f"{horizon_dict.get('12M'):.3f}" if horizon_dict.get("12M") is not None else "—",
+                        }
+                    )
+                st.dataframe(pd.DataFrame(sub_rows).set_index("Sub-Signal"), width="stretch")
