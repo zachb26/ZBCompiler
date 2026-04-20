@@ -428,6 +428,10 @@ def render_single_stock_view(db, bot, model_settings, active_assumption_fingerpr
                 with c_f1:
                     st.markdown(f"### Verdict: **{row['Verdict_Fundamental']}**")
                     st.caption("This view focuses on business strength, balance-sheet shape, and how the stock has reacted to recent company events.")
+                    _pf_raw = row.get("Piotroski_F_Score")
+                    _pf_val = f"{int(_pf_raw)} / 9" if _pf_raw is not None and str(_pf_raw) not in ("", "nan", "None") else "N/A"
+                    _az_raw = row.get("Altman_Z_Score")
+                    _az_val = fmt.format_value(_az_raw, "{:.2f}") if _az_raw is not None else "N/A"
                     ui.render_analysis_signal_cards(
                         [
                             {
@@ -436,6 +440,20 @@ def render_single_stock_view(db, bot, model_settings, active_assumption_fingerpr
                                 "note": "A compact read on profitability, balance-sheet quality, and growth stability.",
                                 "tone": ui.tone_from_metric_threshold(row.get("Quality_Score"), good_min=2, bad_max=0),
                                 "help": const.ANALYSIS_HELP_TEXT["Quality Score"],
+                            },
+                            {
+                                "label": "Piotroski F-Score",
+                                "value": _pf_val,
+                                "note": "9-point binary test: profitability, leverage, efficiency. 7+ strong · ≤3 weak.",
+                                "tone": ui.tone_from_metric_threshold(row.get("Piotroski_F_Score"), good_min=7, bad_max=3),
+                                "help": const.ANALYSIS_HELP_TEXT["Piotroski F-Score"],
+                            },
+                            {
+                                "label": "Altman Z-Score",
+                                "value": _az_val,
+                                "note": ">2.99 safe · 1.81–2.99 grey zone · <1.81 distress",
+                                "tone": ui.tone_from_metric_threshold(row.get("Altman_Z_Score"), good_min=2.99, bad_max=1.81),
+                                "help": const.ANALYSIS_HELP_TEXT["Altman Z-Score"],
                             },
                             {
                                 "label": "Dividend Safety",
@@ -615,6 +633,49 @@ def render_single_stock_view(db, bot, model_settings, active_assumption_fingerpr
                         columns=3,
                     )
 
+                    _si_float = row.get("Short_Float_Pct")
+                    _si_ratio = row.get("Short_Ratio")
+                    _si_shares = row.get("Short_Interest")
+                    if any(v is not None for v in [_si_float, _si_ratio, _si_shares]):
+                        st.markdown("##### Short Interest (contrarian / squeeze indicator)")
+                        st.caption("~2-week lag from yfinance. High SI on expensive names = risk flag; high SI + steep drawdown = potential squeeze.")
+                        _si_float_tone = (
+                            "bad" if (isinstance(_si_float, (int, float)) and _si_float >= 0.20)
+                            else "neutral" if (isinstance(_si_float, (int, float)) and _si_float >= 0.10)
+                            else "good"
+                        )
+                        _si_ratio_tone = (
+                            "bad" if (isinstance(_si_ratio, (int, float)) and _si_ratio >= 10.0)
+                            else "neutral" if (isinstance(_si_ratio, (int, float)) and _si_ratio >= 5.0)
+                            else "good"
+                        )
+                        ui.render_analysis_signal_cards(
+                            [
+                                {
+                                    "label": "Short % of Float",
+                                    "value": fmt.format_percent(_si_float) if _si_float is not None else "N/A",
+                                    "note": ">20% high  |  >10% elevated",
+                                    "tone": _si_float_tone,
+                                    "help": const.ANALYSIS_HELP_TEXT["Short % of Float"],
+                                },
+                                {
+                                    "label": "Days to Cover",
+                                    "value": fmt.format_value(_si_ratio, "{:,.1f}") if _si_ratio is not None else "N/A",
+                                    "note": ">10 high  |  >5 elevated",
+                                    "tone": _si_ratio_tone,
+                                    "help": const.ANALYSIS_HELP_TEXT["Short Ratio"],
+                                },
+                                {
+                                    "label": "Shares Short",
+                                    "value": fmt.format_market_cap(_si_shares) if _si_shares is not None else "N/A",
+                                    "note": "Absolute short position",
+                                    "tone": "neutral",
+                                    "help": const.ANALYSIS_HELP_TEXT["Short Interest"],
+                                },
+                            ],
+                            columns=3,
+                        )
+
                 ui.render_analysis_signal_table(
                     [
                         {
@@ -656,6 +717,22 @@ def render_single_stock_view(db, bot, model_settings, active_assumption_fingerpr
                             "status": "Strong" if ui.tone_from_metric_threshold(row["Trend_Strength"], good_min=20, bad_max=-20) == "good" else "Weak" if ui.tone_from_metric_threshold(row["Trend_Strength"], good_min=20, bad_max=-20) == "bad" else "Mixed",
                             "tone": ui.tone_from_metric_threshold(row["Trend_Strength"], good_min=20, bad_max=-20),
                             "help": const.ANALYSIS_HELP_TEXT["Trend Strength"],
+                        },
+                        {
+                            "metric": "Short % of Float",
+                            "value": fmt.format_percent(row.get("Short_Float_Pct")) if row.get("Short_Float_Pct") is not None else "N/A",
+                            "reference": "<10% low | >20% high",
+                            "status": "High" if ui.tone_from_metric_threshold(row.get("Short_Float_Pct"), good_max=0.10, bad_min=0.20) == "bad" else "Low" if ui.tone_from_metric_threshold(row.get("Short_Float_Pct"), good_max=0.10, bad_min=0.20) == "good" else "Elevated",
+                            "tone": ui.tone_from_metric_threshold(row.get("Short_Float_Pct"), good_max=0.10, bad_min=0.20),
+                            "help": const.ANALYSIS_HELP_TEXT["Short % of Float"],
+                        },
+                        {
+                            "metric": "Days to Cover",
+                            "value": fmt.format_value(row.get("Short_Ratio"), "{:,.1f}") if row.get("Short_Ratio") is not None else "N/A",
+                            "reference": "<5 low | >10 high",
+                            "status": "High" if ui.tone_from_metric_threshold(row.get("Short_Ratio"), good_max=5.0, bad_min=10.0) == "bad" else "Low" if ui.tone_from_metric_threshold(row.get("Short_Ratio"), good_max=5.0, bad_min=10.0) == "good" else "Elevated",
+                            "tone": ui.tone_from_metric_threshold(row.get("Short_Ratio"), good_max=5.0, bad_min=10.0),
+                            "help": const.ANALYSIS_HELP_TEXT["Short Ratio"],
                         },
                     ],
                     reference_label="Read",

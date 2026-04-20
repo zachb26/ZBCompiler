@@ -101,6 +101,7 @@ class StockAnalyst:
             return None
         earnings_trend_df, _ = fetch_earnings_trend_with_retry(ticker)
         eps_rev_4w, eps_rev_12w, eps_breadth_4w, eps_revision_signal = compute_eps_revision_signal(earnings_trend_df)
+        bs_df, inc_df, cf_df, _ = fetch_annual_financials_with_retry(ticker)
 
         close = hist["Close"].dropna().astype(float)
         if close.empty:
@@ -245,6 +246,9 @@ class StockAnalyst:
         dividend_yield = safe_num(info.get("dividendYield"))
         payout_ratio = safe_num(info.get("payoutRatio"))
         equity_beta = safe_num(info.get("beta"))
+        short_interest = safe_num(info.get("sharesShort"))
+        short_ratio = safe_num(info.get("shortRatio"))
+        short_float_pct = safe_num(info.get("shortPercentOfFloat"))
         if has_numeric_value(roe):
             if roe >= settings["fund_roe_threshold"]:
                 f_score += 1
@@ -284,6 +288,8 @@ class StockAnalyst:
             current_ratio,
             settings,
         )
+        piotroski_fscore, _piotroski_detail = compute_piotroski_fscore(info, bs_df, inc_df, cf_df)
+        altman_zscore, _altman_zone = compute_altman_zscore(info)
         if quality_score >= 3:
             f_score += 1
         elif quality_score <= -1.5:
@@ -434,6 +440,9 @@ class StockAnalyst:
             range_position=range_position_52w,
             volatility_1y=volatility_1y,
             stock_profile=stock_profile,
+            altman_z=altman_zscore,
+            short_float_pct=short_float_pct,
+            short_ratio=short_ratio,
         )
         engine_weights, engine_weight_profile = get_type_adjusted_engine_weights(stock_profile, settings)
         effective_sentiment_score = 0.0
@@ -448,12 +457,33 @@ class StockAnalyst:
             effective_f_score += 0.5
         elif quality_score <= -1.5:
             effective_f_score -= 0.5
+        if has_numeric_value(piotroski_fscore):
+            if piotroski_fscore >= 7:
+                effective_f_score += 0.5
+            elif piotroski_fscore <= 3:
+                effective_f_score -= 0.5
         if stock_profile["primary_type"] in {"Dividend / Income Stocks", "Defensive Stocks"}:
             effective_f_score += np.clip(dividend_safety_score / 4, -0.5, 1.0)
         if has_numeric_value(event_study.get("avg_abnormal_5d")):
             effective_f_score += np.clip(event_study["avg_abnormal_5d"] * 10, -0.75, 0.75)
         if eps_revision_signal != 0.0:
             effective_f_score += np.clip(eps_revision_signal, -1.0, 1.0)
+        # Short interest signal: risk flag on expensive names, contrarian squeeze
+        # setup on beaten-down names with heavy short load and high days-to-cover.
+        si_signal = 0.0
+        if has_numeric_value(short_float_pct) and short_float_pct >= 0.10:
+            if v_val == "OVERVALUED":
+                # Crowd is betting against an already-expensive stock — amplifies risk.
+                si_signal -= 0.40
+            elif (
+                has_numeric_value(distance_52w_high)
+                and distance_52w_high <= -0.25
+                and has_numeric_value(short_ratio)
+                and short_ratio >= 5.0
+            ):
+                # Beaten-down + high short load + meaningful days-to-cover → squeeze potential.
+                si_signal += 0.30
+        effective_f_score += si_signal
         # Normalise each engine score to the FUND_SCORE_MAX reference scale so
         # that a weight of 1.0 means the same maximum contribution per engine.
         norm_tech = effective_tech_score / TECH_SCORE_MAX * FUND_SCORE_MAX
@@ -526,6 +556,8 @@ class StockAnalyst:
             "Volatility_1Y": volatility_1y,
             "Momentum_1M_Risk_Adjusted": momentum_1m_risk_adjusted,
             "Quality_Score": quality_score,
+            "Piotroski_F_Score": piotroski_fscore,
+            "Altman_Z_Score": altman_zscore,
             "Dividend_Safety_Score": dividend_safety_score,
             "Valuation_Signal_Count": valuation_signal_count,
             "Valuation_Confidence": valuation_confidence,
@@ -578,6 +610,9 @@ class StockAnalyst:
             "EPS_Revision_4W": eps_rev_4w,
             "EPS_Revision_12W": eps_rev_12w,
             "EPS_Revision_Breadth_4W": eps_breadth_4w,
+            "Short_Interest": short_interest,
+            "Short_Ratio": short_ratio,
+            "Short_Float_Pct": short_float_pct,
             "Sentiment_Headline_Count": sentiment["headline_count"],
             "Sentiment_Summary": sentiment["summary"],
             "Event_Study_Count": event_study.get("count"),

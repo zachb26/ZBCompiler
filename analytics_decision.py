@@ -128,6 +128,9 @@ def build_risk_flags(
     range_position: float | None,
     volatility_1y: float | None,
     stock_profile: dict[str, Any],
+    altman_z: float | None = None,
+    short_float_pct: float | None = None,
+    short_ratio: float | None = None,
 ) -> list[str]:
     """
     Return a list of short risk-flag labels for visible red flags in the
@@ -140,6 +143,8 @@ def build_risk_flags(
         flags.append("High Debt")
     if has_numeric_value(current_ratio) and current_ratio < 1.0:
         flags.append("Weak Liquidity")
+    if has_numeric_value(altman_z) and altman_z < 1.81:
+        flags.append("Distress Risk")
     if overextended:
         flags.append("Overextended")
     if has_numeric_value(distance_52w_high) and distance_52w_high <= -0.20:
@@ -150,6 +155,11 @@ def build_risk_flags(
         flags.append("High Volatility")
     if stock_profile.get("primary_type") == "Speculative / Penny Stocks":
         flags.append("Speculative")
+    # High short interest: elevated float short (>20%) or very high days-to-cover (>10)
+    if (has_numeric_value(short_float_pct) and short_float_pct >= 0.20) or (
+        has_numeric_value(short_ratio) and short_ratio >= 10.0
+    ):
+        flags.append("High Short Interest")
     return flags
 
 

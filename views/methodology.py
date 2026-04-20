@@ -107,6 +107,8 @@ def render_methodology_view(db, model_settings, active_preset_name, active_assum
             {"Refinement": 8, "What Changed": "Risk Flags", "Purpose": "Collects visible red flags like negative EPS, high debt, weak liquidity, high volatility, and speculation."},
             {"Refinement": 9, "What Changed": "Dynamic Engine Weights", "Purpose": "Lets Growth, Value, Income, Cyclical, and Speculative names use different engine mixes."},
             {"Refinement": 10, "What Changed": "Event Study and Trading Friction", "Purpose": "Adds recent event-reaction context to fundamentals and deducts transaction-cost estimates from the backtest."},
+            {"Refinement": 11, "What Changed": "Piotroski F-Score", "Purpose": "Nine binary tests on profitability, leverage, and operating efficiency that reduce noise in the fundamental score and separate strong names from weak ones."},
+            {"Refinement": 12, "What Changed": "Altman Z-Score", "Purpose": "Balance-sheet distress measure that adds a Distress Risk flag and applies downward pressure on the fundamental score for financially stressed names."},
         ]
     )
     st.dataframe(refinement_df, width="stretch")

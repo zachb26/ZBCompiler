@@ -983,6 +983,54 @@ def fetch_earnings_trend_with_retry(ticker, attempts=2):
     return None, last_error
 
 
+def fetch_annual_financials_with_retry(ticker, attempts=2):
+    """
+    Fetch annual financial statements for *ticker* with retry and stale-cache
+    fallback.
+
+    Returns (balance_sheet_df, income_df, cashflow_df, error_string_or_None).
+    Each DataFrame has financial line items as the index and fiscal-year dates
+    as columns (most recent year first).  Any DataFrame may be None or empty
+    when data is unavailable.
+    """
+    cache_key = ticker.upper()
+
+    cached_bs  = get_cached_fetch_payload("annual_balance_sheet",  cache_key)
+    cached_inc = get_cached_fetch_payload("annual_income_stmt",    cache_key)
+    cached_cf  = get_cached_fetch_payload("annual_cashflow",       cache_key)
+    if cached_bs is not None and cached_inc is not None and cached_cf is not None:
+        return cached_bs, cached_inc, cached_cf, None
+
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            handle = yf.Ticker(ticker)
+            bs  = getattr(handle, "balance_sheet",  None)
+            inc = getattr(handle, "income_stmt",    None)
+            cf  = getattr(handle, "cash_flow",      None)
+            # Normalise: keep only DataFrames with at least 2 columns (2 fiscal years)
+            def _valid(df):
+                return isinstance(df, pd.DataFrame) and not df.empty and len(df.columns) >= 1
+            bs  = bs  if _valid(bs)  else pd.DataFrame()
+            inc = inc if _valid(inc) else pd.DataFrame()
+            cf  = cf  if _valid(cf)  else pd.DataFrame()
+            set_cached_fetch_payload("annual_balance_sheet",  cache_key, bs)
+            set_cached_fetch_payload("annual_income_stmt",    cache_key, inc)
+            set_cached_fetch_payload("annual_cashflow",       cache_key, cf)
+            return bs, inc, cf, None
+        except Exception as exc:
+            logger.warning("fetch_annual_financials attempt %d failed (%s): %s", attempt + 1, ticker, exc)
+            last_error = summarize_fetch_error(exc)
+        if attempt < attempts - 1:
+            time.sleep(0.35 * (attempt + 1))
+
+    # Stale fallback
+    stale_bs  = get_cached_fetch_payload("annual_balance_sheet",  cache_key, max_age_seconds=FETCH_STALE_FALLBACK_TTL_SECONDS) or pd.DataFrame()
+    stale_inc = get_cached_fetch_payload("annual_income_stmt",    cache_key, max_age_seconds=FETCH_STALE_FALLBACK_TTL_SECONDS) or pd.DataFrame()
+    stale_cf  = get_cached_fetch_payload("annual_cashflow",       cache_key, max_age_seconds=FETCH_STALE_FALLBACK_TTL_SECONDS) or pd.DataFrame()
+    return stale_bs, stale_inc, stale_cf, last_error
+
+
 def _pick_column_value(df_row, *name_variants):
     """Return the first non-None numeric value found among *name_variants* in *df_row*."""
     for name in name_variants:
