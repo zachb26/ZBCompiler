@@ -24,7 +24,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from constants import CYCLICAL_SECTORS, DEFENSIVE_SECTORS, INCOME_SECTORS, QUALITY_SECTORS, STOCK_TYPE_STRATEGIES
+from constants import CYCLICAL_SECTORS, DEFENSIVE_SECTORS, INCOME_SECTORS, QUALITY_SECTORS, REGIME_ENGINE_WEIGHTS, STOCK_TYPE_STRATEGIES
 from fetch import has_numeric_value, safe_num, score_relative_multiple
 from analytics_scoring import resolve_overall_verdict
 
@@ -48,10 +48,12 @@ def calculate_sentiment_conviction(
     target_mean_price: float | None,
     price: float | None,
     headline_count: int | None,
+    options_signal_count: int = 0,
 ) -> float:
     """
     Return a 10–95 sentiment conviction score that combines analyst
-    opinion depth, target-price upside, and headline volume.
+    opinion depth, target-price upside, headline volume, and options
+    signal availability.
     """
     conviction = min(abs(float(sentiment_score)) * 2, 10)
     if has_numeric_value(analyst_opinions):
@@ -61,6 +63,7 @@ def calculate_sentiment_conviction(
     if has_numeric_value(target_mean_price) and has_numeric_value(price) and price > 0:
         conviction += min(abs((target_mean_price - price) / price) * 100, 20)
     conviction += min((headline_count or 0) * 3, 10)
+    conviction += min(int(options_signal_count) * 8, 32)
     return float(np.clip(conviction, 10, 95))
 
 
@@ -68,48 +71,69 @@ def calculate_sentiment_conviction(
 # Engine-weight adjustment
 # ---------------------------------------------------------------------------
 
-def get_type_adjusted_engine_weights(stock_profile: dict[str, Any], settings: dict[str, Any]) -> tuple[dict[str, float], str]:
+def get_type_adjusted_engine_weights(
+    stock_profile: dict[str, Any],
+    settings: dict[str, Any],
+    regime: str = "Unclear",
+) -> tuple[dict[str, float], str]:
     """
     Return (weights_dict, weight_profile_string) with per-engine multipliers
-    applied for the detected stock primary type.
+    applied for the detected stock primary type *and* the current market regime.
+
+    Regime multipliers (from REGIME_ENGINE_WEIGHTS) stack multiplicatively on
+    top of the stock-type multipliers so both dimensions influence the final
+    weight simultaneously.
     """
     primary_type = stock_profile.get("primary_type", "")
-    modifiers = {
+    type_mods = {
         "technical": 1.0,
         "fundamental": 1.0,
         "valuation": 1.0,
         "sentiment": 1.0,
     }
     if primary_type == "Growth Stocks":
-        modifiers.update({"technical": 1.2, "fundamental": 1.05, "valuation": 0.75, "sentiment": 1.15})
+        type_mods.update({"technical": 1.2, "fundamental": 1.05, "valuation": 0.75, "sentiment": 1.15})
     elif primary_type == "Value Stocks":
-        modifiers.update({"technical": 0.85, "fundamental": 1.2, "valuation": 1.35, "sentiment": 0.8})
+        type_mods.update({"technical": 0.85, "fundamental": 1.2, "valuation": 1.35, "sentiment": 0.8})
     elif primary_type == "Dividend / Income Stocks":
-        modifiers.update({"technical": 0.75, "fundamental": 1.25, "valuation": 1.1, "sentiment": 0.7})
+        type_mods.update({"technical": 0.75, "fundamental": 1.25, "valuation": 1.1, "sentiment": 0.7})
     elif primary_type == "Cyclical Stocks":
-        modifiers.update({"technical": 1.25, "fundamental": 0.95, "valuation": 0.9, "sentiment": 1.0})
+        type_mods.update({"technical": 1.25, "fundamental": 0.95, "valuation": 0.9, "sentiment": 1.0})
     elif primary_type == "Defensive Stocks":
-        modifiers.update({"technical": 0.8, "fundamental": 1.25, "valuation": 1.0, "sentiment": 0.7})
+        type_mods.update({"technical": 0.8, "fundamental": 1.25, "valuation": 1.0, "sentiment": 0.7})
     elif primary_type == "Blue-Chip Stocks":
-        modifiers.update({"technical": 0.9, "fundamental": 1.2, "valuation": 0.95, "sentiment": 0.8})
+        type_mods.update({"technical": 0.9, "fundamental": 1.2, "valuation": 0.95, "sentiment": 0.8})
     elif primary_type == "Small-Cap Stocks":
-        modifiers.update({"technical": 1.15, "fundamental": 1.0, "valuation": 0.8, "sentiment": 1.05})
+        type_mods.update({"technical": 1.15, "fundamental": 1.0, "valuation": 0.8, "sentiment": 1.05})
     elif primary_type == "Mid-Cap Stocks":
-        modifiers.update({"technical": 1.05, "fundamental": 1.05, "valuation": 0.95, "sentiment": 0.95})
+        type_mods.update({"technical": 1.05, "fundamental": 1.05, "valuation": 0.95, "sentiment": 0.95})
     elif primary_type == "Large-Cap Stocks":
-        modifiers.update({"technical": 0.95, "fundamental": 1.1, "valuation": 1.0, "sentiment": 0.85})
+        type_mods.update({"technical": 0.95, "fundamental": 1.1, "valuation": 1.0, "sentiment": 0.85})
     elif primary_type == "Speculative / Penny Stocks":
-        modifiers.update({"technical": 1.35, "fundamental": 0.7, "valuation": 0.55, "sentiment": 1.25})
+        type_mods.update({"technical": 1.35, "fundamental": 0.7, "valuation": 0.55, "sentiment": 1.25})
+
+    # Map the five regime strings to the three coarse regime buckets.
+    _regime_bucket_map = {
+        "Bullish Trend": "Bullish Trend",
+        "Transition":    "Early Recovery",
+        "Range-bound":   "Early Recovery",
+        "Bearish Trend": "Risk-off",
+    }
+    regime_mods = REGIME_ENGINE_WEIGHTS.get(
+        _regime_bucket_map.get(regime, ""),
+        {"technical": 1.0, "fundamental": 1.0, "valuation": 1.0, "sentiment": 1.0},
+    )
 
     weights = {
-        "technical": settings["weight_technical"] * modifiers["technical"],
-        "fundamental": settings["weight_fundamental"] * modifiers["fundamental"],
-        "valuation": settings["weight_valuation"] * modifiers["valuation"],
-        "sentiment": settings["weight_sentiment"] * modifiers["sentiment"],
+        "technical":   settings["weight_technical"]   * type_mods["technical"]   * regime_mods["technical"],
+        "fundamental": settings["weight_fundamental"] * type_mods["fundamental"] * regime_mods["fundamental"],
+        "valuation":   settings["weight_valuation"]   * type_mods["valuation"]   * regime_mods["valuation"],
+        "sentiment":   settings["weight_sentiment"]   * type_mods["sentiment"]   * regime_mods["sentiment"],
     }
+    regime_label = _regime_bucket_map.get(regime, "Neutral")
     weight_profile = (
         f"T {weights['technical']:.2f} | F {weights['fundamental']:.2f} | "
-        f"V {weights['valuation']:.2f} | S {weights['sentiment']:.2f}"
+        f"V {weights['valuation']:.2f} | S {weights['sentiment']:.2f} [{regime_label}]"
     )
     return weights, weight_profile
 

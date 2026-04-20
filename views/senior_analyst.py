@@ -742,7 +742,7 @@ def render_single_stock_view(db, bot, model_settings, active_assumption_fingerpr
                 c_s1, c_s2 = st.columns([1, 2])
                 with c_s1:
                     st.markdown(f"### Verdict: **{row['Verdict_Sentiment']}**")
-                    st.caption("This view is context only. It surfaces relevant analyst and headline information without classifying it as good or bad.")
+                    st.caption("Sentiment score is driven by options-implied signals (IV rank, put/call skew, volume, and term structure). Analyst context and headlines are shown below for reference.")
                     target_price = row["Target_Mean_Price"]
                     ui.render_analysis_signal_cards(
                         [
@@ -789,6 +789,56 @@ def render_single_stock_view(db, bot, model_settings, active_assumption_fingerpr
                             st.write(f"- {line}")
                     else:
                         st.caption("No recent company-related context was available from the current source feed.")
+
+                iv_rank   = fmt.safe_num(row.get("Options_IV_Rank"))
+                skew      = fmt.safe_num(row.get("Options_Skew"))
+                pc_ratio  = fmt.safe_num(row.get("Options_PC_Ratio"))
+                iv_term   = fmt.safe_num(row.get("Options_IV_Term"))
+                has_options = any(v is not None for v in (iv_rank, skew, pc_ratio, iv_term))
+                with st.expander("Market Options Signals", expanded=has_options):
+                    if not has_options:
+                        st.caption("Options data unavailable — market may be closed or this ticker has no listed options.")
+                    else:
+                        oc1, oc2, oc3, oc4 = st.columns(4)
+                        with oc1:
+                            if iv_rank is not None:
+                                rank_color = "green" if iv_rank < 25 else ("orange" if iv_rank < 60 else "red")
+                                st.metric("IV Rank", f"{iv_rank:.0f}")
+                                st.caption(f":{rank_color}[{'Low' if iv_rank < 25 else 'Elevated' if iv_rank < 60 else 'High'} volatility regime]")
+                            else:
+                                st.metric("IV Rank", "N/A")
+                        with oc2:
+                            if skew is not None:
+                                skew_pct = skew * 100
+                                skew_label = f"{skew_pct:+.1f}%"
+                                skew_note = "Put skew (bearish)" if skew > 0.02 else ("Call skew (bullish)" if skew < -0.02 else "Balanced")
+                                st.metric("25\u0394 Skew", skew_label)
+                                st.caption(skew_note)
+                            else:
+                                st.metric("25\u0394 Skew", "N/A")
+                        with oc3:
+                            if pc_ratio is not None:
+                                pc_label = f"{pc_ratio:.2f}\u00d7"
+                                pc_note = "Heavy put buying" if pc_ratio > 1.5 else ("Put-leaning" if pc_ratio > 1.0 else ("Neutral" if pc_ratio >= 0.5 else "Call-heavy"))
+                                st.metric("P/C Volume", pc_label)
+                                st.caption(pc_note)
+                            else:
+                                st.metric("P/C Volume", "N/A")
+                        with oc4:
+                            if iv_term is not None:
+                                if iv_term > 1.10:
+                                    term_label = "Backwardation"
+                                    term_note = "Near-term fear elevated"
+                                elif iv_term <= 1.0:
+                                    term_label = "Contango"
+                                    term_note = "Calm near-term"
+                                else:
+                                    term_label = "Flat"
+                                    term_note = "Slight front premium"
+                                st.metric("IV Term", term_label)
+                                st.caption(term_note)
+                            else:
+                                st.metric("IV Term", "N/A")
 
             with tab_dcf:
                 dcf_snapshot_exists = exports.has_dcf_snapshot(row)

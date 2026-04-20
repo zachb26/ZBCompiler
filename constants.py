@@ -42,6 +42,7 @@ PORTFOLIO_MANAGER_PASSWORD_SECRET = "PORTFOLIO_MANAGER_PASSWORD"
 TECH_SCORE_MAX = 14.0
 FUND_SCORE_MAX = 7.0
 VAL_SCORE_MAX = 8.0
+SENT_SCORE_MAX = 4.0
 
 # ---------------------------------------------------------------------------
 # Fetch / cache
@@ -60,6 +61,7 @@ FETCH_CACHE = {
     "sec_filing_text": {},
     "treasury_yield": {},
     "earnings_trend": {},
+    "options_data":   {},
 }
 FETCH_CACHE_LOCK = threading.RLock()
 FETCH_CACHE_MAX_ENTRIES = {
@@ -74,6 +76,7 @@ FETCH_CACHE_MAX_ENTRIES = {
     "sec_filing_text":    60,
     "treasury_yield":      5,
     "earnings_trend":    300,
+    "options_data":      200,
 }
 
 # ---------------------------------------------------------------------------
@@ -318,7 +321,7 @@ ANALYSIS_COLUMNS = {
     "Score_Tech": "INTEGER",
     "Score_Fund": "INTEGER",
     "Score_Val": "INTEGER",
-    "Score_Sentiment": "INTEGER",
+    "Score_Sentiment": "REAL",
     "Sector": "TEXT",
     "Industry": "TEXT",
     "Stock_Type": "TEXT",
@@ -432,6 +435,10 @@ ANALYSIS_COLUMNS = {
     "Short_Interest":           "REAL",
     "Short_Ratio":              "REAL",
     "Short_Float_Pct":          "REAL",
+    "Options_IV_Rank":          "REAL",
+    "Options_Skew":             "REAL",
+    "Options_PC_Ratio":         "REAL",
+    "Options_IV_Term":          "REAL",
     "Data_Completeness": "REAL",
     "Missing_Metric_Count": "INTEGER",
     "Data_Quality": "TEXT",
@@ -560,6 +567,39 @@ PRESET_DESCRIPTIONS = {
     "Balanced": "Balanced keeps the four engines close to equal and is the best general starting point.",
     "Conservative": "Conservative leans on fundamentals and valuation, demands stronger confirmation, and slows trading re-entry.",
     "Aggressive": "Aggressive leans on technicals and sentiment, accepts looser valuation, and reacts faster to price action.",
+}
+
+# ---------------------------------------------------------------------------
+# Regime-conditional engine-weight modifiers
+# ---------------------------------------------------------------------------
+# Three coarse regimes × four engines = 12 multipliers.
+# These stack multiplicatively with the stock-type modifiers already applied
+# in get_type_adjusted_engine_weights.
+#
+#   Bullish Trend  — trending / low-vol: momentum leads; valuation matters less
+#   Early Recovery — Transition or Range-bound: value and quality shine
+#   Risk-off       — Bearish Trend: defensives dominate; sentiment unreliable
+#
+# "Unclear" falls through to neutral (all 1.0).
+REGIME_ENGINE_WEIGHTS: dict[str, dict[str, float]] = {
+    "Bullish Trend": {
+        "technical":   1.15,   # momentum reliable in trending markets
+        "fundamental": 0.95,   # fundamentals matter less when trend is clear
+        "valuation":   0.88,   # don't fight expensive growth in a bull run
+        "sentiment":   1.10,   # analyst and news follow-through is meaningful
+    },
+    "Early Recovery": {        # mapped from "Transition" and "Range-bound"
+        "technical":   0.88,   # price signals noisy / whippy during turn
+        "fundamental": 1.15,   # quality and earnings durability lead
+        "valuation":   1.18,   # value unlocks before trend clears
+        "sentiment":   0.92,   # analyst coverage lags the turn
+    },
+    "Risk-off": {              # mapped from "Bearish Trend"
+        "technical":   0.85,   # trend is down; technicals confirm but don't add much
+        "fundamental": 1.20,   # defensive quality is the primary screen
+        "valuation":   1.08,   # cheap-enough still matters in risk-off
+        "sentiment":   0.82,   # sentiment deteriorates fast; down-weight noise
+    },
 }
 
 # ---------------------------------------------------------------------------

@@ -1031,6 +1031,76 @@ def fetch_annual_financials_with_retry(ticker, attempts=2):
     return stale_bs, stale_inc, stale_cf, last_error
 
 
+def fetch_options_data_with_retry(ticker, attempts=2):
+    """
+    Fetch options chain data for the nearest 2 expirations (skipping any that
+    expire within 5 days) with retry and stale-cache fallback.
+
+    Returns (payload_or_None, error_string_or_None).
+
+    Payload shape:
+        {
+            "expirations": ["YYYY-MM-DD", ...],
+            "chains": {
+                "YYYY-MM-DD": {"calls": pd.DataFrame, "puts": pd.DataFrame},
+                ...
+            }
+        }
+
+    Returns (None, error) for tickers with no listed options or on failure.
+    """
+    import datetime as _dt
+
+    cache_key = ticker.upper()
+    cached = get_cached_fetch_payload("options_data", cache_key)
+    if cached is not None:
+        return cached, None
+
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            handle = yf.Ticker(ticker)
+            raw_exps = getattr(handle, "options", None) or []
+            if not raw_exps:
+                last_error = f"No listed options for {ticker}."
+                break
+
+            today = _dt.date.today()
+            min_date = today + _dt.timedelta(days=5)
+            valid_exps = [
+                e for e in raw_exps
+                if _dt.date.fromisoformat(e) >= min_date
+            ]
+            if not valid_exps:
+                last_error = f"All expirations for {ticker} are within 5 days."
+                break
+
+            selected = valid_exps[:2]
+            chains = {}
+            for exp in selected:
+                chain = handle.option_chain(exp)
+                calls = chain.calls if hasattr(chain, "calls") and isinstance(chain.calls, pd.DataFrame) else pd.DataFrame()
+                puts  = chain.puts  if hasattr(chain, "puts")  and isinstance(chain.puts,  pd.DataFrame) else pd.DataFrame()
+                chains[exp] = {"calls": calls, "puts": puts}
+
+            payload = {"expirations": selected, "chains": chains}
+            set_cached_fetch_payload("options_data", cache_key, payload)
+            return payload, None
+
+        except Exception as exc:
+            logger.warning("fetch_options_data attempt %d failed (%s): %s", attempt + 1, ticker, exc)
+            last_error = summarize_fetch_error(exc)
+        if attempt < attempts - 1:
+            time.sleep(0.3 * (attempt + 1))
+
+    stale = get_cached_fetch_payload(
+        "options_data", cache_key, max_age_seconds=FETCH_STALE_FALLBACK_TTL_SECONDS
+    )
+    if stale is not None:
+        return stale, None
+    return None, last_error
+
+
 def _pick_column_value(df_row, *name_variants):
     """Return the first non-None numeric value found among *name_variants* in *df_row*."""
     for name in name_variants:
