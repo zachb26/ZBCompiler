@@ -99,6 +99,8 @@ class StockAnalyst:
         news = news or []
         if hist is None or hist.empty or "Close" not in hist.columns:
             return None
+        earnings_trend_df, _ = fetch_earnings_trend_with_retry(ticker)
+        eps_rev_4w, eps_rev_12w, eps_breadth_4w, eps_revision_signal = compute_eps_revision_signal(earnings_trend_df)
 
         close = hist["Close"].dropna().astype(float)
         if close.empty:
@@ -450,6 +452,8 @@ class StockAnalyst:
             effective_f_score += np.clip(dividend_safety_score / 4, -0.5, 1.0)
         if has_numeric_value(event_study.get("avg_abnormal_5d")):
             effective_f_score += np.clip(event_study["avg_abnormal_5d"] * 10, -0.75, 0.75)
+        if eps_revision_signal != 0.0:
+            effective_f_score += np.clip(eps_revision_signal, -1.0, 1.0)
         # Normalise each engine score to the FUND_SCORE_MAX reference scale so
         # that a weight of 1.0 means the same maximum contribution per engine.
         norm_tech = effective_tech_score / TECH_SCORE_MAX * FUND_SCORE_MAX
@@ -571,6 +575,9 @@ class StockAnalyst:
             "Target_Mean_Price": sentiment["target_mean_price"],
             "Recommendation_Key": sentiment["recommendation_key"],
             "Analyst_Opinions": sentiment["analyst_opinions"],
+            "EPS_Revision_4W": eps_rev_4w,
+            "EPS_Revision_12W": eps_rev_12w,
+            "EPS_Revision_Breadth_4W": eps_breadth_4w,
             "Sentiment_Headline_Count": sentiment["headline_count"],
             "Sentiment_Summary": sentiment["summary"],
             "Event_Study_Count": event_study.get("count"),

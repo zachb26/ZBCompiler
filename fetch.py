@@ -941,3 +941,128 @@ def fetch_ticker_news_with_retry(ticker, attempts=2):
     if stale_news:
         return stale_news, None
     return [], last_error
+
+
+def fetch_earnings_trend_with_retry(ticker, attempts=2):
+    """
+    Fetch the EPS estimate trend DataFrame for *ticker* with retry and
+    stale-cache fallback.
+
+    Returns (DataFrame_or_None, error_string_or_None).
+    The DataFrame has period labels as its index (e.g. '0q', '+1q', '0y',
+    '+1y') and columns that include epsTrend.current / epsTrend.30daysAgo /
+    epsTrend.90daysAgo and epsRevisions.upLast30days /
+    epsRevisions.downLast30days, depending on the yfinance version.
+    """
+    cache_key = ticker.upper()
+    cached = get_cached_fetch_payload("earnings_trend", cache_key)
+    if cached is not None and not cached.empty:
+        return cached, None
+
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            trend = getattr(yf.Ticker(ticker), "earnings_trend", None)
+            if trend is not None and isinstance(trend, pd.DataFrame) and not trend.empty:
+                set_cached_fetch_payload("earnings_trend", cache_key, trend)
+                return trend, None
+            last_error = f"Yahoo returned no earnings trend data for {ticker}."
+        except Exception as exc:
+            logger.warning("fetch_earnings_trend attempt %d failed (%s): %s", attempt + 1, ticker, exc)
+            last_error = summarize_fetch_error(exc)
+        if attempt < attempts - 1:
+            time.sleep(0.35 * (attempt + 1))
+
+    stale = get_cached_fetch_payload(
+        "earnings_trend",
+        cache_key,
+        max_age_seconds=FETCH_STALE_FALLBACK_TTL_SECONDS,
+    )
+    if stale is not None and not stale.empty:
+        return stale, None
+    return None, last_error
+
+
+def _pick_column_value(df_row, *name_variants):
+    """Return the first non-None numeric value found among *name_variants* in *df_row*."""
+    for name in name_variants:
+        value = df_row.get(name)
+        if value is not None and not (isinstance(value, float) and pd.isna(value)):
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def compute_eps_revision_signal(trend_df):
+    """
+    Derive 4-week and 12-week EPS revision magnitude plus analyst breadth from
+    a yfinance earnings_trend DataFrame.
+
+    Returns (eps_rev_4w, eps_rev_12w, breadth_4w, revision_signal) where:
+      - eps_rev_4w / eps_rev_12w are fractional changes in the consensus EPS
+        estimate over ~4 and ~12 weeks respectively (positive = upward revision)
+      - breadth_4w is the fraction of analysts revising upward over 4 weeks
+        (0–1), or None if not available
+      - revision_signal is a float in [-1.0, 1.0] ready to add to
+        effective_f_score
+
+    Gracefully returns (None, None, None, 0.0) when data is unavailable.
+    """
+    if trend_df is None or not isinstance(trend_df, pd.DataFrame) or trend_df.empty:
+        return None, None, None, 0.0
+
+    # Prefer the current fiscal year row ("0y"); fall back to next year ("+1y")
+    row = None
+    for period_label in ("0y", "+1y"):
+        if period_label in trend_df.index:
+            row = trend_df.loc[period_label]
+            break
+    if row is None:
+        # Last resort: use whatever row is available
+        row = trend_df.iloc[0]
+
+    # Convert Series to dict for uniform access
+    row_dict = row.to_dict() if hasattr(row, "to_dict") else dict(row)
+
+    # --- Magnitude: consensus EPS estimate shift ---
+    current = _pick_column_value(row_dict, "epsTrend.current", "current")
+    ago_30  = _pick_column_value(row_dict, "epsTrend.30daysAgo", "30daysAgo")
+    ago_90  = _pick_column_value(row_dict, "epsTrend.90daysAgo", "90daysAgo")
+
+    eps_rev_4w = None
+    eps_rev_12w = None
+    if current is not None and ago_30 is not None and abs(ago_30) > 1e-6:
+        eps_rev_4w = (current - ago_30) / abs(ago_30)
+    if current is not None and ago_90 is not None and abs(ago_90) > 1e-6:
+        eps_rev_12w = (current - ago_90) / abs(ago_90)
+
+    # --- Breadth: fraction of analysts revising up over ~4 weeks ---
+    breadth_4w = None
+    up30   = _pick_column_value(row_dict, "epsRevisions.upLast30days",   "upLast30days")
+    down30 = _pick_column_value(row_dict, "epsRevisions.downLast30days", "downLast30days")
+    if up30 is not None and down30 is not None:
+        total = up30 + down30
+        if total > 0:
+            breadth_4w = up30 / total
+
+    # --- Aggregate into a single ±1.0 signal ---
+    signal = 0.0
+    if has_numeric_value(eps_rev_4w):
+        if eps_rev_4w >= 0.03:
+            signal += 0.35
+        elif eps_rev_4w <= -0.03:
+            signal -= 0.35
+    if has_numeric_value(eps_rev_12w):
+        if eps_rev_12w >= 0.05:
+            signal += 0.40
+        elif eps_rev_12w <= -0.05:
+            signal -= 0.40
+    if has_numeric_value(breadth_4w):
+        if breadth_4w >= 0.60:
+            signal += 0.25
+        elif breadth_4w <= 0.30:
+            signal -= 0.25
+
+    return eps_rev_4w, eps_rev_12w, breadth_4w, float(np.clip(signal, -1.0, 1.0))

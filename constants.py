@@ -59,6 +59,7 @@ FETCH_CACHE = {
     "sec_submissions": {},
     "sec_filing_text": {},
     "treasury_yield": {},
+    "earnings_trend": {},
 }
 FETCH_CACHE_LOCK = threading.RLock()
 FETCH_CACHE_MAX_ENTRIES = {
@@ -72,6 +73,7 @@ FETCH_CACHE_MAX_ENTRIES = {
     "sec_submissions":    80,
     "sec_filing_text":    60,
     "treasury_yield":      5,
+    "earnings_trend":    300,
 }
 
 # ---------------------------------------------------------------------------
@@ -422,6 +424,9 @@ ANALYSIS_COLUMNS = {
     "DCF_Bear_Assumptions": "TEXT",
     "DCF_Scenario_Probs": "TEXT",
     "DCF_Blended_Fair_Value": "REAL",
+    "EPS_Revision_4W":          "REAL",
+    "EPS_Revision_12W":         "REAL",
+    "EPS_Revision_Breadth_4W":  "REAL",
     "Data_Completeness": "REAL",
     "Missing_Metric_Count": "INTEGER",
     "Data_Quality": "TEXT",
