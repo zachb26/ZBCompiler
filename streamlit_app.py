@@ -49,6 +49,7 @@ model_settings = settings.get_model_settings()
 active_preset_name = settings.detect_matching_preset(model_settings)
 active_assumption_fingerprint = settings.get_assumption_fingerprint(model_settings)
 
+st.image("osig_logo.png", width=300)
 st.title("OSIG Research Tool")
 storage_status = "Connected to Postgres" if db.storage_backend == "postgres" else "Using SQLite"
 st.caption(f"Version: {const.APP_VERSION} | {storage_status}")
@@ -95,8 +96,22 @@ quick_links_tab, new_analyst_tab, analyst_senior_tab, sector_leader_tab, portfol
     ["Quick Links", "New Analyst", "Senior Analyst", "Sector Leader", "Portfolio Manager", "Methodology", "ReadMe"]
 )
 
+_sa_locked = not st.session_state.get("senior_analyst_authenticated", False)
+_pm_locked = not st.session_state.get("portfolio_manager_authenticated", False)
+_locked_selectors = []
+if _sa_locked:
+    _locked_selectors.append("div[data-baseweb='tab-list'] button[role='tab']:nth-child(3)")
+if _pm_locked:
+    _locked_selectors.append("div[data-baseweb='tab-list'] button[role='tab']:nth-child(5)")
+if _locked_selectors:
+    _locked_css = ", ".join(_locked_selectors)
+    st.markdown(
+        f"<style>{_locked_css} {{ opacity: 0.4 !important; color: #888 !important; cursor: not-allowed !important; }}</style>",
+        unsafe_allow_html=True,
+    )
+
 # ── VOTING LINK — change this URL to update the active vote ──────────────────
-VOTING_LINK = "https://osu-osig.slack.com/archives/C4AGDGPBQ/p1776543967602259"
+VOTING_LINK = "https://docs.google.com/forms/d/e/1FAIpQLScXEFap4fq51ycL54ugLasHjt0U2dsJuJpSEmGfDsP8xSVkMg/viewform"
 # ─────────────────────────────────────────────────────────────────────────────
 
 with quick_links_tab:
