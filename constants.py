@@ -170,9 +170,9 @@ SEC_USER_AGENT = os.environ.get("SEC_EDGAR_USER_AGENT", "").strip()
 # ---------------------------------------------------------------------------
 # Peer universe
 # ---------------------------------------------------------------------------
-PEER_GROUP_SIZE = 5
-PEER_SEARCH_CANDIDATE_LIMIT = 140
-PEER_MIN_REQUIRED = 3
+PEER_GROUP_SIZE = 10
+PEER_SEARCH_CANDIDATE_LIMIT = 200
+PEER_MIN_REQUIRED = 4
 PEER_UNIVERSE_FILENAME = "sp500_tickers.txt"
 PEER_METRIC_MAP = {
     "PE": "trailingPE",

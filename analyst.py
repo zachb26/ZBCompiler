@@ -520,7 +520,7 @@ class StockAnalyst:
             v_val = "FAIR VALUE"
         else:
             v_val = "OVERVALUED"
-        valuation_confidence = calculate_valuation_confidence(valuation_signal_count)
+        valuation_confidence = calculate_valuation_confidence(valuation_signal_count, peer_count=peer_group.get("count"))
 
         dividend_safety_score = calculate_dividend_safety_score(
             dividend_yield,
@@ -894,6 +894,16 @@ class StockAnalyst:
         return record
 
 
+_VERDICT_RETURN_ADJ = {
+    "STRONG BUY":  0.06,
+    "BUY":         0.03,
+    "HOLD":        0.00,
+    "SELL":       -0.03,
+    "STRONG SELL": None,  # hard-filtered; never reaches blend
+}
+_VERDICT_BLEND_WEIGHT = 0.25  # 25% toward verdict signal, 75% historical mean
+
+
 class PortfolioAnalyst:
     def __init__(self, db):
         self.db = db
@@ -1101,6 +1111,36 @@ class PortfolioAnalyst:
         recommendations = recommendations.sort_values("Recommended Weight", ascending=False)
         return recommendations
 
+    def _blend_expected_returns(self, asset_returns, verdicts, risk_free_rate, trading_days):
+        hist = asset_returns.mean() * trading_days
+        blended = {}
+        for ticker in asset_returns.columns:
+            h = float(hist.get(ticker, 0.0))
+            adj = _VERDICT_RETURN_ADJ.get((verdicts or {}).get(ticker), 0.0) or 0.0
+            signal = risk_free_rate + adj
+            blended[ticker] = (1 - _VERDICT_BLEND_WEIGHT) * h + _VERDICT_BLEND_WEIGHT * signal
+        return blended
+
+    def _reapply_blended_returns(self, portfolio_df, tickers, blended_returns, risk_free_rate):
+        weight_cols = [f"W_{t}" for t in tickers]
+        w_matrix = portfolio_df[weight_cols].to_numpy()
+        r_vec = np.array([blended_returns[t] for t in tickers])
+        portfolio_df = portfolio_df.copy()
+        portfolio_df["Return"] = w_matrix @ r_vec
+        portfolio_df["Sharpe"] = (portfolio_df["Return"] - risk_free_rate) / portfolio_df["Volatility"]
+        portfolio_df["Sortino"] = (portfolio_df["Return"] - risk_free_rate) / portfolio_df["Downside Volatility"]
+        portfolio_df["Treynor"] = (portfolio_df["Return"] - risk_free_rate) / portfolio_df["Beta"]
+        portfolio_df = portfolio_df.replace([np.inf, -np.inf], np.nan).dropna(subset=["Return", "Volatility", "Sharpe"])
+
+        sorted_df = portfolio_df.sort_values("Volatility").reset_index(drop=True)
+        sorted_df["_cummax"] = sorted_df["Return"].cummax()
+        frontier = sorted_df[sorted_df["Return"] == sorted_df["_cummax"]].drop(columns="_cummax")
+        tangent = portfolio_df.loc[portfolio_df["Sharpe"].idxmax()]
+        min_vol = portfolio_df.loc[portfolio_df["Volatility"].idxmin()]
+        cal_x = np.linspace(0, max(frontier["Volatility"].max(), tangent["Volatility"]) * 1.2, 60)
+        cal = pd.DataFrame({"Volatility": cal_x, "Return": risk_free_rate + tangent["Sharpe"] * cal_x})
+        return portfolio_df, frontier, tangent, min_vol, cal
+
     def build_portfolio_notes(self, recommendations, sector_exposure, tangent_portfolio, max_weight):
         notes = []
         effective_names = safe_divide(1, np.square(recommendations["Recommended Weight"]).sum())
@@ -1122,7 +1162,7 @@ class PortfolioAnalyst:
 
         return notes, effective_names
 
-    def analyze_portfolio(self, tickers, benchmark_ticker, period, risk_free_rate, max_weight, simulations):
+    def analyze_portfolio(self, tickers, benchmark_ticker, period, risk_free_rate, max_weight, simulations, verdicts=None):
         self.last_error = None
         settings = get_model_settings()
         trading_days = settings["trading_days_per_year"]
@@ -1146,6 +1186,22 @@ class PortfolioAnalyst:
                 )
                 return None
 
+            filtered_strong_sell = []
+            if verdicts:
+                filtered_strong_sell = [
+                    t for t in list(asset_returns.columns)
+                    if verdicts.get(t) == "STRONG SELL"
+                ]
+                if filtered_strong_sell:
+                    asset_returns = asset_returns.drop(columns=filtered_strong_sell, errors="ignore")
+                    if len(asset_returns.columns) < 2:
+                        self.last_error = (
+                            f"After excluding STRONG SELL tickers "
+                            f"({', '.join(filtered_strong_sell)}), fewer than two names remain. "
+                            "Add more tickers or override the filter."
+                        )
+                        return None
+
             asset_metrics = self.calculate_asset_metrics(asset_returns, benchmark_returns, risk_free_rate, trading_days)
             portfolio_df, frontier, tangent, minimum_volatility, cal = self.simulate_portfolios(
                 asset_returns,
@@ -1162,6 +1218,19 @@ class PortfolioAnalyst:
                 return None
 
             valid_tickers = list(asset_returns.columns)
+            verdict_blend_applied = False
+            if verdicts and any(verdicts.get(t) for t in valid_tickers):
+                blended = self._blend_expected_returns(asset_returns, verdicts, risk_free_rate, trading_days)
+                portfolio_df, frontier, tangent, minimum_volatility, cal = self._reapply_blended_returns(
+                    portfolio_df, valid_tickers, blended, risk_free_rate
+                )
+                asset_metrics = asset_metrics.copy()
+                asset_metrics["Annual Return"] = asset_metrics["Ticker"].map(blended)
+                asset_metrics["Sharpe Ratio"] = (
+                    (asset_metrics["Annual Return"] - risk_free_rate) / asset_metrics["Volatility"]
+                ).replace([np.inf, -np.inf], np.nan)
+                verdict_blend_applied = True
+
             metadata = self.get_asset_metadata(valid_tickers)
             recommendations = self.build_recommendations(valid_tickers, asset_metrics, metadata, tangent)
             sector_exposure = (
@@ -1187,6 +1256,8 @@ class PortfolioAnalyst:
                 "effective_names": effective_names,
                 "benchmark": benchmark_ticker,
                 "period": period,
+                "filtered_strong_sell": filtered_strong_sell,
+                "verdict_blend_applied": verdict_blend_applied,
             }
         except Exception as exc:
             logger.error("PortfolioAnalyst.analyze failed: %s", exc)

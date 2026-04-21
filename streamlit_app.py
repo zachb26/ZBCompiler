@@ -49,10 +49,13 @@ model_settings = settings.get_model_settings()
 active_preset_name = settings.detect_matching_preset(model_settings)
 active_assumption_fingerprint = settings.get_assumption_fingerprint(model_settings)
 
-st.image("osig_logo.png", width=300)
-st.title("OSIG Research Tool")
-storage_status = "Connected to Postgres" if db.storage_backend == "postgres" else "Using SQLite"
-st.caption(f"Version: {const.APP_VERSION} | {storage_status}")
+_logo_col, _title_col = st.columns([1, 4])
+with _logo_col:
+    st.image("osig_logo.png", use_container_width=True)
+with _title_col:
+    st.title("OSIG Research Tool")
+    storage_status = "Connected to Postgres" if db.storage_backend == "postgres" else "Using SQLite"
+    st.caption(f"Version: {const.APP_VERSION} | {storage_status}")
 if db.storage_notice:
     st.warning(db.storage_notice)
 

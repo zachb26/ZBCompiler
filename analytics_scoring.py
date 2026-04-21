@@ -64,13 +64,18 @@ def cap_weights(weights: pd.Series, max_weight: float) -> pd.Series:
 # Score → label converters
 # ---------------------------------------------------------------------------
 
-def score_to_signal(score: float, strong_buy: float = 4, buy: float = 2, sell: float = -2, strong_sell: float = -4) -> str:
-    """Map a numeric composite score to a 5-level directional label."""
-    if score >= strong_buy:
+def score_to_signal(score: float, strong_buy: float = 4, buy: float = 2, sell: float = -2, strong_sell: float = -4, strong_verdict_margin: float = 0.0) -> str:
+    """Map a numeric composite score to a 5-level directional label.
+
+    strong_verdict_margin raises the effective STRONG BUY/SELL threshold so that scores
+    just barely clearing the configured threshold don't flip to the highest conviction
+    verdict — reducing cliff sensitivity near the boundary.
+    """
+    if score >= strong_buy + strong_verdict_margin:
         return "STRONG BUY"
     if score >= buy:
         return "BUY"
-    if score <= strong_sell:
+    if score <= strong_sell - strong_verdict_margin:
         return "STRONG SELL"
     if score <= sell:
         return "SELL"
@@ -354,6 +359,7 @@ def resolve_overall_verdict(
             buy=buy_threshold,
             sell=sell_threshold,
             strong_sell=strong_sell_threshold,
+            strong_verdict_margin=0.5,
         )
 
     if verdict in {"BUY", "STRONG BUY"}:

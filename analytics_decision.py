@@ -33,12 +33,20 @@ from analytics_scoring import resolve_overall_verdict
 # Valuation and sentiment confidence helpers
 # ---------------------------------------------------------------------------
 
-def calculate_valuation_confidence(signal_count: float | None) -> float:
-    """Return a 20–95 valuation confidence score based on available signal count."""
+def calculate_valuation_confidence(signal_count: float | None, peer_count: int | None = None) -> float:
+    """Return a 20–95 valuation confidence score based on available signal count and peer depth."""
     if not has_numeric_value(signal_count):
         return 25.0
     signal_count = float(signal_count)
-    return float(np.clip(20 + signal_count * 12, 20, 95))
+    peer_bonus = 0.0
+    if has_numeric_value(peer_count):
+        if peer_count >= 9:
+            peer_bonus = 1.5
+        elif peer_count >= 6:
+            peer_bonus = 1.0
+        elif peer_count >= 4:
+            peer_bonus = 0.5
+    return float(np.clip(20 + (signal_count + peer_bonus) * 12, 20, 95))
 
 
 def calculate_sentiment_conviction(

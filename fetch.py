@@ -509,7 +509,7 @@ def find_closest_peer_group(ticker, info, db=None, peer_count=PEER_GROUP_SIZE):
     averages = {}
     for output_key, input_key in PEER_METRIC_MAP.items():
         values = [row[input_key] for row in selected if has_numeric_value(row.get(input_key))]
-        averages[output_key] = float(np.mean(values)) if values else None
+        averages[output_key] = float(np.median(values)) if values else None
 
     group_label = target_industry or target_sector or "Closest peers"
     peer_names = ", ".join(row["Ticker"] for row in selected[:peer_count]) if selected else "None found"

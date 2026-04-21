@@ -44,7 +44,11 @@ def render_methodology_view(db, model_settings, active_preset_name, active_assum
         ]
     )
     st.dataframe(engine_df, use_container_width=True)
-    st.caption("Sentiment (news headlines and analyst ratings) is shown as context only — it does not feed into the score.")
+    st.caption(
+        "Sentiment (news headlines and analyst ratings) does not feed into the composite score, "
+        "but is used in verdict resolution: it contributes to the mixed-signal flag and gates "
+        "high-conviction STRONG BUY / STRONG SELL overrides."
+    )
 
     # ── Step 3: Verdicts ──────────────────────────────────────────────────────
     st.subheader("What Each Verdict Means")
