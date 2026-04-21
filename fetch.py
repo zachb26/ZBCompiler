@@ -56,6 +56,7 @@ from constants import (
     PEER_MIN_REQUIRED,
     PEER_SEARCH_CANDIDATE_LIMIT,
     PEER_UNIVERSE_FILENAME,
+    normalize_sector,
 )
 from utils_fmt import normalize_ticker, parse_ticker_list, safe_num
 from utils_time import format_datetime_value, trim_history_to_period
@@ -475,7 +476,7 @@ def find_closest_peer_group(ticker, info, db=None, peer_count=PEER_GROUP_SIZE):
             {
                 "Ticker": candidate_ticker,
                 "Name": str(candidate_info.get("shortName") or candidate_info.get("longName") or candidate_ticker),
-                "Sector": str(candidate_info.get("sector") or ""),
+                "Sector": normalize_sector(str(candidate_info.get("sector") or "")),
                 "Industry": str(candidate_info.get("industry") or ""),
                 "Similarity": similarity_score,
                 "Priority": priority,
@@ -537,7 +538,7 @@ def build_relative_peer_benchmarks(ticker, info, db=None, settings=None):
     from constants import get_sector_benchmarks
 
     peer_group = find_closest_peer_group(ticker, info, db=db, peer_count=PEER_GROUP_SIZE)
-    sector_fallback = get_sector_benchmarks(info.get("sector", "Unknown"), settings=settings)
+    sector_fallback = get_sector_benchmarks(normalize_sector(info.get("sector", "")), settings=settings)
     averages = peer_group.get("averages", {})
     benchmarks = {
         "PE": averages.get("PE"),

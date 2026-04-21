@@ -248,32 +248,30 @@ NEGATIVE_SENTIMENT_TERMS = {
 # ---------------------------------------------------------------------------
 # Sector / stock classification
 # ---------------------------------------------------------------------------
-CYCLICAL_SECTORS = {
-    "Consumer Cyclical",
-    "Industrials",
-    "Energy",
-    "Basic Materials",
-    "Financial Services",
-    "Real Estate",
+SECTOR_MAP = {
+    "Technology":             "Information Technology",
+    "Communication Services": "Information Technology",
+    "Healthcare":             "Healthcare",
+    "Financial Services":     "Financials",
+    "Energy":                 "IMEU",
+    "Industrials":            "IMEU",
+    "Utilities":              "IMEU",
+    "Basic Materials":        "IMEU",
+    "Consumer Cyclical":      "Consumer Goods",
+    "Consumer Defensive":     "Consumer Goods",
+    "Real Estate":            "Real Estate",
 }
-DEFENSIVE_SECTORS = {
-    "Consumer Defensive",
-    "Healthcare",
-    "Utilities",
-}
-INCOME_SECTORS = {
-    "Utilities",
-    "Real Estate",
-    "Consumer Defensive",
-    "Energy",
-    "Communication Services",
-}
-QUALITY_SECTORS = {
-    "Technology",
-    "Healthcare",
-    "Consumer Defensive",
-    "Communication Services",
-}
+
+
+def normalize_sector(raw: str) -> str:
+    """Map a raw yfinance sector string to the OSIG consolidated sector name."""
+    return SECTOR_MAP.get(str(raw or "").strip(), str(raw or "").strip() or "Unknown")
+
+
+CYCLICAL_SECTORS = {"IMEU", "Consumer Goods", "Financials"}
+DEFENSIVE_SECTORS = {"Healthcare"}
+INCOME_SECTORS = {"IMEU", "Consumer Goods", "Information Technology"}
+QUALITY_SECTORS = {"Information Technology", "Healthcare", "Consumer Goods"}
 STOCK_TYPE_STRATEGIES = {
     "Growth Stocks": "Favor long-term accumulation, durable earnings growth, and trend persistence rather than demanding cheap valuation at every entry.",
     "Value Stocks": "Lean hardest on valuation and balance-sheet strength, buying discounts to intrinsic value and waiting for the market to re-rate them.",
@@ -291,17 +289,12 @@ STOCK_TYPE_STRATEGIES = {
 # Sector valuation benchmarks
 # ---------------------------------------------------------------------------
 SECTOR_BENCHMARKS = {
-    "Technology":             {"PE": 30, "PS": 6.0, "PB": 8.0, "EV_EBITDA": 20},
+    "Information Technology": {"PE": 27, "PS": 5.5, "PB": 6.5, "EV_EBITDA": 18},
     "Healthcare":             {"PE": 25, "PS": 4.0, "PB": 4.0, "EV_EBITDA": 15},
-    "Financial Services":     {"PE": 14, "PS": 3.0, "PB": 1.5, "EV_EBITDA": 10},
-    "Energy":                 {"PE": 10, "PS": 1.5, "PB": 1.8, "EV_EBITDA":  6},
-    "Consumer Cyclical":      {"PE": 20, "PS": 2.5, "PB": 4.0, "EV_EBITDA": 14},
-    "Industrials":            {"PE": 20, "PS": 2.0, "PB": 3.5, "EV_EBITDA": 12},
-    "Utilities":              {"PE": 18, "PS": 2.5, "PB": 2.0, "EV_EBITDA": 10},
-    "Consumer Defensive":     {"PE": 22, "PS": 2.0, "PB": 4.0, "EV_EBITDA": 15},
+    "Financials":             {"PE": 14, "PS": 3.0, "PB": 1.5, "EV_EBITDA": 10},
+    "IMEU":                   {"PE": 16, "PS": 1.8, "PB": 2.3, "EV_EBITDA":  9},
+    "Consumer Goods":         {"PE": 21, "PS": 2.3, "PB": 4.0, "EV_EBITDA": 15},
     "Real Estate":            {"PE": 35, "PS": 6.0, "PB": 3.0, "EV_EBITDA": 18},
-    "Communication Services": {"PE": 20, "PS": 4.0, "PB": 3.0, "EV_EBITDA": 12},
-    "Basic Materials":        {"PE": 15, "PS": 1.5, "PB": 2.0, "EV_EBITDA":  8},
 }
 DEFAULT_BENCHMARKS = {"PE": 20, "PS": 3.0, "PB": 3.0, "EV_EBITDA": 12}
 

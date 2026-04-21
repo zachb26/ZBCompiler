@@ -285,11 +285,41 @@ class DatabaseManager:
         except psycopg.Error as exc:
             self._mark_postgres_optional_table_unavailable(table_name, exc)
 
+    _SECTOR_MIGRATION = {
+        "Technology":             "Information Technology",
+        "Communication Services": "Information Technology",
+        "Financial Services":     "Financials",
+        "Energy":                 "IMEU",
+        "Industrials":            "IMEU",
+        "Utilities":              "IMEU",
+        "Basic Materials":        "IMEU",
+        "Consumer Cyclical":      "Consumer Goods",
+        "Consumer Defensive":     "Consumer Goods",
+    }
+
+    def _migrate_sector_names(self, conn):
+        """Remap legacy yfinance sector names to consolidated OSIG sector names."""
+        old_names = list(self._SECTOR_MIGRATION.keys())
+        placeholders = ",".join("?" if self._backend == "sqlite" else "%s" for _ in old_names)
+        col = '"Sector"' if self._backend == "postgres" else "Sector"
+        case_clauses = "\n            ".join(
+            f"WHEN {repr(old)} THEN {repr(new)}" for old, new in self._SECTOR_MIGRATION.items()
+        )
+        sql = f"""
+            UPDATE analysis SET {col} = CASE {col}
+            {case_clauses}
+            ELSE {col}
+            END
+            WHERE {col} IN ({placeholders})
+        """
+        conn.execute(sql, old_names)
+
     def create_tables(self):
         with self._write_lock:
             if self._backend == "postgres":
                 with self._connection() as conn:
                     self._ensure_postgres_analysis_schema(conn)
+                    self._migrate_sector_names(conn)
                 self._ensure_postgres_optional_table(
                     "portfolio_memberships",
                     """
@@ -332,6 +362,7 @@ class DatabaseManager:
                     for name, definition in ANALYSIS_COLUMNS.items():
                         if name not in existing_columns:
                             conn.execute(f"ALTER TABLE analysis ADD COLUMN {name} {definition}")
+                    self._migrate_sector_names(conn)
                     conn.execute(
                         """
                         CREATE TABLE IF NOT EXISTS portfolio_memberships (

@@ -446,7 +446,7 @@ class StockAnalyst:
             v_fund = "WEAK"
 
         v_score = 0
-        sector = info.get("sector", "Unknown")
+        sector = normalize_sector(info.get("sector", ""))
         industry = info.get("industry", "Unknown")
         bench, peer_group = build_relative_peer_benchmarks(ticker, info, db=self.db, settings=settings)
         pe = safe_num(info.get("trailingPE"))
@@ -967,7 +967,7 @@ class PortfolioAnalyst:
             info, _ = fetch_ticker_info_with_retry(ticker)
             if info:
                 name = info.get("shortName") or info.get("longName") or ticker
-                sector = info.get("sector") or sector
+                sector = normalize_sector(info.get("sector") or "") or sector
 
             rows.append({"Ticker": ticker, "Name": name, "Sector": sector})
 

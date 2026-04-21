@@ -24,7 +24,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from constants import CYCLICAL_SECTORS, DEFENSIVE_SECTORS, INCOME_SECTORS, QUALITY_SECTORS, REGIME_ENGINE_WEIGHTS, STOCK_TYPE_STRATEGIES
+from constants import CYCLICAL_SECTORS, DEFENSIVE_SECTORS, INCOME_SECTORS, QUALITY_SECTORS, REGIME_ENGINE_WEIGHTS, STOCK_TYPE_STRATEGIES, normalize_sector
 from fetch import has_numeric_value, safe_num, score_relative_multiple
 from analytics_scoring import resolve_overall_verdict
 
@@ -255,7 +255,7 @@ def classify_stock_profile(
     }
     reasons = {name: [] for name in scores}
 
-    if sector in {"Technology", "Communication Services"}:
+    if sector in {"Information Technology"}:
         scores["Growth Stocks"] += 1
         reasons["Growth Stocks"].append("innovation-heavy sector")
     if has_numeric_value(revenue_growth) and revenue_growth >= 0.12:
@@ -485,7 +485,7 @@ def infer_stock_profile_from_snapshot(
         return {}
     price = float(close.iloc[-1])
     momentum_1y = (price / close.iloc[0] - 1) if len(close) > 1 else None
-    sector = info.get("sector", "Unknown")
+    sector = normalize_sector(info.get("sector", ""))
     bench, _ = build_relative_peer_benchmarks(
         ticker or info.get("symbol") or "",
         info,
