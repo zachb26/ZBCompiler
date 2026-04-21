@@ -91,9 +91,45 @@ with st.sidebar:
     st.divider()
     st.caption("Full model controls and sliders are in Senior Analyst → Controls.")
 
-new_analyst_tab, analyst_senior_tab, sector_leader_tab, portfolio_manager_tab, methodology_tab, readme_tab = st.tabs(
-    ["New Analyst", "Senior Analyst", "Sector Leader", "Portfolio Manager", "Methodology", "ReadMe"]
+quick_links_tab, new_analyst_tab, analyst_senior_tab, sector_leader_tab, portfolio_manager_tab, methodology_tab, readme_tab = st.tabs(
+    ["Quick Links", "New Analyst", "Senior Analyst", "Sector Leader", "Portfolio Manager", "Methodology", "ReadMe"]
 )
+
+# ── VOTING LINK — change this URL to update the active vote ──────────────────
+VOTING_LINK = "https://osu-osig.slack.com/archives/C4AGDGPBQ/p1776543967602259"
+# ─────────────────────────────────────────────────────────────────────────────
+
+with quick_links_tab:
+    st.header("Quick Links")
+    st.markdown("Essential resources for OSIG members.")
+    st.divider()
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.subheader("Box")
+        st.markdown("Club files, research, and documents.")
+        st.link_button("Open Box", "https://oregonstate.box.com/s/1gred7wfd4zrigao6e23dht8l7y4z50j", use_container_width=True)
+
+        st.markdown("")
+        st.subheader("Yahoo Finance")
+        st.markdown("Quotes, news, and market data.")
+        st.link_button("Open Yahoo Finance", "https://finance.yahoo.com", use_container_width=True)
+
+    with col2:
+        st.subheader("Slack")
+        st.markdown("Team communication and channels.")
+        st.link_button("Open Slack", "https://osu-osig.slack.com", use_container_width=True)
+
+        st.markdown("")
+        st.subheader("S&P 500 Heat Map")
+        st.markdown("Live sector and market cap heat map.")
+        st.link_button("Open Heat Map", "https://finviz.com/map.ashx", use_container_width=True)
+
+    with col3:
+        st.subheader("Current Vote")
+        st.markdown("Active club voting thread on Slack.")
+        st.link_button("Go to Vote", VOTING_LINK, use_container_width=True, type="primary")
 
 with new_analyst_tab:
     analyst_new_tab, compare_tab = st.tabs(["Analysis", "Comparison"])
