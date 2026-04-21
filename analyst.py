@@ -32,6 +32,130 @@ from backtest import *
 from database import DatabaseManager
 
 
+def compute_options_signals(chains, current_price, close_series):
+    """
+    Derive four options-implied signals from a fetched options payload.
+
+    Parameters
+    ----------
+    chains : dict  {"YYYY-MM-DD": {"calls": DataFrame, "puts": DataFrame}, ...}
+    current_price : float
+    close_series  : pd.Series  — daily closing prices (for historical-vol proxy)
+
+    Returns
+    -------
+    dict with keys:
+        iv_rank     float|None  — 0-100 percentile of current ATM IV vs 52-wk HV range
+        skew        float|None  — mean OTM put IV minus mean OTM call IV (positive = bearish)
+        pc_ratio    float|None  — put / call volume ratio for nearest expiry
+        term        float|None  — front-month ATM IV / back-month ATM IV (>1 = backwardation)
+        score       float       — composite score clipped to [-4, +4]
+        signal_count int        — number of non-None signals
+    """
+    result = {"iv_rank": None, "skew": None, "pc_ratio": None, "term": None, "score": 0.0, "signal_count": 0}
+
+    if not chains or not current_price or current_price <= 0:
+        return result
+
+    exps = sorted(chains.keys())
+    front_exp = exps[0]
+    back_exp  = exps[1] if len(exps) > 1 else None
+
+    front_calls = chains[front_exp].get("calls", pd.DataFrame())
+    front_puts  = chains[front_exp].get("puts",  pd.DataFrame())
+
+    def _atm_iv(df):
+        """Return the implied volatility of the option with strike closest to current_price."""
+        if df is None or df.empty or "strike" not in df.columns or "impliedVolatility" not in df.columns:
+            return None
+        df = df.dropna(subset=["strike", "impliedVolatility"])
+        if df.empty:
+            return None
+        idx = (df["strike"] - current_price).abs().idxmin()
+        iv = float(df.loc[idx, "impliedVolatility"])
+        return iv if iv > 0 else None
+
+    score = 0.0
+    sig_count = 0
+
+    # ------------------------------------------------------------------ IV Rank
+    atm_iv = _atm_iv(front_calls)
+    if atm_iv is not None and close_series is not None and len(close_series) >= 30:
+        log_rets = np.log(close_series / close_series.shift(1)).dropna()
+        if len(log_rets) >= 252:
+            log_rets = log_rets.iloc[-252:]
+        hv_series = log_rets.rolling(30).std() * np.sqrt(252)
+        hv_series = hv_series.dropna()
+        if len(hv_series) >= 10:
+            hv_low  = float(hv_series.min())
+            hv_high = float(hv_series.max())
+            if hv_high > hv_low:
+                iv_rank = float(np.clip((atm_iv - hv_low) / (hv_high - hv_low) * 100, 0, 100))
+                result["iv_rank"] = iv_rank
+                sig_count += 1
+                if iv_rank < 20:
+                    score += 1.0
+                elif iv_rank > 75:
+                    score -= 1.5
+                elif iv_rank > 50:
+                    score -= 0.75
+
+    # ---------------------------------------------------------- 25-delta skew
+    # Approximate 25Δ puts as 5-7% OTM below spot, calls as 5-7% OTM above
+    if not front_calls.empty and not front_puts.empty:
+        lo, hi = current_price * 0.93, current_price * 0.95   # put side
+        clo, chi = current_price * 1.05, current_price * 1.07  # call side
+        for df in (front_calls, front_puts):
+            if "strike" not in df.columns:
+                break
+        else:
+            _puts_otm  = front_puts[ front_puts["strike"].between(lo, hi)  ]["impliedVolatility"].dropna()
+            _calls_otm = front_calls[front_calls["strike"].between(clo, chi)]["impliedVolatility"].dropna()
+            if len(_puts_otm) >= 1 and len(_calls_otm) >= 1:
+                skew = float(_puts_otm.mean()) - float(_calls_otm.mean())
+                result["skew"] = skew
+                sig_count += 1
+                if skew > 0.05:
+                    score -= 1.5
+                elif skew > 0.02:
+                    score -= 0.75
+                elif skew < -0.02:
+                    score += 0.75
+
+    # ------------------------------------------------- Put/call volume ratio
+    if "volume" in front_puts.columns and "volume" in front_calls.columns:
+        call_vol = float(front_calls["volume"].dropna().sum())
+        put_vol  = float(front_puts["volume"].dropna().sum())
+        if call_vol > 0:
+            pc = put_vol / call_vol
+            result["pc_ratio"] = pc
+            sig_count += 1
+            if pc > 1.5:
+                score -= 1.5
+            elif pc > 1.0:
+                score -= 0.5
+            elif pc < 0.5:
+                score += 1.0
+
+    # --------------------------------------------------- IV term structure
+    if back_exp is not None:
+        back_calls = chains[back_exp].get("calls", pd.DataFrame())
+        front_atm_iv = atm_iv  # already computed above
+        back_atm_iv  = _atm_iv(back_calls)
+        if front_atm_iv is not None and back_atm_iv is not None and back_atm_iv > 0:
+            term = front_atm_iv / back_atm_iv
+            result["term"] = term
+            sig_count += 1
+            if term > 1.10:
+                score -= 1.0
+            elif term <= 1.0:
+                score += 0.5
+
+    result["score"] = float(np.clip(score, -4.0, 4.0))
+    result["signal_count"] = sig_count
+    return result
+
+
 class StockAnalyst:
     def __init__(self, db: DatabaseManager):
         self.db = db
@@ -64,7 +188,7 @@ class StockAnalyst:
 
         return hist, info, news
 
-    def analyze_sentiment(self, info, news, price, settings=None):
+    def analyze_sentiment(self, ticker, info, news, price, hist_close, settings=None):
         info = info or {}
         news = news or []
         recommendation_key = (info.get("recommendationKey") or "").lower()
@@ -81,14 +205,34 @@ class StockAnalyst:
         context_parts.extend(headlines)
         summary = " | ".join(context_parts[:6]) if context_parts else "No recent news or analyst context was available."
 
+        # Options-implied signals
+        opts_payload, _ = fetch_options_data_with_retry(ticker)
+        if opts_payload and opts_payload.get("chains"):
+            opts = compute_options_signals(opts_payload["chains"], price, hist_close)
+        else:
+            opts = {"iv_rank": None, "skew": None, "pc_ratio": None, "term": None, "score": 0.0, "signal_count": 0}
+
+        score = opts["score"]
+        if score >= 1.5:
+            verdict = "BULLISH"
+        elif score <= -1.5:
+            verdict = "BEARISH"
+        else:
+            verdict = "NEUTRAL"
+
         return {
-            "score": 0,
-            "verdict": "CONTEXT ONLY",
+            "score": score,
+            "verdict": verdict,
             "recommendation_key": recommendation_key.upper() if recommendation_key else "N/A",
             "analyst_opinions": analyst_opinions,
             "target_mean_price": target_mean_price,
             "headline_count": len(headlines),
             "summary": summary,
+            "iv_rank": opts["iv_rank"],
+            "skew": opts["skew"],
+            "pc_ratio": opts["pc_ratio"],
+            "iv_term": opts["term"],
+            "options_signal_count": opts["signal_count"],
         }
 
     def build_record_from_market_data(self, ticker, hist, info, news, settings=None, compute_dcf=False, dcf_settings=None):
@@ -99,6 +243,9 @@ class StockAnalyst:
         news = news or []
         if hist is None or hist.empty or "Close" not in hist.columns:
             return None
+        earnings_trend_df, _ = fetch_earnings_trend_with_retry(ticker)
+        eps_rev_4w, eps_rev_12w, eps_breadth_4w, eps_revision_signal = compute_eps_revision_signal(earnings_trend_df)
+        bs_df, inc_df, cf_df, _ = fetch_annual_financials_with_retry(ticker)
 
         close = hist["Close"].dropna().astype(float)
         if close.empty:
@@ -243,6 +390,9 @@ class StockAnalyst:
         dividend_yield = safe_num(info.get("dividendYield"))
         payout_ratio = safe_num(info.get("payoutRatio"))
         equity_beta = safe_num(info.get("beta"))
+        short_interest = safe_num(info.get("sharesShort"))
+        short_ratio = safe_num(info.get("shortRatio"))
+        short_float_pct = safe_num(info.get("shortPercentOfFloat"))
         if has_numeric_value(roe):
             if roe >= settings["fund_roe_threshold"]:
                 f_score += 1
@@ -282,6 +432,8 @@ class StockAnalyst:
             current_ratio,
             settings,
         )
+        piotroski_fscore, _piotroski_detail = compute_piotroski_fscore(info, bs_df, inc_df, cf_df)
+        altman_zscore, _altman_zone = compute_altman_zscore(info)
         if quality_score >= 3:
             f_score += 1
         elif quality_score <= -1.5:
@@ -378,7 +530,7 @@ class StockAnalyst:
             debt_eq,
         )
 
-        sentiment = self.analyze_sentiment(info, news, price, settings=settings)
+        sentiment = self.analyze_sentiment(ticker, info, news, price, close, settings=settings)
         sentiment_conviction = calculate_sentiment_conviction(
             sentiment["score"],
             sentiment["analyst_opinions"],
@@ -386,6 +538,7 @@ class StockAnalyst:
             sentiment["target_mean_price"],
             price,
             sentiment["headline_count"],
+            options_signal_count=sentiment["options_signal_count"],
         )
         event_study = compute_event_study(news, hist, benchmark_ticker=DEFAULT_BENCHMARK_TICKER)
         stock_profile = classify_stock_profile(
@@ -432,9 +585,12 @@ class StockAnalyst:
             range_position=range_position_52w,
             volatility_1y=volatility_1y,
             stock_profile=stock_profile,
+            altman_z=altman_zscore,
+            short_float_pct=short_float_pct,
+            short_ratio=short_ratio,
         )
-        engine_weights, engine_weight_profile = get_type_adjusted_engine_weights(stock_profile, settings)
-        effective_sentiment_score = 0.0
+        engine_weights, engine_weight_profile = get_type_adjusted_engine_weights(stock_profile, settings, regime=regime)
+        effective_sentiment_score = sentiment["score"]
         effective_tech_score = tech_score
         if has_numeric_value(trend_strength):
             effective_tech_score += np.clip(trend_strength / 50, -1.0, 1.0)
@@ -446,19 +602,43 @@ class StockAnalyst:
             effective_f_score += 0.5
         elif quality_score <= -1.5:
             effective_f_score -= 0.5
+        if has_numeric_value(piotroski_fscore):
+            if piotroski_fscore >= 7:
+                effective_f_score += 0.5
+            elif piotroski_fscore <= 3:
+                effective_f_score -= 0.5
         if stock_profile["primary_type"] in {"Dividend / Income Stocks", "Defensive Stocks"}:
             effective_f_score += np.clip(dividend_safety_score / 4, -0.5, 1.0)
         if has_numeric_value(event_study.get("avg_abnormal_5d")):
             effective_f_score += np.clip(event_study["avg_abnormal_5d"] * 10, -0.75, 0.75)
+        if eps_revision_signal != 0.0:
+            effective_f_score += np.clip(eps_revision_signal, -1.0, 1.0)
+        # Short interest signal: risk flag on expensive names, contrarian squeeze
+        # setup on beaten-down names with heavy short load and high days-to-cover.
+        si_signal = 0.0
+        if has_numeric_value(short_float_pct) and short_float_pct >= 0.10:
+            if v_val == "OVERVALUED":
+                # Crowd is betting against an already-expensive stock — amplifies risk.
+                si_signal -= 0.40
+            elif (
+                has_numeric_value(distance_52w_high)
+                and distance_52w_high <= -0.25
+                and has_numeric_value(short_ratio)
+                and short_ratio >= 5.0
+            ):
+                # Beaten-down + high short load + meaningful days-to-cover → squeeze potential.
+                si_signal += 0.30
+        effective_f_score += si_signal
         # Normalise each engine score to the FUND_SCORE_MAX reference scale so
         # that a weight of 1.0 means the same maximum contribution per engine.
-        norm_tech = effective_tech_score / TECH_SCORE_MAX * FUND_SCORE_MAX
-        norm_val = effective_v_score / VAL_SCORE_MAX * FUND_SCORE_MAX
+        norm_tech      = effective_tech_score      / TECH_SCORE_MAX * FUND_SCORE_MAX
+        norm_val       = effective_v_score         / VAL_SCORE_MAX  * FUND_SCORE_MAX
+        norm_sentiment = effective_sentiment_score / SENT_SCORE_MAX * FUND_SCORE_MAX
         base_overall_score = (
-            norm_tech * engine_weights["technical"]
+            norm_tech      * engine_weights["technical"]
             + effective_f_score * engine_weights["fundamental"]
-            + norm_val * engine_weights["valuation"]
-            + effective_sentiment_score * engine_weights["sentiment"]
+            + norm_val      * engine_weights["valuation"]
+            + norm_sentiment * engine_weights["sentiment"]
         )
         base_overall_score -= min(len(risk_flags), 4) * 0.35
         overall_score, base_verdict, type_settings, type_logic_notes = apply_stock_type_framework(
@@ -467,7 +647,7 @@ class StockAnalyst:
             tech_score=tech_score,
             f_score=f_score,
             v_score=v_score,
-            sentiment_score=0,
+            sentiment_score=sentiment["score"],
             v_fund=v_fund,
             v_val=v_val,
             regime=regime,
@@ -522,10 +702,16 @@ class StockAnalyst:
             "Volatility_1Y": volatility_1y,
             "Momentum_1M_Risk_Adjusted": momentum_1m_risk_adjusted,
             "Quality_Score": quality_score,
+            "Piotroski_F_Score": piotroski_fscore,
+            "Altman_Z_Score": altman_zscore,
             "Dividend_Safety_Score": dividend_safety_score,
             "Valuation_Signal_Count": valuation_signal_count,
             "Valuation_Confidence": valuation_confidence,
             "Sentiment_Conviction": sentiment_conviction,
+            "Options_IV_Rank":  sentiment.get("iv_rank"),
+            "Options_Skew":     sentiment.get("skew"),
+            "Options_PC_Ratio": sentiment.get("pc_ratio"),
+            "Options_IV_Term":  sentiment.get("iv_term"),
             "Risk_Flags": " | ".join(risk_flags),
             "PE_Ratio": pe,
             "Forward_PE": forward_pe,
@@ -571,6 +757,12 @@ class StockAnalyst:
             "Target_Mean_Price": sentiment["target_mean_price"],
             "Recommendation_Key": sentiment["recommendation_key"],
             "Analyst_Opinions": sentiment["analyst_opinions"],
+            "EPS_Revision_4W": eps_rev_4w,
+            "EPS_Revision_12W": eps_rev_12w,
+            "EPS_Revision_Breadth_4W": eps_breadth_4w,
+            "Short_Interest": short_interest,
+            "Short_Ratio": short_ratio,
+            "Short_Float_Pct": short_float_pct,
             "Sentiment_Headline_Count": sentiment["headline_count"],
             "Sentiment_Summary": sentiment["summary"],
             "Event_Study_Count": event_study.get("count"),

@@ -62,7 +62,7 @@ def render_options_view(model_settings, active_preset_name, active_assumption_fi
     else:
         st.info("The controls are intentionally range-limited so the model remains stable even when you tune it.")
 
-    if st.button("Restore Default Assumptions", width="small"):
+    if st.button("Restore Default Assumptions", width="content"):
         st.session_state.model_settings = settings.get_default_model_settings()
         st.session_state.model_preset_name = settings.get_default_preset_name()
         st.session_state.options_feedback = {

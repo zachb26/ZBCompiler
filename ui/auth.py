@@ -33,7 +33,7 @@ def render_password_gate(session_key, secret_name, heading, description, button_
         if entered_password == expected_password:
             st.session_state[session_key] = True
             st.session_state.pop(error_key, None)
-            st.session_state[password_key] = ""
+            st.session_state.pop(password_key, None)
             st.rerun()
         else:
             st.session_state[error_key] = "Incorrect password."

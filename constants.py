@@ -42,6 +42,7 @@ PORTFOLIO_MANAGER_PASSWORD_SECRET = "PORTFOLIO_MANAGER_PASSWORD"
 TECH_SCORE_MAX = 14.0
 FUND_SCORE_MAX = 7.0
 VAL_SCORE_MAX = 8.0
+SENT_SCORE_MAX = 4.0
 
 # ---------------------------------------------------------------------------
 # Fetch / cache
@@ -61,6 +62,8 @@ FETCH_CACHE = {
     "treasury_yield": {},
     "calendar": {},
     "macro_indicators": {},
+    "earnings_trend": {},
+    "options_data":   {},
 }
 FETCH_CACHE_LOCK = threading.RLock()
 FETCH_CACHE_MAX_ENTRIES = {
@@ -76,6 +79,8 @@ FETCH_CACHE_MAX_ENTRIES = {
     "treasury_yield":      5,
     "calendar":          300,
     "macro_indicators":    1,
+    "earnings_trend":    300,
+    "options_data":      200,
 }
 
 # ---------------------------------------------------------------------------
@@ -339,7 +344,7 @@ ANALYSIS_COLUMNS = {
     "Score_Tech": "INTEGER",
     "Score_Fund": "INTEGER",
     "Score_Val": "INTEGER",
-    "Score_Sentiment": "INTEGER",
+    "Score_Sentiment": "REAL",
     "Sector": "TEXT",
     "Industry": "TEXT",
     "Stock_Type": "TEXT",
@@ -368,6 +373,8 @@ ANALYSIS_COLUMNS = {
     "Volatility_1Y": "REAL",
     "Momentum_1M_Risk_Adjusted": "REAL",
     "Quality_Score": "REAL",
+    "Piotroski_F_Score": "INTEGER",
+    "Altman_Z_Score": "REAL",
     "Dividend_Safety_Score": "REAL",
     "Valuation_Signal_Count": "INTEGER",
     "Valuation_Confidence": "REAL",
@@ -445,6 +452,16 @@ ANALYSIS_COLUMNS = {
     "DCF_Bear_Assumptions": "TEXT",
     "DCF_Scenario_Probs": "TEXT",
     "DCF_Blended_Fair_Value": "REAL",
+    "EPS_Revision_4W":          "REAL",
+    "EPS_Revision_12W":         "REAL",
+    "EPS_Revision_Breadth_4W":  "REAL",
+    "Short_Interest":           "REAL",
+    "Short_Ratio":              "REAL",
+    "Short_Float_Pct":          "REAL",
+    "Options_IV_Rank":          "REAL",
+    "Options_Skew":             "REAL",
+    "Options_PC_Ratio":         "REAL",
+    "Options_IV_Term":          "REAL",
     "Data_Completeness": "REAL",
     "Missing_Metric_Count": "INTEGER",
     "Data_Quality": "TEXT",
@@ -577,6 +594,39 @@ PRESET_DESCRIPTIONS = {
 }
 
 # ---------------------------------------------------------------------------
+# Regime-conditional engine-weight modifiers
+# ---------------------------------------------------------------------------
+# Three coarse regimes × four engines = 12 multipliers.
+# These stack multiplicatively with the stock-type modifiers already applied
+# in get_type_adjusted_engine_weights.
+#
+#   Bullish Trend  — trending / low-vol: momentum leads; valuation matters less
+#   Early Recovery — Transition or Range-bound: value and quality shine
+#   Risk-off       — Bearish Trend: defensives dominate; sentiment unreliable
+#
+# "Unclear" falls through to neutral (all 1.0).
+REGIME_ENGINE_WEIGHTS: dict[str, dict[str, float]] = {
+    "Bullish Trend": {
+        "technical":   1.15,   # momentum reliable in trending markets
+        "fundamental": 0.95,   # fundamentals matter less when trend is clear
+        "valuation":   0.88,   # don't fight expensive growth in a bull run
+        "sentiment":   1.10,   # analyst and news follow-through is meaningful
+    },
+    "Early Recovery": {        # mapped from "Transition" and "Range-bound"
+        "technical":   0.88,   # price signals noisy / whippy during turn
+        "fundamental": 1.15,   # quality and earnings durability lead
+        "valuation":   1.18,   # value unlocks before trend clears
+        "sentiment":   0.92,   # analyst coverage lags the turn
+    },
+    "Risk-off": {              # mapped from "Bearish Trend"
+        "technical":   0.85,   # trend is down; technicals confirm but don't add much
+        "fundamental": 1.20,   # defensive quality is the primary screen
+        "valuation":   1.08,   # cheap-enough still matters in risk-off
+        "sentiment":   0.82,   # sentiment deteriorates fast; down-weight noise
+    },
+}
+
+# ---------------------------------------------------------------------------
 # UI help text dictionaries
 # ---------------------------------------------------------------------------
 ANALYSIS_HELP_TEXT = {
@@ -599,6 +649,8 @@ ANALYSIS_HELP_TEXT = {
     "Regime": "The current market backdrop the model sees in the stock: bullish trend, bearish trend, transition, or range-bound.",
     "Trend Strength": "A blended measure of long-term price trend quality using moving averages and one-year momentum.",
     "Quality Score": "A business-quality read based on returns, margins, balance-sheet strength, and growth consistency.",
+    "Piotroski F-Score": "Nine binary tests on profitability, balance-sheet quality, and operating efficiency. Scores 0–9; 7+ is strong, 3 or below is weak.",
+    "Altman Z-Score": "A distress predictor built from five balance-sheet ratios. Above 2.99 is safe; below 1.81 signals financial distress risk.",
     "Dividend Safety": "A rough check on whether the dividend looks sustainable based on payout ratio, profitability, liquidity, and debt.",
     "Valuation Confidence": "How much valuation evidence the model has available. More usable valuation inputs means higher confidence.",
     "Sentiment Conviction": "How much analyst and headline context was available for the company, not whether that context was positive or negative.",
@@ -688,6 +740,9 @@ ANALYSIS_HELP_TEXT = {
     "Position Changes": "How many times the strategy changed exposure, including entries, adds, reductions, and exits.",
     "Closed Trades": "How many completed round-trip trades were finished in the backtest window.",
     "Avg Trade Return": "The average return across the strategy's closed trades.",
+    "Factor IC": "The Information Coefficient (IC) is the Spearman rank correlation between the Tech Score and the stock's actual forward return. A value near +1 means the score was a perfect predictor, 0 means no signal, and negative means it was contrarian. In practice, ICs above 0.05 are considered meaningful.",
+    "Hit Rate IC": "The share of non-zero Tech Score signals where the direction (positive score → positive forward return, negative score → negative forward return) was correct. A 50% hit rate is random; above 55% suggests real directional signal.",
+    "Rolling IC": "How the Information Coefficient has changed over time, computed on a trailing 252-trading-day window stepped monthly. Declining rolling IC means the Tech Score's predictive power is eroding — a key signal that the model needs recalibration.",
     "Records": "How many saved analyses are currently shown in the filtered library view.",
     "Buy / Strong Buy": "How many names in the current library view have a bullish final verdict.",
     "Fresh in 24h": "How many saved rows were refreshed within the last 24 hours.",
@@ -695,6 +750,9 @@ ANALYSIS_HELP_TEXT = {
     "Avg Composite Score": "The average blended model score across the names in that group.",
     "Avg Target Upside": "The average analyst target upside across the names in that group.",
     "Avg DCF Upside": "The average DCF upside across the names in that group.",
+    "Short Interest": "The number of shares currently sold short. Source: yfinance (~2-week lag). High short interest means the market has a significant bearish position — which can be a risk flag on expensive names or a squeeze setup on beaten-down ones.",
+    "Short Ratio": "Days-to-cover: shares short divided by average daily volume. A ratio above 5 means it would take more than a week of average volume for shorts to cover — raising squeeze risk if the stock rallies.",
+    "Short % of Float": "Shares short as a percentage of the public float. Above 10% is elevated; above 20% is high and frequently associated with squeeze risk or concentrated bearish conviction.",
 }
 OPTIONS_HELP_TEXT = {
     "load_preset": "Load a bundled assumption profile. Balanced is neutral, Conservative is stricter, and Aggressive is faster and more risk-tolerant.",
