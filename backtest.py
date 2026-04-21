@@ -7,6 +7,7 @@ Functions:
     derive_backtest_positions
     summarize_backtest_trades
     compute_technical_backtest
+    compute_composite_quarterly_backtest
 """
 
 from __future__ import annotations
@@ -15,8 +16,10 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+import yfinance as yf
 
-from fetch import calculate_rsi, has_numeric_value, safe_divide
+import constants as const
+from fetch import calculate_rsi, has_numeric_value, safe_divide, score_relative_multiple
 from analytics_scoring import score_to_signal
 from settings import get_model_settings
 from utils_fmt import safe_num
@@ -501,6 +504,16 @@ def compute_technical_backtest(
     analysis["Tech Score"] = tech_score
     analysis["Signal"] = analysis["Tech Score"].apply(score_to_signal)
     analysis["Position"] = derive_backtest_positions(analysis, active_settings, stock_profile=stock_profile)
+    min_position_change = active_settings.get("backtest_min_position_change", 0.0)
+    if min_position_change > 0:
+        positions = analysis["Position"].copy()
+        prev = positions.iloc[0]
+        for i in range(1, len(positions)):
+            if abs(positions.iloc[i] - prev) < min_position_change:
+                positions.iloc[i] = prev
+            else:
+                prev = positions.iloc[i]
+        analysis["Position"] = positions
     analysis["Benchmark Return"] = analysis["Close"].pct_change().fillna(0.0)
     trade_points = analysis["Position"].diff().fillna(analysis["Position"])
     trading_cost_rate = active_settings.get("backtest_transaction_cost_bps", 0.0) / 10000
@@ -565,6 +578,7 @@ def compute_technical_backtest(
         "Trading Costs": analysis["Trading Cost"].sum(),
         "Average Exposure": average_exposure,
         "Upside Capture": upside_capture,
+        "Annual Turnover": trade_points.abs().sum() / max(len(analysis) / trading_days, 1),
         "Position Changes": len(trade_log),
         "Closed Trades": trade_summary["Closed Trades"],
         "Win Rate": trade_summary["Win Rate"],
@@ -577,4 +591,388 @@ def compute_technical_backtest(
         "closed_trades": closed_trades_df,
         "metrics": metrics,
         "stock_profile": stock_profile or {},
+    }
+
+
+# ---------------------------------------------------------------------------
+# Composite model walk-forward validation
+# ---------------------------------------------------------------------------
+
+def compute_composite_quarterly_backtest(
+    ticker: str,
+    hist: pd.DataFrame,
+    model_settings: dict[str, Any] | None = None,
+    sector: str = "Unknown",
+) -> dict | None:
+    """Walk-forward composite model validation using quarterly fundamentals.
+
+    For each calendar quarter where yfinance provides fundamental data, rebuilds
+    F-score, V-score, and Tech Score, assembles the composite verdict, then tracks
+    forward 1M/3M/12M price returns. Returns a hit-rate table grouped by verdict
+    bucket, so you can see whether STRONG BUY != HOLD in actual outcomes.
+
+    Returns None when fewer than 4 quarters of aligned fundamental data are
+    available, or when price history is too short.
+
+    Caveats (shown in UI):
+    - Uses yfinance quarterly filings (~8 quarters depth typical)
+    - Static sector benchmarks for valuation (no live peer reconstruction)
+    - EV/EBITDA and PEG excluded from historical V-score
+    - Shares outstanding: current figure used (not historically adjusted)
+    - 45-day filing lag approximated
+    - No guardrails, hold buffer, or confidence guard applied
+    - Sentiment engine excluded (score=0, same as live model)
+    """
+    active_settings = get_model_settings() if model_settings is None else model_settings
+
+    if hist is None or hist.empty or "Close" not in hist.columns:
+        return None
+
+    close = hist["Close"].dropna().copy()
+    if len(close) < 250:
+        return None
+
+    # Ensure timezone-naive DatetimeIndex for consistent slicing
+    if close.index.tzinfo is not None:
+        close.index = close.index.tz_localize(None)
+
+    # --- Vectorized tech score (same computation as compute_technical_backtest) ---
+    analysis = pd.DataFrame(index=close.index)
+    analysis["Close"] = close
+    analysis["RSI"] = calculate_rsi(close)
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    analysis["MACD"] = ema12 - ema26
+    analysis["MACD_Signal_Line"] = analysis["MACD"].ewm(span=9, adjust=False).mean()
+    analysis["SMA_50"] = close.rolling(50).mean()
+    analysis["SMA_200"] = close.rolling(200).mean()
+    analysis["Momentum_1M"] = close / close.shift(22) - 1
+    analysis["Momentum_1Y"] = close / close.shift(252) - 1
+    analysis["Volatility_1M"] = close.pct_change().rolling(22).std() * np.sqrt(252)
+    analysis["Momentum_1M_Risk_Adjusted"] = analysis["Momentum_1M"] / (
+        analysis["Volatility_1M"] / np.sqrt(12)
+    )
+    analysis["Rolling_High_252"] = close.rolling(252, min_periods=20).max()
+    analysis["Rolling_Low_252"] = close.rolling(252, min_periods=20).min()
+    analysis["Range_Position_252"] = (close - analysis["Rolling_Low_252"]) / (
+        analysis["Rolling_High_252"] - analysis["Rolling_Low_252"]
+    )
+    analysis["Trend_Strength"] = (
+        ((close / analysis["SMA_200"]) - 1).clip(-0.25, 0.25).fillna(0) * 100
+        + ((analysis["SMA_50"] / analysis["SMA_200"]) - 1).clip(-0.25, 0.25).fillna(0) * 120
+        + analysis["Momentum_1Y"].clip(-0.3125, 0.3125).fillna(0) * 80
+    )
+    trend_tolerance = active_settings["tech_trend_tolerance"]
+    extension_limit = active_settings["tech_extension_limit"]
+    tech_score_series = pd.Series(0, index=analysis.index, dtype=float)
+    tech_score_series += np.where(
+        analysis["SMA_200"].notna(),
+        np.where(analysis["Close"] >= analysis["SMA_200"] * (1 + trend_tolerance), 1,
+                 np.where(analysis["Close"] <= analysis["SMA_200"] * (1 - trend_tolerance), -1, 0)),
+        0,
+    )
+    tech_score_series += np.where(
+        analysis["SMA_50"].notna() & analysis["SMA_200"].notna(),
+        np.where(analysis["SMA_50"] >= analysis["SMA_200"] * (1 + trend_tolerance / 2), 1,
+                 np.where(analysis["SMA_50"] <= analysis["SMA_200"] * (1 - trend_tolerance / 2), -1, 0)),
+        0,
+    )
+    tech_score_series += np.where(
+        analysis["SMA_50"].notna(),
+        np.where(analysis["Close"] >= analysis["SMA_50"] * (1 + trend_tolerance / 2), 1,
+                 np.where(analysis["Close"] <= analysis["SMA_50"] * (1 - trend_tolerance / 2), -1, 0)),
+        0,
+    )
+    tech_score_series += np.where(
+        analysis["RSI"] < active_settings["tech_rsi_oversold"],
+        np.where(analysis["Close"] >= analysis["SMA_200"] * 0.95, 2, 1), 0,
+    )
+    tech_score_series += np.where(
+        analysis["RSI"] > active_settings["tech_rsi_overbought"],
+        np.where(analysis["Close"] <= analysis["SMA_50"] * 1.02, -2, -1), 0,
+    )
+    tech_score_series += np.where(
+        analysis["MACD"].notna() & analysis["MACD_Signal_Line"].notna(),
+        np.where(analysis["MACD"] > analysis["MACD_Signal_Line"], 1, -1), 0,
+    )
+    tech_score_series += np.where(analysis["MACD"] > 0, 1, np.where(analysis["MACD"] < 0, -1, 0))
+    tech_score_series += np.where(analysis["Momentum_1M"] > active_settings["tech_momentum_threshold"], 1, 0)
+    tech_score_series += np.where(analysis["Momentum_1M"] < -active_settings["tech_momentum_threshold"], -1, 0)
+    tech_score_series += np.where(analysis["Momentum_1M_Risk_Adjusted"] > 0.75, 1, 0)
+    tech_score_series += np.where(analysis["Momentum_1M_Risk_Adjusted"] < -0.75, -1, 0)
+    lt_mom_thresh = max(active_settings["tech_momentum_threshold"] * 3, 0.10)
+    tech_score_series += np.where(analysis["Momentum_1Y"] > lt_mom_thresh, 1, 0)
+    tech_score_series += np.where(analysis["Momentum_1Y"] < -lt_mom_thresh, -1, 0)
+    tech_score_series += np.where(analysis["Trend_Strength"] > 30, 1, 0)
+    tech_score_series += np.where(analysis["Trend_Strength"] < -30, -1, 0)
+    tech_score_series += np.where(
+        analysis["Range_Position_252"].ge(0.80) & analysis["Close"].ge(analysis["SMA_200"]), 1, 0,
+    )
+    tech_score_series += np.where(
+        analysis["Range_Position_252"].le(0.20) & analysis["Close"].le(analysis["SMA_200"]), -1, 0,
+    )
+    tech_score_series += np.where(
+        analysis["RSI"].shift(1).le(active_settings["tech_rsi_oversold"])
+        & analysis["RSI"].gt(active_settings["tech_rsi_oversold"])
+        & analysis["MACD"].ge(analysis["MACD_Signal_Line"]),
+        1, 0,
+    )
+    tech_score_series += np.where(
+        analysis["Close"].ge(analysis["SMA_50"] * (1 + extension_limit))
+        & analysis["RSI"].ge(active_settings["tech_rsi_overbought"] - 5),
+        -1, 0,
+    )
+    tech_score_series += np.where(
+        analysis["Close"].le(analysis["SMA_50"] * (1 - extension_limit))
+        & analysis["RSI"].le(active_settings["tech_rsi_oversold"] + 5),
+        1, 0,
+    )
+
+    # --- Fetch quarterly fundamentals ---
+    try:
+        t = yf.Ticker(ticker)
+        qf = t.quarterly_financials
+        qbs = t.quarterly_balance_sheet
+        shares_outstanding = safe_num(t.info.get("sharesOutstanding"))
+    except Exception:
+        return None
+
+    if qf is None or qf.empty or qbs is None or qbs.empty:
+        return None
+
+    def _normalize_ts(ts):
+        ts = pd.Timestamp(ts)
+        return ts.tz_localize(None) if ts.tzinfo else ts
+
+    qf_dates = {_normalize_ts(d) for d in qf.columns}
+    qbs_dates = {_normalize_ts(d) for d in qbs.columns}
+    common_dates = sorted(qf_dates & qbs_dates)
+
+    if len(common_dates) < 4:
+        return None
+
+    # Rebuild normalized column maps so we can look up by normalised key
+    qf_norm = {_normalize_ts(c): c for c in qf.columns}
+    qbs_norm = {_normalize_ts(c): c for c in qbs.columns}
+
+    bench = const.get_sector_benchmarks(sector, active_settings)
+    strong_buy_thresh = active_settings["overall_strong_buy_threshold"]
+    buy_thresh = active_settings["overall_buy_threshold"]
+    sell_thresh = active_settings["overall_sell_threshold"]
+    strong_sell_thresh = active_settings["overall_strong_sell_threshold"]
+    FILING_LAG_DAYS = 45
+
+    def _get_row(df, *names):
+        for name in names:
+            if name in df.index:
+                return df.loc[name]
+        return None
+
+    def _q_val(row, norm_date, norm_col_map):
+        if row is None:
+            return None
+        orig_col = norm_col_map.get(norm_date)
+        if orig_col is None or orig_col not in row.index:
+            return None
+        v = row[orig_col]
+        return None if pd.isna(v) else float(v)
+
+    def _ttm_sum(row, norm_col_map, dates_up_to, n=4):
+        if row is None:
+            return None
+        window = [d for d in dates_up_to if norm_col_map.get(d) in row.index][-n:]
+        vals = [float(row[norm_col_map[d]]) for d in window
+                if not pd.isna(row[norm_col_map[d]])]
+        return sum(vals) if vals else None
+
+    rev_row = _get_row(qf, "Total Revenue")
+    ni_row = _get_row(qf, "Net Income")
+    ca_row = _get_row(qbs, "Current Assets")
+    cl_row = _get_row(qbs, "Current Liabilities", "Total Current Liabilities")
+    debt_row = _get_row(qbs, "Total Debt", "Long Term Debt")
+    eq_row = _get_row(qbs, "Stockholders Equity", "Total Equity Gross Minority Interest",
+                      "Common Stock Equity")
+
+    warnings_list: list[str] = []
+    if not has_numeric_value(shares_outstanding) or shares_outstanding <= 0:
+        warnings_list.append("Shares outstanding unavailable — P/E and P/S excluded from V-score.")
+    if rev_row is None:
+        warnings_list.append("Revenue data unavailable — growth and P/S excluded.")
+    if ni_row is None:
+        warnings_list.append("Net income data unavailable — profitability metrics excluded.")
+
+    all_qf_dates_sorted = sorted(qf_dates)
+    observations = []
+
+    for q_date in common_dates:
+        effective_date = q_date + pd.Timedelta(days=FILING_LAG_DAYS)
+
+        # Price at or just before effective_date
+        prior_prices = close.loc[:effective_date]
+        if prior_prices.empty:
+            continue
+        price_at_date = float(prior_prices.iloc[-1])
+
+        # Tech score at effective_date (last valid value on or before that date)
+        prior_tech = tech_score_series.loc[:effective_date]
+        if prior_tech.empty or pd.isna(prior_tech.iloc[-1]):
+            continue
+        tech_score_at = float(prior_tech.iloc[-1])
+
+        # --- F-score ---
+        dates_up_to_q = [d for d in all_qf_dates_sorted if d <= q_date]
+        dates_up_to_q_minus4 = dates_up_to_q[:-4] if len(dates_up_to_q) >= 8 else []
+
+        rev_ttm = _ttm_sum(rev_row, qf_norm, dates_up_to_q)
+        ni_ttm = _ttm_sum(ni_row, qf_norm, dates_up_to_q)
+        rev_ttm_prior = _ttm_sum(rev_row, qf_norm, dates_up_to_q_minus4) if dates_up_to_q_minus4 else None
+        ni_ttm_prior = _ttm_sum(ni_row, qf_norm, dates_up_to_q_minus4) if dates_up_to_q_minus4 else None
+
+        ca = _q_val(ca_row, q_date, qbs_norm)
+        cl = _q_val(cl_row, q_date, qbs_norm)
+        debt = _q_val(debt_row, q_date, qbs_norm)
+        equity = _q_val(eq_row, q_date, qbs_norm)
+
+        margins = safe_divide(ni_ttm, rev_ttm) if (ni_ttm is not None and rev_ttm) else None
+        roe = safe_divide(ni_ttm, equity) if (ni_ttm is not None and equity) else None
+        debt_eq = safe_divide(debt, equity) if (debt is not None and equity) else None
+        current_ratio = safe_divide(ca, cl) if (ca is not None and cl) else None
+        revenue_growth = (
+            safe_divide(rev_ttm - rev_ttm_prior, abs(rev_ttm_prior))
+            if (rev_ttm is not None and rev_ttm_prior) else None
+        )
+        earnings_growth = (
+            safe_divide(ni_ttm - ni_ttm_prior, abs(ni_ttm_prior))
+            if (ni_ttm is not None and ni_ttm_prior) else None
+        )
+
+        f_score = 0
+        if has_numeric_value(roe):
+            if roe >= active_settings["fund_roe_threshold"]:
+                f_score += 1
+            elif roe < 0 or roe < active_settings["fund_roe_threshold"] * 0.5:
+                f_score -= 1
+        if has_numeric_value(margins):
+            if margins >= active_settings["fund_profit_margin_threshold"]:
+                f_score += 1
+            elif margins < 0 or margins < active_settings["fund_profit_margin_threshold"] * 0.5:
+                f_score -= 1
+        if has_numeric_value(debt_eq):
+            if 0 <= debt_eq < active_settings["fund_debt_good_threshold"]:
+                f_score += 1
+            elif debt_eq > active_settings["fund_debt_bad_threshold"]:
+                f_score -= 1
+        if has_numeric_value(revenue_growth):
+            if revenue_growth >= active_settings["fund_revenue_growth_threshold"]:
+                f_score += 1
+            elif revenue_growth < 0:
+                f_score -= 1
+        if has_numeric_value(earnings_growth):
+            if earnings_growth >= active_settings["fund_revenue_growth_threshold"]:
+                f_score += 1
+            elif earnings_growth < 0:
+                f_score -= 1
+        if has_numeric_value(current_ratio):
+            if current_ratio >= active_settings["fund_current_ratio_good"]:
+                f_score += 1
+            elif current_ratio < active_settings["fund_current_ratio_bad"]:
+                f_score -= 1
+
+        # --- V-score (P/E, P/S, P/B vs static sector benchmarks) ---
+        v_score = 0
+        if has_numeric_value(shares_outstanding) and shares_outstanding > 0:
+            market_cap_hist = price_at_date * shares_outstanding
+            pe_hist = safe_divide(market_cap_hist, ni_ttm) if has_numeric_value(ni_ttm) and ni_ttm > 0 else None
+            ps_hist = safe_divide(market_cap_hist, rev_ttm) if has_numeric_value(rev_ttm) and rev_ttm > 0 else None
+            bvps = safe_divide(equity, shares_outstanding) if has_numeric_value(equity) and equity > 0 else None
+            pb_hist = safe_divide(price_at_date, bvps) if has_numeric_value(bvps) and bvps > 0 else None
+            for metric_val, bench_val in [
+                (pe_hist, bench["PE"]),
+                (ps_hist, bench["PS"]),
+                (pb_hist, bench["PB"]),
+            ]:
+                v_score += score_relative_multiple(metric_val, bench_val)
+
+        # --- Composite score (matches analyst.py normalization) ---
+        norm_tech = tech_score_at / const.TECH_SCORE_MAX * const.FUND_SCORE_MAX
+        norm_val = v_score / const.VAL_SCORE_MAX * const.FUND_SCORE_MAX
+        composite = (
+            norm_tech * active_settings["weight_technical"]
+            + f_score * active_settings["weight_fundamental"]
+            + norm_val * active_settings["weight_valuation"]
+        )
+
+        # --- Verdict (raw threshold, no guardrails) ---
+        if composite >= strong_buy_thresh:
+            verdict = "STRONG BUY"
+        elif composite >= buy_thresh:
+            verdict = "BUY"
+        elif composite <= strong_sell_thresh:
+            verdict = "STRONG SELL"
+        elif composite <= sell_thresh:
+            verdict = "SELL"
+        else:
+            verdict = "HOLD"
+
+        # --- Forward returns from effective_date ---
+        fwd_1m = fwd_3m = fwd_12m = None
+        future_prices = close.loc[effective_date:]
+        if not future_prices.empty:
+            if len(future_prices) >= 23:
+                fwd_1m = float(future_prices.iloc[22] / price_at_date - 1)
+            if len(future_prices) >= 64:
+                fwd_3m = float(future_prices.iloc[63] / price_at_date - 1)
+            if len(future_prices) >= 253:
+                fwd_12m = float(future_prices.iloc[252] / price_at_date - 1)
+
+        observations.append({
+            "Date": effective_date.date(),
+            "Verdict": verdict,
+            "Tech Score": round(tech_score_at, 1),
+            "F-Score": f_score,
+            "V-Score": v_score,
+            "Composite": round(composite, 2),
+            "Fwd 1M": fwd_1m,
+            "Fwd 3M": fwd_3m,
+            "Fwd 12M": fwd_12m,
+        })
+
+    if len(observations) < 2:
+        return None
+
+    obs_df = pd.DataFrame(observations)
+
+    # --- Verdict bucket table ---
+    verdict_order = ["STRONG BUY", "BUY", "HOLD", "SELL", "STRONG SELL"]
+    rows = []
+    for v in verdict_order:
+        subset = obs_df[obs_df["Verdict"] == v]
+        if subset.empty:
+            continue
+        fwd1 = subset["Fwd 1M"].dropna()
+        fwd3 = subset["Fwd 3M"].dropna()
+        fwd12 = subset["Fwd 12M"].dropna()
+        rows.append({
+            "Verdict": v,
+            "N": len(subset),
+            "Avg 1M": fwd1.mean() if not fwd1.empty else None,
+            "Avg 3M": fwd3.mean() if not fwd3.empty else None,
+            "Avg 12M": fwd12.mean() if not fwd12.empty else None,
+            "Hit% 3M": (fwd3 > 0).mean() if not fwd3.empty else None,
+            "Hit% 12M": (fwd12 > 0).mean() if not fwd12.empty else None,
+        })
+
+    bucket_df = pd.DataFrame(rows) if rows else pd.DataFrame()
+
+    warnings_list.insert(
+        0,
+        "Look-ahead bias: shares outstanding is the current figure; quarterly filings may contain "
+        "restatements; sector benchmarks are static, not period-specific.",
+    )
+
+    return {
+        "observations": obs_df,
+        "bucket_table": bucket_df,
+        "n_quarters": len(obs_df),
+        "warnings": warnings_list,
     }

@@ -336,6 +336,14 @@ def render_options_view(model_settings, active_preset_name, active_assumption_fi
             1.0,
             help=const.OPTIONS_HELP_TEXT["backtest_transaction_cost_bps"],
         )
+        backtest_min_position_change = st.slider(
+            "Min Position Change (rebalance threshold)",
+            0.0,
+            0.50,
+            float(model_settings["backtest_min_position_change"]),
+            0.05,
+            help=const.OPTIONS_HELP_TEXT["backtest_min_position_change"],
+        )
 
         save_options = st.form_submit_button("Save Assumptions", type="primary", width="stretch")
 
@@ -375,6 +383,7 @@ def render_options_view(model_settings, active_preset_name, active_assumption_fi
             "decision_min_confidence": decision_min_confidence,
             "backtest_cooldown_days": backtest_cooldown_days,
             "backtest_transaction_cost_bps": backtest_transaction_cost_bps,
+            "backtest_min_position_change": backtest_min_position_change,
             "trading_days_per_year": trading_days_per_year,
         }
         normalized_settings, notes = settings.normalize_model_settings(updated_settings)

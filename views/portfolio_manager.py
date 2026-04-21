@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
+import datetime
+
 import numpy as np
 import pandas as pd
 import streamlit as st
 
 import constants as const
+import fetch
 import utils_fmt as fmt
 import utils_ui as ui
 import analysis_prep as prep
@@ -140,6 +143,61 @@ def build_trade_flags_dataframe(db, library_df, selected_portfolio, view_all_por
     if not flag_rows:
         return pd.DataFrame()
     return pd.DataFrame(flag_rows).sort_values(["Portfolio", "Ticker"]).reset_index(drop=True)
+
+
+def _render_catalyst_calendar(tickers: list[str]) -> None:
+    """Display upcoming earnings and ex-dividend dates for *tickers*."""
+    st.markdown("##### Catalyst Calendar")
+    lookforward = st.number_input(
+        "Look-forward window (days)",
+        min_value=7,
+        max_value=90,
+        value=const.CATALYST_LOOKFORWARD_DAYS,
+        step=1,
+        key="pm_catalyst_lookforward",
+        help="Scan for earnings and ex-dividend events within this many calendar days.",
+    )
+    today = datetime.date.today()
+    cutoff = today + datetime.timedelta(days=int(lookforward))
+
+    event_rows = []
+    with st.spinner("Fetching catalyst dates..."):
+        for ticker in tickers:
+            cal = fetch.fetch_calendar_events(ticker)
+            for event_label, date_val in (
+                ("Earnings", cal.get("earnings_date")),
+                ("Ex-Dividend", cal.get("ex_div_date")),
+            ):
+                if date_val is None:
+                    continue
+                if isinstance(date_val, datetime.datetime):
+                    date_val = date_val.date()
+                if today <= date_val <= cutoff:
+                    days_away = (date_val - today).days
+                    note = ""
+                    if event_label == "Earnings" and days_away <= const.EARNINGS_CAUTION_DAYS:
+                        note = "Size-Down Zone"
+                    event_rows.append({
+                        "Ticker": ticker,
+                        "Event": event_label,
+                        "Date": date_val.strftime("%Y-%m-%d"),
+                        "Days Away": days_away,
+                        "Note": note,
+                    })
+
+    catalyst_count = len({r["Ticker"] for r in event_rows})
+    st.metric("Positions with Near-Term Catalysts", catalyst_count)
+
+    if not event_rows:
+        st.info(f"No catalysts found in the next {int(lookforward)} days.")
+        return
+
+    catalyst_df = (
+        pd.DataFrame(event_rows)
+        .sort_values("Days Away")
+        .reset_index(drop=True)
+    )
+    st.dataframe(catalyst_df, width="stretch")
 
 
 def render_portfolio_manager_view(db, portfolio_bot, active_preset_name, active_assumption_fingerprint):
@@ -357,6 +415,8 @@ def render_portfolio_manager_view(db, portfolio_bot, active_preset_name, active_
             st.markdown("##### Position-Level P&L Snapshot")
             st.caption("This uses the selected lookback window's total return as a clean position-level performance proxy.")
             st.dataframe(pnl_table, width="stretch")
+
+        _render_catalyst_calendar(recommendations["Ticker"].tolist() if not recommendations.empty else selected_tickers)
 
         with st.expander("Export for Claude Code Skills"):
             st.caption(

@@ -818,6 +818,14 @@ class PortfolioAnalyst:
         sortino = safe_divide(annual_return - risk_free_rate, downside_volatility)
         treynor = safe_divide(annual_return - risk_free_rate, beta)
 
+        cumret = (1 + portfolio_returns).cumprod()
+        rolling_max = cumret.cummax()
+        var_threshold = np.percentile(portfolio_returns, 5)
+        cvar_95 = portfolio_returns[portfolio_returns <= var_threshold].mean() * trading_days
+        drawdowns_pct = (cumret / rolling_max - 1) * 100
+        ulcer_index = np.sqrt((drawdowns_pct ** 2).mean())
+        max_drawdown = (cumret / rolling_max - 1).min()
+
         return {
             "Return": annual_return,
             "Volatility": volatility,
@@ -826,6 +834,9 @@ class PortfolioAnalyst:
             "Sharpe": sharpe,
             "Sortino": sortino,
             "Treynor": treynor,
+            "CVaR95": cvar_95,
+            "UlcerIndex": ulcer_index,
+            "MaxDrawdown": max_drawdown,
         }
 
     def simulate_portfolios(self, asset_returns, benchmark_returns, risk_free_rate, max_weight, simulations, trading_days):

@@ -10,13 +10,116 @@ import utils_fmt as fmt
 import utils_ui as ui
 
 
+def _render_composite_validation(backtest_config: dict, model_settings: dict) -> None:
+    """Expander with walk-forward composite model verdict hit-rate table."""
+    ticker = backtest_config.get("ticker", "")
+    if not ticker:
+        return
+
+    with st.expander("Composite Model Validation — Look-Ahead Warning (Experimental)", expanded=False):
+        st.error(
+            "**Look-ahead contamination — results are not true out-of-sample validation.** "
+            "Three live inputs are mixed with historical prices: "
+            "(1) shares outstanding is the *current* figure, not what it was at each quarter; "
+            "(2) yfinance quarterly filings may include post-hoc restatements not visible at original filing dates; "
+            "(3) sector valuation benchmarks are static constants, not contemporaneous peer multiples. "
+            "For reliable forward validation, use the **Technical Signal Backtest** above (price-derived signals only)."
+        )
+        st.caption(
+            "Reconstructs composite verdicts at each quarter using historical yfinance fundamentals "
+            "(~8 quarters depth), then tracks 1M/3M/12M forward price returns by verdict bucket. "
+            "EV/EBITDA and PEG excluded (not available historically). Filing lag approximated as 45 days. "
+            "No guardrails, hold buffer, or confidence guard applied. Sentiment score = 0 (same as live model)."
+        )
+
+        run_col, _ = st.columns([1, 3])
+        with run_col:
+            run_composite = st.button(
+                f"Run composite validation for {ticker}",
+                key="run_composite_validation",
+                type="primary",
+            )
+
+        if run_composite:
+            st.session_state.pop("composite_validation_result", None)
+            st.session_state.pop("composite_validation_ticker", None)
+            with st.spinner(f"Rebuilding quarterly composite verdicts for {ticker}..."):
+                hist, _ = fetch.fetch_ticker_history_with_retry(ticker, "5y")
+                info, _ = fetch.fetch_ticker_info_with_retry(ticker)
+                sector = (info or {}).get("sector", "Unknown")
+                result = backtest.compute_composite_quarterly_backtest(
+                    ticker=ticker,
+                    hist=hist,
+                    model_settings=model_settings,
+                    sector=sector,
+                )
+            if result is None:
+                st.warning(
+                    "Not enough quarterly fundamental data to run composite validation. "
+                    "This requires at least 4 quarters of aligned financials from yfinance."
+                )
+            else:
+                st.session_state["composite_validation_result"] = result
+                st.session_state["composite_validation_ticker"] = ticker
+
+        cached_ticker = st.session_state.get("composite_validation_ticker")
+        result = st.session_state.get("composite_validation_result")
+
+        if result and cached_ticker == ticker:
+            if result["warnings"]:
+                for w in result["warnings"]:
+                    st.caption(f"Data note: {w}")
+
+            bucket_df = result["bucket_table"]
+            obs_df = result["observations"]
+            n_quarters = result["n_quarters"]
+
+            st.caption(
+                f"Observations: {n_quarters} quarters | "
+                f"Verdicts with data: {', '.join(bucket_df['Verdict'].tolist()) if not bucket_df.empty else 'none'}"
+            )
+
+            if not bucket_df.empty:
+                st.subheader("Verdict Hit-Rate Table")
+                display_df = bucket_df.copy()
+                for col in ["Avg 1M", "Avg 3M", "Avg 12M"]:
+                    display_df[col] = display_df[col].map(
+                        lambda v: fmt.format_percent(v) if v is not None else "—"
+                    )
+                for col in ["Hit% 3M", "Hit% 12M"]:
+                    display_df[col] = display_df[col].map(
+                        lambda v: f"{v:.0%}" if v is not None else "—"
+                    )
+                st.dataframe(display_df, width="stretch", hide_index=True)
+
+                st.caption(
+                    "Avg returns are simple price returns from the effective filing date. "
+                    "Hit% = share of observations with a positive return over that window. "
+                    "Small N values mean individual outcomes dominate — interpret cautiously."
+                )
+
+            st.subheader("Quarterly Observations")
+            obs_display = obs_df.copy()
+            for col in ["Fwd 1M", "Fwd 3M", "Fwd 12M"]:
+                obs_display[col] = obs_display[col].map(
+                    lambda v: fmt.format_percent(v) if v is not None else "—"
+                )
+            st.dataframe(obs_display, width="stretch", hide_index=True)
+            st.warning(
+                "Reminder: forward returns above reflect true historical price outcomes, but the "
+                "verdicts that generated them were scored with live data (current shares outstanding, "
+                "potentially-restated financials, static sector benchmarks). Do not use these hit-rates "
+                "as evidence that the composite model would have performed this way in real time."
+            )
+
+
 def render_backtest_view(db, model_settings, active_preset_name, active_assumption_fingerprint):
     st.subheader("Technical Signal Backtest")
     st.warning(
         "**Technical engine only.** This replay uses the Tech Score (price trend, SMA, RSI, MACD, momentum) "
         "to generate positions. It does **not** reconstruct historical fundamentals, valuation multiples, or "
-        "news sentiment. The composite model you see on the Research tab has never been backtested. "
-        "Do not use this chart to validate the full model's Buy/Sell verdicts."
+        "news sentiment. For a quarterly walk-forward validation of the full composite model, expand "
+        "**Composite Model Validation** below after running the backtest."
     )
     st.caption(
         "Replay uses stock-type-aware core sizing, trailing-stop behaviour, and deeper-breakdown "
@@ -169,6 +272,13 @@ def render_backtest_view(db, model_settings, active_preset_name, active_assumpti
         ui.render_analysis_signal_cards(
             [
                 {
+                    "label": "Annual Turnover",
+                    "value": fmt.format_value(backtest_metrics["Annual Turnover"], "{:.2f}x"),
+                    "note": "How many times full exposure is traded per year — multiply by cost per trade to estimate total drag.",
+                    "tone": ui.tone_from_metric_threshold(backtest_metrics["Annual Turnover"], good_max=4, bad_min=10),
+                    "help": const.ANALYSIS_HELP_TEXT["Annual Turnover"],
+                },
+                {
                     "label": "Average Exposure",
                     "value": fmt.format_percent(backtest_metrics["Average Exposure"]),
                     "note": "Higher means the replay stayed invested more consistently instead of sitting in cash.",
@@ -204,7 +314,7 @@ def render_backtest_view(db, model_settings, active_preset_name, active_assumpti
                     "help": const.ANALYSIS_HELP_TEXT["Avg Trade Return"],
                 },
             ],
-            columns=5,
+            columns=6,
         )
 
         st.subheader("Equity Curve")
@@ -245,3 +355,6 @@ def render_backtest_view(db, model_settings, active_preset_name, active_assumpti
             closed_trades_display["Position Size"] = closed_trades_display["Position Size"].map(fmt.format_percent)
             closed_trades_display["Return"] = closed_trades_display["Return"].map(fmt.format_percent)
             st.dataframe(closed_trades_display, width="stretch")
+
+        st.divider()
+        _render_composite_validation(backtest_config, model_settings)

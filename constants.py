@@ -59,6 +59,8 @@ FETCH_CACHE = {
     "sec_submissions": {},
     "sec_filing_text": {},
     "treasury_yield": {},
+    "calendar": {},
+    "macro_indicators": {},
 }
 FETCH_CACHE_LOCK = threading.RLock()
 FETCH_CACHE_MAX_ENTRIES = {
@@ -72,6 +74,8 @@ FETCH_CACHE_MAX_ENTRIES = {
     "sec_submissions":    80,
     "sec_filing_text":    60,
     "treasury_yield":      5,
+    "calendar":          300,
+    "macro_indicators":    1,
 }
 
 # ---------------------------------------------------------------------------
@@ -111,6 +115,25 @@ DCF_GROWTH_FADE_YEARS = 3
 DCF_DEFAULT_RISK_FREE_RATE = 0.043
 DCF_DEFAULT_MARKET_RISK_PREMIUM = 0.055
 DCF_DEFAULT_AFTER_TAX_COST_OF_DEBT = 0.035
+
+# ---------------------------------------------------------------------------
+# Catalyst calendar
+# ---------------------------------------------------------------------------
+CATALYST_LOOKFORWARD_DAYS = 45
+EARNINGS_CAUTION_DAYS = 7
+CATALYST_CACHE_TTL = 86400
+
+# ---------------------------------------------------------------------------
+# Macro overlay
+# ---------------------------------------------------------------------------
+MACRO_CACHE_TTL = 14400
+MACRO_THRESHOLDS = {
+    "two_ten_spread": {"caution": 0.0, "ok": 0.25},
+    "hy_oas_bps":     {"caution": 500,  "ok": 350},
+    "vix":            {"caution": 30,   "ok": 20},
+    "vix_ratio":      {"caution": 1.0,  "ok": 0.9},
+    "dxy_level":      {"caution": 107,  "ok": 103},
+}
 DEFAULT_DCF_SETTINGS = {
     "projection_years": DCF_PROJECTION_YEARS,
     "terminal_growth_rate": DCF_TERMINAL_GROWTH_RATE,
@@ -469,6 +492,7 @@ DEFAULT_MODEL_SETTINGS = {
     "decision_min_confidence": 55.0,
     "backtest_cooldown_days": 8.0,
     "backtest_transaction_cost_bps": 10.0,
+    "backtest_min_position_change": 0.0,
     "trading_days_per_year": 252.0,
 }
 MODEL_PRESETS = {
@@ -657,6 +681,10 @@ ANALYSIS_HELP_TEXT = {
     "Upside Capture": "When the benchmark finished positive, this shows how much of that upside the strategy captured. Around 100% means it roughly kept pace with buy-and-hold, and above 100% means it outpaced that upside.",
     "Win Rate": "The share of closed trades that ended with a positive return.",
     "Max Drawdown": "The deepest peak-to-trough decline the strategy experienced during the backtest.",
+    "Annual Turnover": "Total exposure traded per year. 1.0 means you turn over the full portfolio once annually. Higher turnover multiplied by round-trip cost equals more drag on real returns.",
+    "CVaR95": "Conditional Value-at-Risk at 95% confidence — the expected annualized loss on the worst 5% of trading days. A deeper negative means the tail risk is heavier.",
+    "UlcerIndex": "The RMS of all drawdown depths measured from the rolling equity peak. It combines both depth and duration of drawdowns into one number — lower is better. Values under 5 are generally comfortable; above 15 means persistent and painful drawdowns.",
+    "MaxDrawdown": "The deepest peak-to-trough decline the tangent portfolio would have experienced over the lookback window. More informative than volatility alone for assessing how bad the worst run actually gets.",
     "Position Changes": "How many times the strategy changed exposure, including entries, adds, reductions, and exits.",
     "Closed Trades": "How many completed round-trip trades were finished in the backtest window.",
     "Avg Trade Return": "The average return across the strategy's closed trades.",
@@ -705,6 +733,7 @@ OPTIONS_HELP_TEXT = {
     "sentiment_downside_high": "Kept for future directional sentiment work. The current context-only sentiment view does not use this setting.",
     "backtest_cooldown_days": "Higher values force the replay to wait longer before re-entering after a position change.",
     "backtest_transaction_cost_bps": "Estimated trading cost in basis points charged whenever the backtest changes exposure.",
+    "backtest_min_position_change": "Minimum position change required to trigger a trade. Set above 0 to suppress noise trades and reduce turnover. 0.10 means a 10% exposure shift is needed to act.",
 }
 
 # ---------------------------------------------------------------------------
