@@ -1010,6 +1010,14 @@ class PortfolioAnalyst:
         sortino = safe_divide(annual_return - risk_free_rate, downside_volatility)
         treynor = safe_divide(annual_return - risk_free_rate, beta)
 
+        var_5 = np.percentile(portfolio_returns, 5)
+        tail_returns = portfolio_returns[portfolio_returns <= var_5]
+        cvar_95 = -tail_returns.mean() * np.sqrt(trading_days) if len(tail_returns) > 0 else np.nan
+
+        equity_curve = (1 + portfolio_returns).cumprod()
+        drawdown_series = (equity_curve / equity_curve.cummax()) - 1
+        ulcer_index = np.sqrt((drawdown_series ** 2).mean())
+
         return {
             "Return": annual_return,
             "Volatility": volatility,
@@ -1018,6 +1026,8 @@ class PortfolioAnalyst:
             "Sharpe": sharpe,
             "Sortino": sortino,
             "Treynor": treynor,
+            "CVaR-95": cvar_95,
+            "Ulcer Index": ulcer_index,
         }
 
     def simulate_portfolios(self, asset_returns, benchmark_returns, risk_free_rate, max_weight, simulations, trading_days):

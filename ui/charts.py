@@ -156,6 +156,20 @@ def render_portfolio_result(result, config, active_preset_name, active_assumptio
                 "help": const.ANALYSIS_HELP_TEXT["Downside Vol"],
             },
             {
+                "label": "CVaR-95",
+                "value": fmt.format_percent(tangent["CVaR-95"]),
+                "note": "Expected annualized loss in the worst 5% of return days. Lower is better.",
+                "tone": ui.tone_from_metric_threshold(tangent["CVaR-95"], good_max=0.20, bad_min=0.40),
+                "help": const.ANALYSIS_HELP_TEXT["CVaR-95"],
+            },
+            {
+                "label": "Ulcer Index",
+                "value": fmt.format_percent(tangent["Ulcer Index"]),
+                "note": "Combines drawdown depth and duration. Lower means the portfolio recovers faster.",
+                "tone": ui.tone_from_metric_threshold(tangent["Ulcer Index"], good_max=0.08, bad_min=0.20),
+                "help": const.ANALYSIS_HELP_TEXT["Ulcer Index"],
+            },
+            {
                 "label": "Min-Vol Return",
                 "value": fmt.format_percent(minimum_volatility["Return"]),
                 "note": "The return estimate for the lowest-volatility portfolio the simulation found.",
@@ -170,7 +184,7 @@ def render_portfolio_result(result, config, active_preset_name, active_assumptio
                 "help": const.ANALYSIS_HELP_TEXT["Effective Names"],
             },
         ],
-        columns=4,
+        columns=6,
     )
 
     st.markdown("##### Efficient Frontier and CAL")

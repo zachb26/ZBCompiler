@@ -1184,3 +1184,127 @@ def compute_eps_revision_signal(trend_df):
             signal -= 0.25
 
     return eps_rev_4w, eps_rev_12w, breadth_4w, float(np.clip(signal, -1.0, 1.0))
+
+
+def fetch_ticker_calendar_with_retry(ticker, attempts=2):
+    """
+    Fetch the earnings and ex-dividend calendar for *ticker* via yfinance.
+
+    Returns (dict_or_None, error_string_or_None).
+    Returned dict keys (all values may be None):
+        earnings_date — next expected earnings date as datetime.date
+        ex_div_date   — next ex-dividend date as datetime.date
+    Cached for 24 hours (earnings dates rarely change intraday).
+    """
+    import datetime as _dt
+
+    cache_key = ticker.upper()
+    cached = get_cached_fetch_payload("ticker_calendar", cache_key, max_age_seconds=86400)
+    if cached is not None:
+        return cached, None
+
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            cal = getattr(yf.Ticker(ticker), "calendar", None)
+            if cal is None:
+                last_error = f"No calendar data available for {ticker}."
+                break
+
+            # yfinance may return a dict or a single-row DataFrame
+            if isinstance(cal, pd.DataFrame):
+                cal_dict = {}
+                for col in cal.columns:
+                    vals = cal[col].dropna().tolist()
+                    cal_dict[col] = vals[0] if vals else None
+                cal = cal_dict
+
+            def _to_date(val):
+                if val is None:
+                    return None
+                if isinstance(val, (list, tuple)):
+                    val = val[0] if val else None
+                if val is None:
+                    return None
+                try:
+                    ts = pd.Timestamp(val)
+                    return None if pd.isna(ts) else ts.date()
+                except Exception:
+                    return None
+
+            result = {
+                "earnings_date": _to_date(cal.get("Earnings Date")),
+                "ex_div_date":   _to_date(cal.get("Ex-Dividend Date")),
+            }
+            set_cached_fetch_payload("ticker_calendar", cache_key, result)
+            return result, None
+        except Exception as exc:
+            logger.warning("fetch_ticker_calendar attempt %d failed (%s): %s", attempt + 1, ticker, exc)
+            last_error = summarize_fetch_error(exc)
+        if attempt < attempts - 1:
+            time.sleep(0.35 * (attempt + 1))
+
+    stale = get_cached_fetch_payload("ticker_calendar", cache_key, max_age_seconds=FETCH_STALE_FALLBACK_TTL_SECONDS)
+    if stale is not None:
+        return stale, None
+    return None, last_error
+
+
+def fetch_macro_indicators(lookback_days=400):
+    """
+    Fetch macro regime indicators from FRED (VIX, 2s10s yield spread, HY OAS,
+    DXY) using the free FRED CSV endpoint.  No API key required.
+
+    Returns a dict keyed by short name:
+        {
+            "VIX":    {"value": float, "pct_rank": float, "prev": float, "error": str_or_None},
+            "2s10s":  {...},
+            "HY_OAS": {...},
+            "DXY":    {...},
+        }
+    Cached for 6 hours (FRED series update once per day).
+    """
+    import datetime as _dt
+    import io
+    from constants import MACRO_FRED_SERIES
+
+    cache_key = "daily"
+    cached = get_cached_fetch_payload("macro_indicators", cache_key, max_age_seconds=21600)
+    if cached is not None:
+        return cached
+
+    try:
+        import requests as _req
+    except ImportError:
+        err = "requests library not installed; macro data unavailable."
+        return {name: {"value": None, "pct_rank": None, "prev": None, "error": err} for name in MACRO_FRED_SERIES}
+
+    start_date = (_dt.date.today() - _dt.timedelta(days=lookback_days)).isoformat()
+    result = {}
+    for short_name, series_id in MACRO_FRED_SERIES.items():
+        try:
+            url = (
+                f"https://fred.stlouisfed.org/graph/fredgraph.csv"
+                f"?id={series_id}&observation_start={start_date}"
+            )
+            response = _req.get(url, timeout=15)
+            response.raise_for_status()
+            df = pd.read_csv(io.StringIO(response.text), na_values=".")
+            df.columns = ["DATE", "VALUE"]
+            df = df.dropna(subset=["VALUE"]).reset_index(drop=True)
+            if df.empty:
+                result[short_name] = {"value": None, "pct_rank": None, "prev": None,
+                                      "error": f"No data returned for {series_id}."}
+                continue
+            latest = float(df["VALUE"].iloc[-1])
+            prev = float(df["VALUE"].iloc[-2]) if len(df) >= 2 else None
+            year_slice = df["VALUE"].tail(252)
+            pct_rank = float((year_slice < latest).mean() * 100) if len(year_slice) >= 10 else None
+            result[short_name] = {"value": latest, "pct_rank": pct_rank, "prev": prev, "error": None}
+        except Exception as exc:
+            result[short_name] = {"value": None, "pct_rank": None, "prev": None,
+                                  "error": summarize_fetch_error(exc)}
+
+    if result:
+        set_cached_fetch_payload("macro_indicators", cache_key, result)
+    return result

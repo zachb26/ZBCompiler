@@ -9,6 +9,7 @@ so callers can apply the valuation_benchmark_scale without depending
 on settings.py.
 """
 
+import datetime
 import os
 import threading
 from pathlib import Path
@@ -62,6 +63,11 @@ FETCH_CACHE = {
     "treasury_yield": {},
     "earnings_trend": {},
     "options_data":   {},
+    "ticker_calendar": {},
+    "macro_indicators": {},
+    "annual_balance_sheet": {},
+    "annual_income_stmt":   {},
+    "annual_cashflow":      {},
 }
 FETCH_CACHE_LOCK = threading.RLock()
 FETCH_CACHE_MAX_ENTRIES = {
@@ -75,8 +81,13 @@ FETCH_CACHE_MAX_ENTRIES = {
     "sec_submissions":    80,
     "sec_filing_text":    60,
     "treasury_yield":      5,
-    "earnings_trend":    300,
-    "options_data":      200,
+    "earnings_trend":        300,
+    "options_data":          200,
+    "ticker_calendar":       300,
+    "macro_indicators":        5,
+    "annual_balance_sheet":  300,
+    "annual_income_stmt":    300,
+    "annual_cashflow":       300,
 }
 
 # ---------------------------------------------------------------------------
@@ -98,6 +109,46 @@ STARTUP_REFRESH_STATE = {
     "error": None,
     "started_at": None,
     "finished_at": None,
+}
+
+# ---------------------------------------------------------------------------
+# Catalyst calendar
+# ---------------------------------------------------------------------------
+FOMC_MEETING_DATES = [
+    datetime.date(2025, 1, 29),
+    datetime.date(2025, 3, 19),
+    datetime.date(2025, 5, 7),
+    datetime.date(2025, 6, 18),
+    datetime.date(2025, 7, 30),
+    datetime.date(2025, 9, 17),
+    datetime.date(2025, 10, 29),
+    datetime.date(2025, 12, 10),
+    datetime.date(2026, 1, 29),
+    datetime.date(2026, 3, 19),
+    datetime.date(2026, 4, 29),
+    datetime.date(2026, 6, 17),
+    datetime.date(2026, 7, 29),
+    datetime.date(2026, 9, 16),
+    datetime.date(2026, 10, 28),
+    datetime.date(2026, 12, 9),
+]
+
+# ---------------------------------------------------------------------------
+# Macro regime overlay (FRED series)
+# ---------------------------------------------------------------------------
+MACRO_FRED_SERIES = {
+    "VIX":    "VIXCLS",
+    "2s10s":  "T10Y2Y",
+    "HY_OAS": "BAMLH0A0HYM2",
+    "DXY":    "DTWEXBGS",
+}
+MACRO_RISK_OFF_THRESHOLDS = {
+    "vix_warn": 20.0,
+    "vix_risk_off": 25.0,
+    "spread_inverted": 0.0,
+    "spread_deep_inversion": -0.25,
+    "hy_oas_warn": 380,
+    "hy_oas_risk_off": 450,
 }
 
 # ---------------------------------------------------------------------------
@@ -693,6 +744,8 @@ ANALYSIS_HELP_TEXT = {
     "Downside Vol": "Volatility calculated only from downside return swings, not all swings.",
     "Min-Vol Return": "The annualized return of the lowest-volatility portfolio found in the simulation set.",
     "Effective Names": "An estimate of how diversified the portfolio really is after accounting for concentration, not just how many tickers it holds.",
+    "CVaR-95": "Expected portfolio loss in the worst 5% of return days, annualized. Lower is better — a high CVaR-95 means tail risk is severe even if average returns look acceptable.",
+    "Ulcer Index": "Measures drawdown depth and duration combined. Unlike max drawdown it penalizes strategies that stay underwater for extended periods. Lower is better.",
     "Robustness": "How stable the model's directional view stays when nearby guarded assumption sets are tested.",
     "Dominant Bias": "The direction that showed up most often across the sensitivity scenarios: bullish, bearish, or neutral.",
     "Scenario Count": "How many assumption scenarios were tested in the sensitivity run.",
@@ -763,6 +816,7 @@ OPTIONS_HELP_TEXT = {
     "sentiment_downside_high": "Kept for future directional sentiment work. The current context-only sentiment view does not use this setting.",
     "backtest_cooldown_days": "Higher values force the replay to wait longer before re-entering after a position change.",
     "backtest_transaction_cost_bps": "Estimated trading cost in basis points charged whenever the backtest changes exposure.",
+    "Annual Turnover": "Fraction of the position rolled over per year. 1.0 = 100% turnover, meaning the full position is replaced once annually. High turnover means transaction costs compound quickly — multiply turnover by cost-per-trade to estimate annual cost drag.",
 }
 
 # ---------------------------------------------------------------------------

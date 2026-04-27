@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
+import datetime
+
 import numpy as np
 import pandas as pd
 import streamlit as st
 
 import constants as const
+import fetch
 import utils_fmt as fmt
 import utils_ui as ui
 import analysis_prep as prep
@@ -142,6 +145,41 @@ def build_trade_flags_dataframe(db, library_df, selected_portfolio, view_all_por
     return pd.DataFrame(flag_rows).sort_values(["Portfolio", "Ticker"]).reset_index(drop=True)
 
 
+def build_catalyst_calendar(tickers, n_days=30):
+    today = datetime.date.today()
+    cutoff = today + datetime.timedelta(days=n_days)
+    rows = []
+
+    for ticker in tickers or []:
+        cal, _ = fetch.fetch_ticker_calendar_with_retry(fmt.normalize_ticker(ticker))
+        if not cal:
+            continue
+        for event_key, event_label in [("earnings_date", "Earnings"), ("ex_div_date", "Ex-Dividend")]:
+            dt = cal.get(event_key)
+            if dt and today <= dt <= cutoff:
+                rows.append({
+                    "Date": dt,
+                    "Days Away": (dt - today).days,
+                    "Ticker": fmt.normalize_ticker(ticker),
+                    "Event": event_label,
+                })
+
+    for fomc_date in const.FOMC_MEETING_DATES:
+        if today <= fomc_date <= cutoff:
+            rows.append({
+                "Date": fomc_date,
+                "Days Away": (fomc_date - today).days,
+                "Ticker": "FOMC",
+                "Event": "Fed Meeting",
+            })
+
+    if not rows:
+        return pd.DataFrame(columns=["Date", "Days Away", "Ticker", "Event"])
+    df = pd.DataFrame(rows).sort_values("Date").reset_index(drop=True)
+    df["Date"] = df["Date"].astype(str)
+    return df
+
+
 def render_portfolio_manager_view(db, portfolio_bot, active_preset_name, active_assumption_fingerprint):
     from ui.auth import render_password_gate
 
@@ -229,6 +267,20 @@ def render_portfolio_manager_view(db, portfolio_bot, active_preset_name, active_
             membership_view = memberships_df.copy()
             membership_view.columns = ["Ticker", "Portfolio"]
             st.dataframe(membership_view, width="stretch")
+
+    st.markdown("##### Upcoming Catalysts")
+    catalyst_window = st.selectbox(
+        "Look-ahead Window",
+        [7, 14, 30, 60],
+        index=2,
+        key="pm_catalyst_window",
+        help="Show earnings dates, ex-dividend dates, and FOMC meetings within this many calendar days.",
+    )
+    catalyst_df = build_catalyst_calendar(selected_tickers, n_days=catalyst_window)
+    if catalyst_df.empty:
+        st.info(f"No earnings dates, ex-dividend dates, or FOMC meetings found within the next {catalyst_window} days for the assigned tickers.")
+    else:
+        st.dataframe(catalyst_df, width="stretch")
 
     st.markdown("##### Change Controls")
     manager_authenticated = render_password_gate(

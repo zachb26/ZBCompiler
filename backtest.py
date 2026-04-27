@@ -680,6 +680,9 @@ def compute_technical_backtest(
     trade_points = analysis["Position"].diff().fillna(analysis["Position"])
     trading_cost_rate = active_settings.get("backtest_transaction_cost_bps", 0.0) / 10000
     analysis["Trading Cost"] = trade_points.abs() * trading_cost_rate
+    _trading_days_yr = active_settings.get("trading_days_per_year", 252.0)
+    years_in_period = len(analysis) / _trading_days_yr
+    annual_turnover = trade_points.abs().sum() / years_in_period if years_in_period > 0 else 0.0
     analysis["Strategy Return"] = (
         analysis["Position"].shift(1).fillna(0.0) * analysis["Benchmark Return"] - analysis["Trading Cost"]
     )
@@ -745,6 +748,7 @@ def compute_technical_backtest(
         "Closed Trades": trade_summary["Closed Trades"],
         "Win Rate": trade_summary["Win Rate"],
         "Average Trade Return": trade_summary["Average Trade Return"],
+        "Annual Turnover": annual_turnover,
     }
 
     return {

@@ -26,7 +26,7 @@ def render_backtest_view(db, model_settings, active_preset_name, active_assumpti
     backtest_default_ticker = st.session_state.get("backtest_last_ticker") or st.session_state.get("single_ticker", "")
 
     with st.form("backtest_form"):
-        backtest_col_1, backtest_col_2, backtest_col_3 = st.columns([3, 1, 1])
+        backtest_col_1, backtest_col_2, backtest_col_3, backtest_col_4 = st.columns([3, 1, 1, 1])
         with backtest_col_1:
             backtest_ticker = st.text_input(
                 "Ticker",
@@ -36,6 +36,15 @@ def render_backtest_view(db, model_settings, active_preset_name, active_assumpti
         with backtest_col_2:
             backtest_period = st.selectbox("History Window", ["1y", "3y", "5y", "10y"], index=2)
         with backtest_col_3:
+            backtest_cost_bps = st.number_input(
+                "Cost (bps)",
+                value=float(model_settings.get("backtest_transaction_cost_bps", 10.0)),
+                min_value=0.0,
+                max_value=50.0,
+                step=5.0,
+                help="Round-trip transaction cost per position change. 10–30 bps is realistic for retail including spread.",
+            )
+        with backtest_col_4:
             st.write("")
             st.write("")
             run_backtest = st.form_submit_button("Run Backtest", type="primary", width="stretch")
@@ -62,7 +71,8 @@ def render_backtest_view(db, model_settings, active_preset_name, active_assumpti
                         db=db,
                         ticker=cleaned_ticker,
                     )
-                backtest_result = backtest.compute_technical_backtest(hist, model_settings, stock_profile=backtest_profile)
+                backtest_settings = {**model_settings, "backtest_transaction_cost_bps": backtest_cost_bps}
+                backtest_result = backtest.compute_technical_backtest(hist, backtest_settings, stock_profile=backtest_profile)
 
             if hist is None or hist.empty:
                 st.session_state.pop("backtest_result", None)
@@ -80,6 +90,7 @@ def render_backtest_view(db, model_settings, active_preset_name, active_assumpti
                 st.session_state.backtest_config = {
                     "ticker": cleaned_ticker,
                     "period": backtest_period,
+                    "cost_bps": backtest_cost_bps,
                 }
                 st.session_state.backtest_last_ticker = cleaned_ticker
 
@@ -100,6 +111,7 @@ def render_backtest_view(db, model_settings, active_preset_name, active_assumpti
         )
         st.caption(
             f"Ticker: {backtest_config.get('ticker', '')} | Window: {backtest_config.get('period', '')} | "
+            f"Cost assumption: {backtest_config.get('cost_bps', 10.0):.0f} bps per-trade | "
             f"Profile: {active_preset_name} | Fingerprint: {active_assumption_fingerprint}"
         )
         if backtest_profile:
@@ -203,8 +215,15 @@ def render_backtest_view(db, model_settings, active_preset_name, active_assumpti
                     "tone": ui.tone_from_metric_threshold(backtest_metrics["Average Trade Return"], good_min=0.03, bad_max=-0.02),
                     "help": const.ANALYSIS_HELP_TEXT["Avg Trade Return"],
                 },
+                {
+                    "label": "Annual Turnover",
+                    "value": fmt.format_percent(backtest_metrics["Annual Turnover"]),
+                    "note": "Fraction of the position turned over per year. High turnover amplifies cost drag.",
+                    "tone": ui.tone_from_metric_threshold(backtest_metrics["Annual Turnover"], good_max=2.0, bad_min=5.0),
+                    "help": const.ANALYSIS_HELP_TEXT["Annual Turnover"],
+                },
             ],
-            columns=5,
+            columns=6,
         )
 
         st.subheader("Equity Curve")

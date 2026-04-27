@@ -13,6 +13,85 @@ import utils_ui as ui
 import analysis_prep as prep
 
 
+def render_macro_regime_panel(macro_data):
+    """Render a 4-card macro backdrop panel above the sector view."""
+
+    def _card(label, entry, low_is_good, good_thresh, bad_thresh, fmt_fn, note, help_text):
+        val = (entry or {}).get("value")
+        pct = (entry or {}).get("pct_rank")
+        error = (entry or {}).get("error")
+        if val is None:
+            return {"label": label, "value": "N/A", "note": error or "Unavailable.", "tone": "neutral", "help": help_text}
+        display = fmt_fn(val)
+        if pct is not None:
+            display += f" ({pct:.0f}p)"
+        if low_is_good:
+            tone = "good" if val <= good_thresh else ("bad" if val >= bad_thresh else "neutral")
+        else:
+            tone = "good" if val >= good_thresh else ("bad" if val <= bad_thresh else "neutral")
+        return {"label": label, "value": display, "note": note, "tone": tone, "help": help_text}
+
+    cards = [
+        _card(
+            "VIX", macro_data.get("VIX"),
+            low_is_good=True, good_thresh=18, bad_thresh=25,
+            fmt_fn=lambda v: f"{v:.1f}",
+            note="Implied equity volatility. >25 = elevated stress.",
+            help_text="CBOE Volatility Index. Above 25 historically signals risk-off. Percentile rank over the prior 52 weeks.",
+        ),
+        _card(
+            "2s10s Spread", macro_data.get("2s10s"),
+            low_is_good=False, good_thresh=0.10, bad_thresh=-0.25,
+            fmt_fn=lambda v: f"{v:+.2f}%",
+            note="10Y minus 2Y. Negative = inverted curve.",
+            help_text="Treasury 10Y minus 2Y spread. Sustained inversion below -0.25% is a historically reliable recession leading indicator.",
+        ),
+        _card(
+            "HY Spread (bp)", macro_data.get("HY_OAS"),
+            low_is_good=True, good_thresh=300, bad_thresh=450,
+            fmt_fn=lambda v: f"{v:.0f}bp",
+            note="High-yield OAS. >450bp = risk-off credit.",
+            help_text="ICE BofA US High Yield Option-Adjusted Spread. Widening above 450bp signals deteriorating risk appetite.",
+        ),
+        _card(
+            "DXY", macro_data.get("DXY"),
+            low_is_good=False, good_thresh=float("inf"), bad_thresh=float("-inf"),
+            fmt_fn=lambda v: f"{v:.1f}",
+            note="Trade-weighted dollar index.",
+            help_text="Trade Weighted U.S. Dollar Index (Broad). A rising DXY tends to tighten global financial conditions and pressure EM and commodity sectors.",
+        ),
+    ]
+    ui.render_analysis_signal_cards(cards, columns=4)
+
+    vix_val = (macro_data.get("VIX") or {}).get("value")
+    spread_val = (macro_data.get("2s10s") or {}).get("value")
+    hy_val = (macro_data.get("HY_OAS") or {}).get("value")
+
+    risk_off = sum([
+        vix_val is not None and vix_val > 25,
+        spread_val is not None and spread_val < -0.25,
+        hy_val is not None and hy_val > 450,
+    ])
+    warn = sum([
+        vix_val is not None and 20 < vix_val <= 25,
+        spread_val is not None and -0.25 <= spread_val < 0,
+        hy_val is not None and 380 < hy_val <= 450,
+    ])
+
+    if risk_off >= 2:
+        st.warning(
+            "Macro: Risk-off — multiple elevated stress signals detected. "
+            "Defensives and quality have historically led in this backdrop; consider underweighting cyclicals and high-beta names."
+        )
+    elif risk_off == 1 or warn >= 2:
+        st.info(
+            "Macro: Mixed signals — at least one stress indicator is elevated. "
+            "Monitor for follow-through before making aggressive sector rotation bets."
+        )
+    else:
+        st.success("Macro: No elevated stress signals. Current readings are consistent with a constructive risk backdrop.")
+
+
 def build_sector_news_dataframe(tickers, max_tickers=12, max_items=18):
     news_rows = []
     seen_titles = set()
@@ -122,6 +201,10 @@ def build_sector_weekly_briefing(sector_name, sector_df, sector_news_df):
 def render_sector_leader_view(db):
     st.subheader("Sector Leader")
     st.caption("Compare all tracked names inside one sector, review relative strength and valuation side-by-side, and prepare a meeting-ready weekly briefing.")
+
+    macro_data = fetch.fetch_macro_indicators()
+    render_macro_regime_panel(macro_data)
+    st.divider()
 
     library_df = prep.prepare_analysis_dataframe(db.get_all_analyses())
     if library_df.empty:
