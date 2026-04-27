@@ -61,6 +61,7 @@ FETCH_CACHE = {
     "sec_submissions": {},
     "sec_filing_text": {},
     "treasury_yield": {},
+    "calendar": {},
     "earnings_trend": {},
     "options_data":   {},
     "ticker_calendar": {},
@@ -80,7 +81,8 @@ FETCH_CACHE_MAX_ENTRIES = {
     "sec_companyfacts":   80,
     "sec_submissions":    80,
     "sec_filing_text":    60,
-    "treasury_yield":      5,
+    "treasury_yield":          5,
+    "calendar":              300,
     "earnings_trend":        300,
     "options_data":          200,
     "ticker_calendar":       300,
@@ -167,6 +169,25 @@ DCF_GROWTH_FADE_YEARS = 3
 DCF_DEFAULT_RISK_FREE_RATE = 0.043
 DCF_DEFAULT_MARKET_RISK_PREMIUM = 0.055
 DCF_DEFAULT_AFTER_TAX_COST_OF_DEBT = 0.035
+
+# ---------------------------------------------------------------------------
+# Catalyst calendar
+# ---------------------------------------------------------------------------
+CATALYST_LOOKFORWARD_DAYS = 45
+EARNINGS_CAUTION_DAYS = 7
+CATALYST_CACHE_TTL = 86400
+
+# ---------------------------------------------------------------------------
+# Macro overlay
+# ---------------------------------------------------------------------------
+MACRO_CACHE_TTL = 14400
+MACRO_THRESHOLDS = {
+    "two_ten_spread": {"caution": 0.0, "ok": 0.25},
+    "hy_oas_bps":     {"caution": 500,  "ok": 350},
+    "vix":            {"caution": 30,   "ok": 20},
+    "vix_ratio":      {"caution": 1.0,  "ok": 0.9},
+    "dxy_level":      {"caution": 107,  "ok": 103},
+}
 DEFAULT_DCF_SETTINGS = {
     "projection_years": DCF_PROJECTION_YEARS,
     "terminal_growth_rate": DCF_TERMINAL_GROWTH_RATE,
@@ -198,9 +219,9 @@ SEC_USER_AGENT = os.environ.get("SEC_EDGAR_USER_AGENT", "").strip()
 # ---------------------------------------------------------------------------
 # Peer universe
 # ---------------------------------------------------------------------------
-PEER_GROUP_SIZE = 5
-PEER_SEARCH_CANDIDATE_LIMIT = 140
-PEER_MIN_REQUIRED = 3
+PEER_GROUP_SIZE = 10
+PEER_SEARCH_CANDIDATE_LIMIT = 200
+PEER_MIN_REQUIRED = 4
 PEER_UNIVERSE_FILENAME = "sp500_tickers.txt"
 PEER_METRIC_MAP = {
     "PE": "trailingPE",
@@ -276,32 +297,30 @@ NEGATIVE_SENTIMENT_TERMS = {
 # ---------------------------------------------------------------------------
 # Sector / stock classification
 # ---------------------------------------------------------------------------
-CYCLICAL_SECTORS = {
-    "Consumer Cyclical",
-    "Industrials",
-    "Energy",
-    "Basic Materials",
-    "Financial Services",
-    "Real Estate",
+SECTOR_MAP = {
+    "Technology":             "Information Technology",
+    "Communication Services": "Information Technology",
+    "Healthcare":             "Healthcare",
+    "Financial Services":     "Financials",
+    "Energy":                 "IMEU",
+    "Industrials":            "IMEU",
+    "Utilities":              "IMEU",
+    "Basic Materials":        "IMEU",
+    "Consumer Cyclical":      "Consumer Goods",
+    "Consumer Defensive":     "Consumer Goods",
+    "Real Estate":            "Real Estate",
 }
-DEFENSIVE_SECTORS = {
-    "Consumer Defensive",
-    "Healthcare",
-    "Utilities",
-}
-INCOME_SECTORS = {
-    "Utilities",
-    "Real Estate",
-    "Consumer Defensive",
-    "Energy",
-    "Communication Services",
-}
-QUALITY_SECTORS = {
-    "Technology",
-    "Healthcare",
-    "Consumer Defensive",
-    "Communication Services",
-}
+
+
+def normalize_sector(raw: str) -> str:
+    """Map a raw yfinance sector string to the OSIG consolidated sector name."""
+    return SECTOR_MAP.get(str(raw or "").strip(), str(raw or "").strip() or "Unknown")
+
+
+CYCLICAL_SECTORS = {"IMEU", "Consumer Goods", "Financials"}
+DEFENSIVE_SECTORS = {"Healthcare"}
+INCOME_SECTORS = {"IMEU", "Consumer Goods", "Information Technology"}
+QUALITY_SECTORS = {"Information Technology", "Healthcare", "Consumer Goods"}
 STOCK_TYPE_STRATEGIES = {
     "Growth Stocks": "Favor long-term accumulation, durable earnings growth, and trend persistence rather than demanding cheap valuation at every entry.",
     "Value Stocks": "Lean hardest on valuation and balance-sheet strength, buying discounts to intrinsic value and waiting for the market to re-rate them.",
@@ -319,17 +338,12 @@ STOCK_TYPE_STRATEGIES = {
 # Sector valuation benchmarks
 # ---------------------------------------------------------------------------
 SECTOR_BENCHMARKS = {
-    "Technology":             {"PE": 30, "PS": 6.0, "PB": 8.0, "EV_EBITDA": 20},
+    "Information Technology": {"PE": 27, "PS": 5.5, "PB": 6.5, "EV_EBITDA": 18},
     "Healthcare":             {"PE": 25, "PS": 4.0, "PB": 4.0, "EV_EBITDA": 15},
-    "Financial Services":     {"PE": 14, "PS": 3.0, "PB": 1.5, "EV_EBITDA": 10},
-    "Energy":                 {"PE": 10, "PS": 1.5, "PB": 1.8, "EV_EBITDA":  6},
-    "Consumer Cyclical":      {"PE": 20, "PS": 2.5, "PB": 4.0, "EV_EBITDA": 14},
-    "Industrials":            {"PE": 20, "PS": 2.0, "PB": 3.5, "EV_EBITDA": 12},
-    "Utilities":              {"PE": 18, "PS": 2.5, "PB": 2.0, "EV_EBITDA": 10},
-    "Consumer Defensive":     {"PE": 22, "PS": 2.0, "PB": 4.0, "EV_EBITDA": 15},
+    "Financials":             {"PE": 14, "PS": 3.0, "PB": 1.5, "EV_EBITDA": 10},
+    "IMEU":                   {"PE": 16, "PS": 1.8, "PB": 2.3, "EV_EBITDA":  9},
+    "Consumer Goods":         {"PE": 21, "PS": 2.3, "PB": 4.0, "EV_EBITDA": 15},
     "Real Estate":            {"PE": 35, "PS": 6.0, "PB": 3.0, "EV_EBITDA": 18},
-    "Communication Services": {"PE": 20, "PS": 4.0, "PB": 3.0, "EV_EBITDA": 12},
-    "Basic Materials":        {"PE": 15, "PS": 1.5, "PB": 2.0, "EV_EBITDA":  8},
 }
 DEFAULT_BENCHMARKS = {"PE": 20, "PS": 3.0, "PB": 3.0, "EV_EBITDA": 12}
 
@@ -537,6 +551,7 @@ DEFAULT_MODEL_SETTINGS = {
     "decision_min_confidence": 55.0,
     "backtest_cooldown_days": 8.0,
     "backtest_transaction_cost_bps": 10.0,
+    "backtest_min_position_change": 0.0,
     "trading_days_per_year": 252.0,
 }
 MODEL_PRESETS = {
@@ -762,6 +777,10 @@ ANALYSIS_HELP_TEXT = {
     "Upside Capture": "When the benchmark finished positive, this shows how much of that upside the strategy captured. Around 100% means it roughly kept pace with buy-and-hold, and above 100% means it outpaced that upside.",
     "Win Rate": "The share of closed trades that ended with a positive return.",
     "Max Drawdown": "The deepest peak-to-trough decline the strategy experienced during the backtest.",
+    "Annual Turnover": "Total exposure traded per year. 1.0 means you turn over the full portfolio once annually. Higher turnover multiplied by round-trip cost equals more drag on real returns.",
+    "CVaR95": "Conditional Value-at-Risk at 95% confidence — the expected annualized loss on the worst 5% of trading days. A deeper negative means the tail risk is heavier.",
+    "UlcerIndex": "The RMS of all drawdown depths measured from the rolling equity peak. It combines both depth and duration of drawdowns into one number — lower is better. Values under 5 are generally comfortable; above 15 means persistent and painful drawdowns.",
+    "MaxDrawdown": "The deepest peak-to-trough decline the tangent portfolio would have experienced over the lookback window. More informative than volatility alone for assessing how bad the worst run actually gets.",
     "Position Changes": "How many times the strategy changed exposure, including entries, adds, reductions, and exits.",
     "Closed Trades": "How many completed round-trip trades were finished in the backtest window.",
     "Avg Trade Return": "The average return across the strategy's closed trades.",
@@ -817,6 +836,7 @@ OPTIONS_HELP_TEXT = {
     "backtest_cooldown_days": "Higher values force the replay to wait longer before re-entering after a position change.",
     "backtest_transaction_cost_bps": "Estimated trading cost in basis points charged whenever the backtest changes exposure.",
     "Annual Turnover": "Fraction of the position rolled over per year. 1.0 = 100% turnover, meaning the full position is replaced once annually. High turnover means transaction costs compound quickly — multiply turnover by cost-per-trade to estimate annual cost drag.",
+    "backtest_min_position_change": "Minimum position change required to trigger a trade. Set above 0 to suppress noise trades and reduce turnover. 0.10 means a 10% exposure shift is needed to act.",
 }
 
 # ---------------------------------------------------------------------------

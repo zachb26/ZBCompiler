@@ -187,6 +187,33 @@ def render_portfolio_result(result, config, active_preset_name, active_assumptio
         columns=6,
     )
 
+    ui.render_analysis_signal_cards(
+        [
+            {
+                "label": "CVaR-95",
+                "value": fmt.format_percent(tangent["CVaR95"]),
+                "note": "Expected annualized loss in the worst 5% of trading days.",
+                "tone": ui.tone_from_metric_threshold(tangent["CVaR95"], good_min=-0.15, bad_max=-0.35),
+                "help": const.ANALYSIS_HELP_TEXT["CVaR95"],
+            },
+            {
+                "label": "Ulcer Index",
+                "value": fmt.format_value(tangent["UlcerIndex"], "{:.2f}"),
+                "note": "Lower is better — combines drawdown depth and duration into one number.",
+                "tone": ui.tone_from_metric_threshold(tangent["UlcerIndex"], good_max=5, bad_min=15),
+                "help": const.ANALYSIS_HELP_TEXT["UlcerIndex"],
+            },
+            {
+                "label": "Max Drawdown",
+                "value": fmt.format_percent(tangent["MaxDrawdown"]),
+                "note": "The worst peak-to-trough decline the tangent portfolio experienced.",
+                "tone": ui.tone_from_metric_threshold(tangent["MaxDrawdown"], good_min=-0.15, bad_max=-0.35),
+                "help": const.ANALYSIS_HELP_TEXT["MaxDrawdown"],
+            },
+        ],
+        columns=3,
+    )
+
     st.markdown("##### Efficient Frontier and CAL")
     st.caption("The green diamond is the tangent portfolio with the highest Sharpe ratio. The red dashed line is the Capital Allocation Line.")
     render_frontier_chart(result["portfolio_cloud"], result["frontier"], result["cal"], tangent, minimum_volatility)

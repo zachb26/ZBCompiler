@@ -40,6 +40,18 @@ def render_portfolio_builder_view(portfolio_bot, active_preset_name, active_assu
             st.error("The max single-stock weight is too low for the number of tickers. Raise the cap or add more names.")
         else:
             with st.spinner("Building efficient frontier and CAL recommendation..."):
+                verdicts = {}
+                try:
+                    all_analyses = portfolio_bot.db.get_all_analyses()
+                    if not all_analyses.empty and "Verdict_Overall" in all_analyses.columns:
+                        for _, row in all_analyses.iterrows():
+                            t = str(row.get("Ticker", "")).strip().upper()
+                            v = row.get("Verdict_Overall")
+                            if t and v:
+                                verdicts[t] = v
+                except Exception:
+                    pass
+
                 portfolio_result = portfolio_bot.analyze_portfolio(
                     tickers=parsed_tickers,
                     benchmark_ticker=fmt.normalize_ticker(benchmark_ticker) or const.DEFAULT_BENCHMARK_TICKER,
@@ -47,6 +59,7 @@ def render_portfolio_builder_view(portfolio_bot, active_preset_name, active_assu
                     risk_free_rate=risk_free_percent / 100,
                     max_weight=max_weight_percent / 100,
                     simulations=simulations,
+                    verdicts=verdicts or None,
                 )
 
             if not portfolio_result:
@@ -76,6 +89,18 @@ def render_portfolio_builder_view(portfolio_bot, active_preset_name, active_assu
         sector_exposure = result["sector_exposure"].copy()
 
         st.divider()
+        filtered = result.get("filtered_strong_sell", [])
+        if filtered:
+            st.warning(
+                f"**Excluded from optimizer (STRONG SELL verdict):** {', '.join(filtered)}. "
+                "These tickers were removed before simulation. Add more tickers if you need them back."
+            )
+        if result.get("verdict_blend_applied"):
+            st.info(
+                "Expected returns are blended: 75% historical mean + 25% verdict-implied signal "
+                "(STRONG BUY +6 pp / BUY +3 pp / HOLD neutral / SELL \u22123 pp over the risk-free rate). "
+                "Volatility, beta, and drawdown metrics remain anchored to historical data."
+            )
         st.caption(
             f"Benchmark: {config.get('benchmark', result['benchmark'])} | Lookback: {config.get('period', result['period'])} | "
             f"Risk-free rate: {config.get('risk_free_percent', 0):.2f}% | Max position: {config.get('max_weight_percent', 0)}%"

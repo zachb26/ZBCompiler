@@ -198,6 +198,9 @@ def normalize_model_settings(settings):
     normalized["backtest_transaction_cost_bps"] = float(
         min(max(float(normalized["backtest_transaction_cost_bps"]), 0.0), 50.0)
     )
+    normalized["backtest_min_position_change"] = float(
+        min(max(float(normalized["backtest_min_position_change"]), 0.0), 0.5)
+    )
 
     for key in ["weight_technical", "weight_fundamental", "weight_valuation", "weight_sentiment"]:
         normalized[key] = min(max(float(normalized[key]), 0.5), 1.5)

@@ -49,9 +49,13 @@ model_settings = settings.get_model_settings()
 active_preset_name = settings.detect_matching_preset(model_settings)
 active_assumption_fingerprint = settings.get_assumption_fingerprint(model_settings)
 
-st.title("OSIG Research Tool")
-storage_status = "Connected to Postgres" if db.storage_backend == "postgres" else "Using SQLite"
-st.caption(f"Version: {const.APP_VERSION} | {storage_status}")
+_logo_col, _title_col = st.columns([1, 4])
+with _logo_col:
+    st.image("osig_logo.png", use_container_width=True)
+with _title_col:
+    st.title("OSIG Research Tool")
+    storage_status = "Connected to Postgres" if db.storage_backend == "postgres" else "Using SQLite"
+    st.caption(f"Version: {const.APP_VERSION} | {storage_status}")
 if db.storage_notice:
     st.warning(db.storage_notice)
 
@@ -91,9 +95,59 @@ with st.sidebar:
     st.divider()
     st.caption("Full model controls and sliders are in Senior Analyst → Controls.")
 
-new_analyst_tab, analyst_senior_tab, sector_leader_tab, portfolio_manager_tab, methodology_tab, readme_tab = st.tabs(
-    ["New Analyst", "Senior Analyst", "Sector Leader", "Portfolio Manager", "Methodology", "ReadMe"]
+quick_links_tab, new_analyst_tab, analyst_senior_tab, sector_leader_tab, portfolio_manager_tab, methodology_tab, readme_tab = st.tabs(
+    ["Quick Links", "New Analyst", "Senior Analyst", "Sector Leader", "Portfolio Manager", "Methodology", "ReadMe"]
 )
+
+_sa_locked = not st.session_state.get("senior_analyst_authenticated", False)
+_pm_locked = not st.session_state.get("portfolio_manager_authenticated", False)
+_locked_selectors = []
+if _sa_locked:
+    _locked_selectors.append("div[data-baseweb='tab-list'] button[role='tab']:nth-child(3)")
+if _pm_locked:
+    _locked_selectors.append("div[data-baseweb='tab-list'] button[role='tab']:nth-child(5)")
+if _locked_selectors:
+    _locked_css = ", ".join(_locked_selectors)
+    st.markdown(
+        f"<style>{_locked_css} {{ opacity: 0.4 !important; color: #888 !important; cursor: not-allowed !important; }}</style>",
+        unsafe_allow_html=True,
+    )
+
+# ── VOTING LINK — change this URL to update the active vote ──────────────────
+VOTING_LINK = "https://docs.google.com/forms/d/e/1FAIpQLScXEFap4fq51ycL54ugLasHjt0U2dsJuJpSEmGfDsP8xSVkMg/viewform"
+# ─────────────────────────────────────────────────────────────────────────────
+
+with quick_links_tab:
+    st.header("Quick Links")
+    st.markdown("Essential resources for OSIG members.")
+    st.divider()
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.subheader("Box")
+        st.markdown("Club files, research, and documents.")
+        st.link_button("Open Box", "https://oregonstate.box.com/s/1gred7wfd4zrigao6e23dht8l7y4z50j", use_container_width=True)
+
+        st.markdown("")
+        st.subheader("Yahoo Finance")
+        st.markdown("Quotes, news, and market data.")
+        st.link_button("Open Yahoo Finance", "https://finance.yahoo.com", use_container_width=True)
+
+    with col2:
+        st.subheader("Slack")
+        st.markdown("Team communication and channels.")
+        st.link_button("Open Slack", "https://osu-osig.slack.com", use_container_width=True)
+
+        st.markdown("")
+        st.subheader("S&P 500 Heat Map")
+        st.markdown("Live sector and market cap heat map.")
+        st.link_button("Open Heat Map", "https://finviz.com/map.ashx", use_container_width=True)
+
+    with col3:
+        st.subheader("Current Vote")
+        st.markdown("Active club voting thread on Slack.")
+        st.link_button("Go to Vote", VOTING_LINK, use_container_width=True, type="primary")
 
 with new_analyst_tab:
     analyst_new_tab, compare_tab = st.tabs(["Analysis", "Comparison"])

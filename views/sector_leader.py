@@ -198,12 +198,121 @@ def build_sector_weekly_briefing(sector_name, sector_df, sector_news_df):
     return "\n".join(lines)
 
 
+def _macro_signal(value, thresholds: dict, invert: bool = False) -> str:
+    """Return 'red', 'yellow', or 'green' based on caution/ok thresholds."""
+    if value is None:
+        return "neutral"
+    caution = thresholds["caution"]
+    ok = thresholds["ok"]
+    if not invert:
+        if value >= caution:
+            return "bad"
+        if value >= ok:
+            return "neutral"
+        return "good"
+    else:
+        if value <= caution:
+            return "bad"
+        if value <= ok:
+            return "neutral"
+        return "good"
+
+
+def _render_macro_regime_panel() -> None:
+    """Fetch and display the macro regime overlay at the top of the Sector tab."""
+    with st.expander("Macro Regime", expanded=True):
+        with st.spinner("Loading macro indicators..."):
+            try:
+                m = fetch.fetch_macro_indicators()
+            except Exception:
+                st.warning("Macro indicators are unavailable right now.")
+                return
+
+        thresholds = const.MACRO_THRESHOLDS
+
+        def fmt_val(v, decimals=2, suffix=""):
+            return f"{v:.{decimals}f}{suffix}" if v is not None else "N/A"
+
+        two_ten = m.get("two_ten_spread")
+        hy_oas = m.get("hy_oas_bps")
+        vix = m.get("vix")
+        vix_ratio = m.get("vix_ratio")
+        dxy = m.get("dxy")
+
+        tone_map = {"good": "🟢", "neutral": "🟡", "bad": "🔴"}
+
+        two_ten_tone = _macro_signal(two_ten, thresholds["two_ten_spread"], invert=True)
+        hy_tone = _macro_signal(hy_oas, thresholds["hy_oas_bps"], invert=False)
+        vix_tone = _macro_signal(vix, thresholds["vix"], invert=False)
+        ratio_tone = _macro_signal(vix_ratio, thresholds["vix_ratio"], invert=False)
+        dxy_tone = _macro_signal(dxy, thresholds["dxy_level"], invert=False)
+
+        col1, col2, col3, col4, col5 = st.columns(5)
+        with col1:
+            st.metric(
+                f"{tone_map[two_ten_tone]} 2s10s Spread",
+                fmt_val(two_ten, 2, "%"),
+                help="10Y minus 2Y Treasury yield. Negative = inverted curve (recession signal).",
+            )
+        with col2:
+            st.metric(
+                f"{tone_map[hy_tone]} HY OAS (bps)",
+                fmt_val(hy_oas, 0),
+                help="ICE BofA HY option-adjusted spread. Rising = credit stress / risk-off.",
+            )
+        with col3:
+            st.metric(
+                f"{tone_map[vix_tone]} VIX",
+                fmt_val(vix, 1),
+                help="CBOE Volatility Index. >30 = elevated fear, >20 = caution.",
+            )
+        with col4:
+            st.metric(
+                f"{tone_map[ratio_tone]} VIX / VIX3M",
+                fmt_val(vix_ratio, 2),
+                help="VIX divided by 3-month VIX. >1.0 = near-term vol backwardation (acute stress).",
+            )
+        with col5:
+            st.metric(
+                f"{tone_map[dxy_tone]} DXY",
+                fmt_val(dxy, 1),
+                help="US dollar index. High dollar can pressure EM and commodity sectors.",
+            )
+
+        red_signals = [
+            label for label, tone in (
+                ("yield curve inversion", two_ten_tone),
+                ("HY credit stress", hy_tone),
+                ("elevated VIX", vix_tone),
+                ("vol backwardation", ratio_tone),
+                ("strong dollar headwind", dxy_tone),
+            )
+            if tone == "bad"
+        ]
+        yellow_signals = [
+            label for label, tone in (
+                ("flat curve", two_ten_tone),
+                ("elevated spreads", hy_tone),
+                ("VIX caution zone", vix_tone),
+                ("vol term structure flat", ratio_tone),
+                ("USD elevated", dxy_tone),
+            )
+            if tone == "neutral"
+        ]
+
+        if red_signals:
+            st.caption(f"Macro backdrop: Stress signals — {', '.join(red_signals)}.")
+        elif yellow_signals:
+            st.caption(f"Macro backdrop: Mixed — watch {', '.join(yellow_signals)}.")
+        else:
+            st.caption("Macro backdrop: Risk-On — yield curve normal, credit benign, vol calm.")
+
+
 def render_sector_leader_view(db):
     st.subheader("Sector Leader")
     st.caption("Compare all tracked names inside one sector, review relative strength and valuation side-by-side, and prepare a meeting-ready weekly briefing.")
 
-    macro_data = fetch.fetch_macro_indicators()
-    render_macro_regime_panel(macro_data)
+    _render_macro_regime_panel()
     st.divider()
 
     library_df = prep.prepare_analysis_dataframe(db.get_all_analyses())

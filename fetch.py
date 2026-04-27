@@ -24,10 +24,12 @@ Covers:
 
 import copy
 import datetime
+import io
 import json
 import logging
 import re
 import time
+import urllib.request
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +40,7 @@ import yfinance as yf
 from constants import (
     APP_DIR,
     AUTO_REFRESH_REQUEST_DELAY_SECONDS,
+    CATALYST_CACHE_TTL,
     DEFAULT_BENCHMARK_TICKER,
     DEFAULT_PORTFOLIO_TICKERS,
     FETCH_CACHE,
@@ -47,11 +50,13 @@ from constants import (
     FETCH_STALE_FALLBACK_TTL_SECONDS,
     FILING_TAKEAWAY_PATTERNS,
     FUNDAMENTAL_EVENT_KEYWORDS,
+    MACRO_CACHE_TTL,
     PEER_GROUP_SIZE,
     PEER_METRIC_MAP,
     PEER_MIN_REQUIRED,
     PEER_SEARCH_CANDIDATE_LIMIT,
     PEER_UNIVERSE_FILENAME,
+    normalize_sector,
 )
 from utils_fmt import normalize_ticker, parse_ticker_list, safe_num
 from utils_time import format_datetime_value, trim_history_to_period
@@ -471,7 +476,7 @@ def find_closest_peer_group(ticker, info, db=None, peer_count=PEER_GROUP_SIZE):
             {
                 "Ticker": candidate_ticker,
                 "Name": str(candidate_info.get("shortName") or candidate_info.get("longName") or candidate_ticker),
-                "Sector": str(candidate_info.get("sector") or ""),
+                "Sector": normalize_sector(str(candidate_info.get("sector") or "")),
                 "Industry": str(candidate_info.get("industry") or ""),
                 "Similarity": similarity_score,
                 "Priority": priority,
@@ -504,7 +509,7 @@ def find_closest_peer_group(ticker, info, db=None, peer_count=PEER_GROUP_SIZE):
     averages = {}
     for output_key, input_key in PEER_METRIC_MAP.items():
         values = [row[input_key] for row in selected if has_numeric_value(row.get(input_key))]
-        averages[output_key] = float(np.mean(values)) if values else None
+        averages[output_key] = float(np.median(values)) if values else None
 
     group_label = target_industry or target_sector or "Closest peers"
     peer_names = ", ".join(row["Ticker"] for row in selected[:peer_count]) if selected else "None found"
@@ -533,7 +538,7 @@ def build_relative_peer_benchmarks(ticker, info, db=None, settings=None):
     from constants import get_sector_benchmarks
 
     peer_group = find_closest_peer_group(ticker, info, db=db, peer_count=PEER_GROUP_SIZE)
-    sector_fallback = get_sector_benchmarks(info.get("sector", "Unknown"), settings=settings)
+    sector_fallback = get_sector_benchmarks(normalize_sector(info.get("sector", "")), settings=settings)
     averages = peer_group.get("averages", {})
     benchmarks = {
         "PE": averages.get("PE"),
@@ -941,6 +946,127 @@ def fetch_ticker_news_with_retry(ticker, attempts=2):
     if stale_news:
         return stale_news, None
     return [], last_error
+
+
+# ---------------------------------------------------------------------------
+# Catalyst calendar
+# ---------------------------------------------------------------------------
+
+def fetch_calendar_events(ticker: str) -> dict:
+    """
+    Return upcoming earnings and dividend dates for *ticker* from yfinance.
+
+    Dict keys: earnings_date, ex_div_date, dividend_date (each a
+    datetime.date or None).  Never raises — returns all-None on any failure.
+    """
+    cache_key = ticker.upper()
+    cached = get_cached_fetch_payload("calendar", cache_key, max_age_seconds=CATALYST_CACHE_TTL)
+    if cached is not None:
+        return cached
+
+    result = {"earnings_date": None, "ex_div_date": None, "dividend_date": None}
+    try:
+        cal = yf.Ticker(ticker).calendar or {}
+        if not isinstance(cal, dict):
+            cal = {}
+
+        earnings_raw = cal.get("Earnings Date") or cal.get("earningsDate")
+        if earnings_raw:
+            if not isinstance(earnings_raw, (list, tuple)):
+                earnings_raw = [earnings_raw]
+            for entry in earnings_raw:
+                try:
+                    if hasattr(entry, "date"):
+                        result["earnings_date"] = entry.date()
+                    elif isinstance(entry, datetime.date):
+                        result["earnings_date"] = entry
+                    break
+                except Exception:
+                    pass
+
+        for key_name, result_key in (("Ex-Dividend Date", "ex_div_date"), ("Dividend Date", "dividend_date")):
+            raw = cal.get(key_name)
+            if raw is not None:
+                try:
+                    if hasattr(raw, "date"):
+                        result[result_key] = raw.date()
+                    elif isinstance(raw, datetime.date):
+                        result[result_key] = raw
+                except Exception:
+                    pass
+    except Exception as exc:
+        logger.debug("fetch_calendar_events failed for %s: %s", ticker, exc)
+
+    set_cached_fetch_payload("calendar", cache_key, result)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Macro indicators
+# ---------------------------------------------------------------------------
+
+def _fetch_fred_series_last_value(series_id: str) -> float | None:
+    """Download the last non-NaN value from a FRED public CSV series."""
+    url = f"https://fred.stlouisfed.org/graph/fredgraph.csv?id={series_id}"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            raw = resp.read().decode("utf-8")
+        df = pd.read_csv(io.StringIO(raw))
+        col = df.columns[-1]
+        series = pd.to_numeric(df[col], errors="coerce").dropna()
+        if series.empty:
+            return None
+        return float(series.iloc[-1])
+    except Exception as exc:
+        logger.debug("FRED fetch for %s failed: %s", series_id, exc)
+        return None
+
+
+def _fetch_yf_last_close(symbol: str) -> float | None:
+    """Return the most recent close price for a yfinance symbol."""
+    try:
+        hist = yf.Ticker(symbol).history(period="5d")
+        if hist.empty:
+            return None
+        return float(hist["Close"].dropna().iloc[-1])
+    except Exception as exc:
+        logger.debug("yfinance close fetch failed for %s: %s", symbol, exc)
+        return None
+
+
+def fetch_macro_indicators() -> dict:
+    """
+    Return a snapshot of key macro indicators used for regime assessment.
+
+    Dict keys: two_ten_spread, hy_oas_bps, vix, vix3m, vix_ratio, dxy.
+    All values are float or None.  Never raises.
+    """
+    cache_key = "latest"
+    cached = get_cached_fetch_payload("macro_indicators", cache_key, max_age_seconds=MACRO_CACHE_TTL)
+    if cached is not None:
+        return cached
+
+    two_ten = _fetch_fred_series_last_value("T10Y2Y")
+    hy_oas = _fetch_fred_series_last_value("BAMLH0A0HYM2")
+    vix = _fetch_yf_last_close("^VIX")
+    vix3m = _fetch_yf_last_close("^VIX3M")
+    dxy = _fetch_yf_last_close("DX-Y.NYB")
+
+    vix_ratio = None
+    if vix is not None and vix3m is not None and vix3m > 0:
+        vix_ratio = round(vix / vix3m, 3)
+
+    result = {
+        "two_ten_spread": two_ten,
+        "hy_oas_bps": hy_oas,
+        "vix": vix,
+        "vix3m": vix3m,
+        "vix_ratio": vix_ratio,
+        "dxy": dxy,
+    }
+    set_cached_fetch_payload("macro_indicators", cache_key, result)
+    return result
 
 
 def fetch_earnings_trend_with_retry(ticker, attempts=2):
